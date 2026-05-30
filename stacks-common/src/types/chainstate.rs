@@ -1,0 +1,534 @@
+// Copyright (C) 2013-2020 Blockstack PBC, a public benefit corporation
+// Copyright (C) 2020-2025 Stacks Open Internet Foundation
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::fmt;
+use std::io::{Read, Write};
+use std::str::FromStr;
+
+use serde::Serialize;
+use sha2::{Digest as Sha2Digest, Sha512_256};
+
+use crate::address::Error as AddressError;
+use crate::codec::{read_next, write_next, Error as CodecError, StacksMessageCodec};
+use crate::consts::{FIRST_BURNCHAIN_CONSENSUS_HASH, FIRST_STACKS_BLOCK_HASH};
+use crate::deps_common::bitcoin::util::hash::Sha256dHash;
+use crate::util::hash::{Hash160, Sha512Trunc256Sum, HASH160_ENCODED_SIZE};
+use crate::util::secp256k1::{MessageSignature, Secp256k1PrivateKey, Secp256k1PublicKey};
+use crate::util::vrf::{VRFProof, VRF_PROOF_ENCODED_SIZE};
+
+pub type StacksPublicKey = Secp256k1PublicKey;
+pub type StacksPrivateKey = Secp256k1PrivateKey;
+
+/// Hash of a Trie node.  This is a SHA2-512/256.
+#[derive(Default, Copy)]
+pub struct TrieHash(pub [u8; 32]);
+impl_array_newtype!(TrieHash, u8, 32);
+impl_array_hexstring_fmt!(TrieHash);
+impl_byte_array_newtype!(TrieHash, u8, 32);
+impl_byte_array_serde!(TrieHash);
+
+pub const TRIEHASH_ENCODED_SIZE: usize = 32;
+
+impl TrieHash {
+    /// SHA2-512/256 hash of an empty string.
+    pub const EMPTY: TrieHash = TrieHash([
+        0xc6, 0x72, 0xb8, 0xd1, 0xef, 0x56, 0xed, 0x28, 0xab, 0x87, 0xc3, 0x62, 0x2c, 0x51, 0x14,
+        0x06, 0x9b, 0xdd, 0x3a, 0xd7, 0xb8, 0xf9, 0x73, 0x74, 0x98, 0xd0, 0xc0, 0x1e, 0xce, 0xf0,
+        0x96, 0x7a,
+    ]);
+
+    #[inline]
+    pub fn from_key(k: &str) -> Self {
+        Self::from_data(k.as_bytes())
+    }
+
+    /// Create a `TrieHash` from a slice of bytes.
+    #[inline] // sha2's new(), update() and finalize() fn's are inlined; ensure we don't break the inlining boundary.
+    pub fn from_data(data: &[u8]) -> TrieHash {
+        if data.is_empty() {
+            return TrieHash::EMPTY;
+        }
+
+        let mut hasher = Sha512_256::new();
+        hasher.update(data);
+        let out = hasher.finalize().into();
+        TrieHash(out)
+    }
+
+    /// Create a `TrieHash` from an array of byte slices.
+    #[inline] // sha2's new(), update() and finalize() fn's are inlined; ensure we don't break the inlining boundary.
+    pub fn from_data_array<B: AsRef<[u8]>>(data: &[B]) -> TrieHash {
+        if data.is_empty() {
+            return TrieHash::EMPTY;
+        }
+
+        let mut hasher = Sha512_256::new();
+
+        for item in data.iter() {
+            hasher.update(item);
+        }
+        let out = hasher.finalize().into();
+        TrieHash(out)
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct BurnchainHeaderHash(pub [u8; 32]);
+impl_array_newtype!(BurnchainHeaderHash, u8, 32);
+impl_array_hexstring_fmt!(BurnchainHeaderHash);
+impl_byte_array_newtype!(BurnchainHeaderHash, u8, 32);
+
+pub struct BlockHeaderHash(pub [u8; 32]);
+impl_array_newtype!(BlockHeaderHash, u8, 32);
+impl_array_hexstring_fmt!(BlockHeaderHash);
+impl_byte_array_newtype!(BlockHeaderHash, u8, 32);
+impl_byte_array_serde!(BlockHeaderHash);
+pub const BLOCK_HEADER_HASH_ENCODED_SIZE: usize = 32;
+
+impl slog::Value for BlockHeaderHash {
+    fn serialize(
+        &self,
+        _record: &slog::Record,
+        key: slog::Key,
+        serializer: &mut dyn slog::Serializer,
+    ) -> slog::Result {
+        serializer.emit_arguments(key, &format_args!("{self}"))
+    }
+}
+
+/// Identifier used to identify "sortitions" in the
+///  SortitionDB. A sortition is the collection of
+///  valid burnchain operations (and any dependent
+///  variables, e.g., the sortition winner, the
+///  consensus hash, the next VRF key)
+pub struct SortitionId(pub [u8; 32]);
+impl_array_newtype!(SortitionId, u8, 32);
+impl_array_hexstring_fmt!(SortitionId);
+impl_byte_array_newtype!(SortitionId, u8, 32);
+
+pub struct VRFSeed(pub [u8; 32]);
+impl_array_newtype!(VRFSeed, u8, 32);
+impl_array_hexstring_fmt!(VRFSeed);
+impl_byte_array_newtype!(VRFSeed, u8, 32);
+impl_byte_array_serde!(VRFSeed);
+pub const VRF_SEED_ENCODED_SIZE: u32 = 32;
+
+/// Identifier used to identify Proof-of-Transfer forks
+///  (or Rewards Cycle forks). These identifiers are opaque
+///  outside of the PoX DB, however, they are sufficient
+///  to uniquely identify a "sortition" when paired with
+///  a burn header hash
+// TODO: Vec<bool> is an aggressively unoptimized implementation,
+//       replace with a real bitvec
+#[derive(Clone, Debug, PartialEq)]
+pub struct PoxId(Vec<bool>);
+
+impl SortitionId {
+    pub fn stubbed(from: &BurnchainHeaderHash) -> SortitionId {
+        SortitionId::new(from, &PoxId::stubbed())
+    }
+
+    pub fn new(bhh: &BurnchainHeaderHash, pox: &PoxId) -> SortitionId {
+        if pox == &PoxId::stubbed() {
+            SortitionId(bhh.0)
+        } else {
+            let mut hasher = Sha512_256::new();
+            hasher.update(bhh);
+            write!(hasher, "{pox}").expect("Failed to deserialize PoX ID into the hasher");
+            let h = Sha512Trunc256Sum::from_hasher(hasher);
+            let s = SortitionId(h.0);
+            // The `test_debug!` macro will expand to nothing on release builds.
+            #[allow(clippy::let_and_return)]
+            {
+                test_debug!("SortitionId({s}) = {bhh} + {pox}");
+                s
+            }
+        }
+    }
+}
+
+impl PoxId {
+    pub fn new(contents: Vec<bool>) -> Self {
+        PoxId(contents)
+    }
+
+    pub fn initial() -> PoxId {
+        PoxId(vec![true])
+    }
+
+    pub fn from_bools(bools: Vec<bool>) -> PoxId {
+        PoxId(bools)
+    }
+
+    pub fn extend_with_present_block(&mut self) {
+        self.0.push(true);
+    }
+    pub fn extend_with_not_present_block(&mut self) {
+        self.0.push(false);
+    }
+
+    pub fn stubbed() -> PoxId {
+        PoxId(vec![])
+    }
+
+    pub fn has_ith_anchor_block(&self, i: usize) -> bool {
+        if i >= self.0.len() {
+            false
+        } else {
+            self.0[i]
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn bit_slice(&self, start: usize, len: usize) -> (Vec<u8>, u64) {
+        let mut ret = vec![0x00];
+        let mut count = 0;
+        for bit in start..(start + len) {
+            if bit >= self.len() {
+                break;
+            }
+            let i = bit - start;
+            if i > 0 && i.is_multiple_of(8) {
+                ret.push(0x00);
+            }
+
+            let sz = ret.len() - 1;
+            if self.0[bit] {
+                ret[sz] |= 1 << (i % 8);
+            }
+            count += 1;
+        }
+        (ret, count)
+    }
+
+    pub fn num_inventory_reward_cycles(&self) -> usize {
+        self.0.len().saturating_sub(1)
+    }
+
+    pub fn has_prefix(&self, prefix: &PoxId) -> bool {
+        if self.len() < prefix.len() {
+            return false;
+        }
+
+        for i in 0..prefix.len() {
+            if self.0[i] != prefix.0[i] {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    pub fn into_inner(self) -> Vec<bool> {
+        self.0
+    }
+}
+
+impl FromStr for PoxId {
+    type Err = &'static str;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut result = Vec::with_capacity(s.len());
+        for c in s.chars() {
+            match c {
+                '0' => result.push(false),
+                '1' => result.push(true),
+                _ => return Err("Unexpected character in PoX ID serialization"),
+            }
+        }
+        Ok(PoxId::new(result))
+    }
+}
+
+impl fmt::Display for PoxId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for val in self.0.iter() {
+            write!(f, "{}", if *val { 1 } else { 0 })?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
+pub struct StacksAddress {
+    version: u8,
+    bytes: Hash160,
+}
+
+impl StacksAddress {
+    pub fn new(version: u8, hash: Hash160) -> Result<StacksAddress, AddressError> {
+        if version >= 32 {
+            return Err(AddressError::InvalidVersion(version));
+        }
+
+        Ok(StacksAddress {
+            version,
+            bytes: hash,
+        })
+    }
+
+    // NEVER, EVER use this in ANY production code!
+    // It should never be possible to construct an address with a version greater than 31
+    #[cfg(any(test, feature = "testing"))]
+    pub fn new_unsafe(version: u8, bytes: Hash160) -> Self {
+        Self { version, bytes }
+    }
+
+    pub fn version(&self) -> u8 {
+        self.version
+    }
+
+    pub fn bytes(&self) -> &Hash160 {
+        &self.bytes
+    }
+
+    pub fn destruct(self) -> (u8, Hash160) {
+        (self.version, self.bytes)
+    }
+
+    /// Because addresses are crockford-32 encoded, the version must be a 5-bit number.
+    /// Historically, it was possible to construct invalid addresses given that we use a u8 to
+    /// represent the version.  This function is used to validate addresses before relying on their
+    /// version.
+    pub fn has_valid_version(&self) -> bool {
+        self.version < 32
+    }
+}
+
+impl StacksMessageCodec for StacksAddress {
+    fn consensus_serialize<W: Write>(&self, fd: &mut W) -> Result<(), CodecError> {
+        write_next(fd, &self.version)?;
+        fd.write_all(self.bytes.as_bytes())
+            .map_err(CodecError::WriteError)
+    }
+
+    fn consensus_deserialize<R: Read>(fd: &mut R) -> Result<StacksAddress, CodecError> {
+        let version: u8 = read_next(fd)?;
+        if version >= 32 {
+            return Err(CodecError::DeserializeError(
+                "Address version byte must be in range 0 to 31".into(),
+            ));
+        }
+        let hash160: Hash160 = read_next(fd)?;
+        Ok(StacksAddress {
+            version,
+            bytes: hash160,
+        })
+    }
+}
+
+pub const STACKS_ADDRESS_ENCODED_SIZE: u32 = 1 + HASH160_ENCODED_SIZE;
+
+/// How much work has gone into this chain so far?
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct StacksWorkScore {
+    pub burn: u64, // number of burn tokens destroyed
+    pub work: u64, // in Stacks, "work" == the length of the fork
+}
+
+pub struct StacksBlockId(pub [u8; 32]);
+impl_array_newtype!(StacksBlockId, u8, 32);
+impl_array_hexstring_fmt!(StacksBlockId);
+impl_byte_array_newtype!(StacksBlockId, u8, 32);
+impl_byte_array_serde!(StacksBlockId);
+
+/// A newtype for `StacksBlockId` that indicates a block is a tenure-change
+/// block. This helps to explicitly differentiate tenure-change blocks in the
+/// code.
+pub struct TenureBlockId(pub StacksBlockId);
+impl From<StacksBlockId> for TenureBlockId {
+    fn from(id: StacksBlockId) -> TenureBlockId {
+        TenureBlockId(id)
+    }
+}
+
+pub struct ConsensusHash(pub [u8; 20]);
+impl_array_newtype!(ConsensusHash, u8, 20);
+impl_array_hexstring_fmt!(ConsensusHash);
+impl_byte_array_newtype!(ConsensusHash, u8, 20);
+impl_byte_array_serde!(ConsensusHash);
+
+pub const CONSENSUS_HASH_ENCODED_SIZE: u32 = 20;
+
+impl StacksBlockId {
+    pub fn new(
+        sortition_consensus_hash: &ConsensusHash,
+        block_hash: &BlockHeaderHash,
+    ) -> StacksBlockId {
+        let mut hasher = Sha512_256::new();
+        hasher.update(block_hash);
+        hasher.update(sortition_consensus_hash);
+
+        let h = Sha512Trunc256Sum::from_hasher(hasher);
+        StacksBlockId(h.0)
+    }
+
+    pub fn first_mined() -> StacksBlockId {
+        StacksBlockId::new(&FIRST_BURNCHAIN_CONSENSUS_HASH, &FIRST_STACKS_BLOCK_HASH)
+    }
+}
+
+impl StacksWorkScore {
+    /// Stacks work score for the first-mined block
+    pub fn initial() -> StacksWorkScore {
+        StacksWorkScore {
+            burn: 0,
+            work: 1, // block 0 is the boot code
+        }
+    }
+
+    /// Stacks work score for the boot code block
+    pub fn genesis() -> StacksWorkScore {
+        StacksWorkScore { burn: 0, work: 0 }
+    }
+}
+
+impl StacksMessageCodec for VRFProof {
+    fn consensus_serialize<W: Write>(&self, fd: &mut W) -> Result<(), CodecError> {
+        fd.write_all(&self.to_bytes())
+            .map_err(CodecError::WriteError)
+    }
+
+    fn consensus_deserialize<R: Read>(fd: &mut R) -> Result<VRFProof, CodecError> {
+        let mut bytes = [0u8; VRF_PROOF_ENCODED_SIZE as usize];
+        fd.read_exact(&mut bytes).map_err(CodecError::ReadError)?;
+        let res = VRFProof::from_slice(&bytes).ok_or(CodecError::DeserializeError(
+            "Failed to parse VRF proof".to_string(),
+        ))?;
+
+        Ok(res)
+    }
+}
+
+impl StacksMessageCodec for StacksWorkScore {
+    fn consensus_serialize<W: Write>(&self, fd: &mut W) -> Result<(), CodecError> {
+        write_next(fd, &self.burn)?;
+        write_next(fd, &self.work)?;
+        Ok(())
+    }
+
+    fn consensus_deserialize<R: Read>(fd: &mut R) -> Result<StacksWorkScore, CodecError> {
+        let burn = read_next(fd)?;
+        let work = read_next(fd)?;
+
+        Ok(StacksWorkScore { burn, work })
+    }
+}
+
+impl_byte_array_message_codec!(TrieHash, TRIEHASH_ENCODED_SIZE as u32);
+impl_byte_array_message_codec!(Sha512Trunc256Sum, 32);
+
+impl_byte_array_message_codec!(ConsensusHash, 20);
+impl_byte_array_message_codec!(Hash160, 20);
+impl_byte_array_message_codec!(BurnchainHeaderHash, 32);
+impl_byte_array_message_codec!(BlockHeaderHash, 32);
+impl_byte_array_message_codec!(StacksBlockId, 32);
+impl_byte_array_message_codec!(MessageSignature, 65);
+
+impl BlockHeaderHash {
+    pub fn to_hash160(&self) -> Hash160 {
+        Hash160::from_sha256(&self.0)
+    }
+
+    pub fn from_serializer<C: StacksMessageCodec>(
+        serializer: &C,
+    ) -> Result<BlockHeaderHash, CodecError> {
+        let mut hasher = Sha512_256::new();
+        serializer.consensus_serialize(&mut hasher)?;
+        let hash = Sha512Trunc256Sum::from_hasher(hasher);
+        Ok(BlockHeaderHash(hash.0))
+    }
+
+    pub fn from_serialized_header(buf: &[u8]) -> BlockHeaderHash {
+        let h = Sha512Trunc256Sum::from_data(buf);
+        BlockHeaderHash(h.to_bytes())
+    }
+}
+
+impl BurnchainHeaderHash {
+    /// Instantiate a burnchain block hash from a Bitcoin block header
+    pub fn from_bitcoin_hash(bitcoin_hash: &Sha256dHash) -> BurnchainHeaderHash {
+        // NOTE: Sha256dhash is the same size as BurnchainHeaderHash, so this should never panic
+        // Bitcoin stores its hashes in big-endian form, but our codebase stores them in
+        // little-endian form (which is also how most libraries work).
+        BurnchainHeaderHash::from_bytes_be(bitcoin_hash.as_bytes()).unwrap()
+    }
+
+    pub fn to_bitcoin_hash(&self) -> Sha256dHash {
+        let mut buf = self.0;
+        buf.reverse();
+        Sha256dHash(buf)
+    }
+
+    pub fn zero() -> BurnchainHeaderHash {
+        BurnchainHeaderHash([0x00; 32])
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn from_test_data(
+        block_height: u64,
+        index_root: &TrieHash,
+        noise: u64,
+    ) -> BurnchainHeaderHash {
+        use crate::util::hash::DoubleSha256;
+
+        let mut bytes = vec![];
+        bytes.extend_from_slice(&block_height.to_be_bytes());
+        bytes.extend_from_slice(index_root.as_bytes());
+        bytes.extend_from_slice(&noise.to_be_bytes());
+        let h = DoubleSha256::from_data(&bytes[..]);
+        BurnchainHeaderHash(h.to_bytes())
+    }
+}
+
+impl VRFSeed {
+    /// First-ever VRF seed from the genesis block.  It's all 0's
+    pub fn initial() -> VRFSeed {
+        VRFSeed::from_hex("0000000000000000000000000000000000000000000000000000000000000000")
+            .unwrap()
+    }
+
+    pub fn from_proof(proof: &VRFProof) -> VRFSeed {
+        let h = Sha512Trunc256Sum::from_data(&proof.to_bytes());
+        VRFSeed(h.0)
+    }
+
+    pub fn is_from_proof(&self, proof: &VRFProof) -> bool {
+        self.as_bytes().to_vec() == VRFSeed::from_proof(proof).as_bytes().to_vec()
+    }
+}
+
+impl StacksMessageCodec for (ConsensusHash, BurnchainHeaderHash) {
+    fn consensus_serialize<W: Write>(&self, fd: &mut W) -> Result<(), CodecError> {
+        write_next(fd, &self.0)?;
+        write_next(fd, &self.1)?;
+        Ok(())
+    }
+
+    fn consensus_deserialize<R: Read>(
+        fd: &mut R,
+    ) -> Result<(ConsensusHash, BurnchainHeaderHash), CodecError> {
+        let consensus_hash: ConsensusHash = read_next(fd)?;
+        let burn_header_hash: BurnchainHeaderHash = read_next(fd)?;
+        Ok((consensus_hash, burn_header_hash))
+    }
+}
