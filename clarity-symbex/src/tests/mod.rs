@@ -219,6 +219,7 @@ fn assert_halts(mut conts: Vec<Continuation>, halts: Vec<Halt>) {
                 break;
             }
         }
+
         let i = found_cont.expect(&format!("halting condition {:?} state {:?} not found in continuations", h.predicate.clone().simplify().unwrap(), h.formula.clone().simplify().unwrap()));
         conts.remove(i);
     }
@@ -1503,9 +1504,35 @@ fn test_halt_var_get_set_if_tree() {
         None
     ).unwrap();
     let termination_states = symbex.eval_all().unwrap();
-    for t in termination_states.into_iter() {
-        info!("termination state: ==================================\n{}\n", &t.rollup());
+    for t in termination_states.iter() {
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
     }
+
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(pand(vec![peq(rem(var_get(su("v")), cu(2)), cu(0)), peq(rem(var_get(su("w")), cu(2)), cu(0))]))
+            .formula(cl(vec![valu(101), valu(101)]))
+            .var("v", cu(101))
+            .var("w", cu(101)),
+
+        Halt::new()
+            .pred(pand(vec![peq(rem(var_get(su("v")), cu(2)), cu(0)), pnot(peq(rem(var_get(su("w")), cu(2)), cu(0)))]))
+            .formula(cl(vec![valu(201), valu(200)]))
+            .var("v", cu(201))
+            .var("w", cu(200)),
+
+        Halt::new()
+            .pred(pand(vec![pnot(peq(rem(var_get(su("v")), cu(2)), cu(0))), peq(rem(var_get(su("w")), cu(2)), cu(0))]))
+            .formula(cl(vec![valu(300), valu(301)]))
+            .var("v", cu(300))
+            .var("w", cu(301)),
+            
+        Halt::new()
+            .pred(pand(vec![pnot(peq(rem(var_get(su("v")), cu(2)), cu(0))), pnot(peq(rem(var_get(su("w")), cu(2)), cu(0)))]))
+            .formula(cl(vec![valu(400), valu(400)]))
+            .var("v", cu(400))
+            .var("w", cu(400))
+    ]);
 }
 
 #[test]
@@ -1529,9 +1556,35 @@ fn test_halt_var_get_set_tower_if_tree() {
     ).unwrap();
 
     let termination_states = symbex.eval_all().unwrap();
-    for t in termination_states.into_iter() {
-        info!("termination state: ==================================\n{}\n", &t.rollup());
+    for t in termination_states.iter() {
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
     }
+
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(pand(vec![peq(rem(var_get(su("v")), cu(2)), cu(0)), peq(rem(var_get(su("w")), cu(2)), cu(0))]))
+            .formula(add(vec![cu(6), var_get(su("w"))]))
+            .var("v", add(vec![cu(6), var_get(su("w"))]))
+            .var("w", add(vec![cu(5), var_get(su("w"))])),
+
+        Halt::new()
+            .pred(pand(vec![peq(rem(var_get(su("v")), cu(2)), cu(0)), pnot(peq(rem(var_get(su("w")), cu(2)), cu(0)))]))
+            .formula(add(vec![cu(24), var_get(su("w"))]))
+            .var("v", add(vec![cu(24), var_get(su("w"))]))
+            .var("w", add(vec![cu(23), var_get(su("w"))])),
+
+        Halt::new()
+            .pred(pand(vec![pnot(peq(rem(var_get(su("v")), cu(2)), cu(0))), peq(rem(var_get(su("w")), cu(2)), cu(0))]))
+            .formula(add(vec![cu(42), var_get(su("w"))]))
+            .var("v", add(vec![cu(42), var_get(su("w"))]))
+            .var("w", add(vec![cu(32), var_get(su("w"))])),
+
+        Halt::new()
+            .pred(pand(vec![pnot(peq(rem(var_get(su("v")), cu(2)), cu(0))), pnot(peq(rem(var_get(su("w")), cu(2)), cu(0)))]))
+            .formula(add(vec![cu(60), var_get(su("w"))]))
+            .var("v", add(vec![cu(60), var_get(su("w"))]))
+            .var("w", add(vec![cu(50), var_get(su("w"))]))
+    ]);
 }
 
 #[test]
@@ -1558,9 +1611,45 @@ fn test_halt_var_get_set_if_sequence() {
         None
     ).unwrap();
     let termination_states = symbex.eval_all().unwrap();
-    for t in termination_states.into_iter() {
-        info!("termination state: ==================================\n{}\n", &t.rollup());
+    for t in termination_states.iter() {
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
     }
+
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(pand(vec![
+                peq(rem(var_get(su("v")), cu(2)), cu(0)),
+                peq(rem(var_get(su("v")), cu(3)), cu(0)),
+                peq(rem(var_get(su("v")), cu(5)), cu(0))
+            ]))
+            .formula(lcons(vec![var_get(su("v")), cu(40)]))
+            .var("w", cu(40)),
+
+        Halt::new()
+            .pred(pand(vec![
+                peq(rem(var_get(su("v")), cu(2)), cu(0)),
+                peq(rem(var_get(su("v")), cu(3)), cu(0)),
+                pnot(peq(rem(var_get(su("v")), cu(5)), cu(0)))
+            ]))
+            .formula(cl(vec![valu(6), valu(30)]))
+            .var("v", cu(6))
+            .var("w", cu(30)),
+
+        Halt::new()
+            .pred(pand(vec![
+                peq(rem(var_get(su("v")), cu(2)), cu(0)),
+                pnot(peq(rem(var_get(su("v")), cu(3)), cu(0))),
+            ]))
+            .formula(cl(vec![valu(5), valu(40)]))
+            .var("v", cu(5))
+            .var("w", cu(40)),
+
+        Halt::new()
+            .pred(pnot(peq(rem(var_get(su("v")), cu(2)), cu(0))))
+            .formula(cl(vec![valu(5), valu(40)]))
+            .var("v", cu(5))
+            .var("w", cu(40)),
+    ])
 }
 
 #[test]
@@ -1568,14 +1657,17 @@ fn test_halt_simplify_var_get_const() {
     let symop = SymOp::LoadedDataVariable("foo".try_into().unwrap(), Box::new(SymOp::Constant(Value::UInt(3))));
     let simplified = symop.clone().simplify().unwrap();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, *cu(3));
 
     let symop = SymOp::Modulo(Box::new(symop.clone()), Box::new(SymOp::Constant(Value::UInt(3))));
     let simplified = symop.clone().simplify().unwrap();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, *cu(0));
     
     let symop = SymOp::Equals(vec![Box::new(symop.clone()), Box::new(SymOp::Constant(Value::UInt(0)))]);
     let simplified = symop.clone().simplify().unwrap();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, *cb(true));
 }
 
 #[test]
@@ -1594,9 +1686,16 @@ fn test_halt_let_bind() {
         None
     ).unwrap();
     let termination_states = symbex.eval_all().unwrap();
-    for t in termination_states.into_iter() {
-        info!("termination state: ==================================\n{}\n", &t.rollup());
+    for t in termination_states.iter() {
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
     }
+
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(pt())
+            .formula(cb(true))
+            .var("v", add(vec![cu(3), var_get(su("v"))]))
+    ]);
 }
 
 #[test]
@@ -1614,9 +1713,21 @@ fn test_halt_if_let_bind() {
         None
     ).unwrap();
     let termination_states = symbex.eval_all().unwrap();
-    for t in termination_states.into_iter() {
-        info!("termination state: ==================================\n{}\n", &t.rollup());
+    for t in termination_states.iter() {
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
     }
+
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(peq(rem(var_get(su("v")), cu(2)), cu(0)))
+            .formula(cb(true))
+            .var("v", add(vec![cu(1), var_get(su("v"))])),
+        
+        Halt::new()
+            .pred(pnot(peq(rem(var_get(su("v")), cu(2)), cu(0))))
+            .formula(cb(true))
+            .var("v", add(vec![cu(2), var_get(su("v"))]))
+    ]);
 }
 
 #[test]
@@ -1635,8 +1746,20 @@ fn test_halt_if_let_var_set_bind() {
         None
     ).unwrap();
     let termination_states = symbex.eval_all().unwrap();
-    for t in termination_states.into_iter() {
+    for t in termination_states.iter() {
         info!("{}", t.trace());
-        info!("termination state: ==================================\n{}\n", &t.rollup());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
     }
+
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(peq(rem(var_get(su("v")), cu(2)), cu(0)))
+            .formula(cb(true))
+            .var("v", cu(10)),
+
+        Halt::new()
+            .pred(pnot(peq(rem(var_get(su("v")), cu(2)), cu(0))))
+            .formula(cb(true))
+            .var("v", add(vec![cu(2), var_get(su("v"))]))
+    ]);
 }
