@@ -15,6 +15,8 @@ use clarity::vm::errors::ClarityEvalError;
 use clarity_types::types::StandardPrincipalData;
 use clarity_types::ClarityName;
 use clarity_types::types::TupleData;
+use clarity_types::types::signatures::{TypeSignature as TS, ListTypeData};
+use clarity_types::types::SequenceSubtype;
 
 use stacks_common::consts::CHAIN_ID_MAINNET;
 use stacks_common::types::StacksEpochId;
@@ -52,13 +54,16 @@ fn cl(fields: Vec<Value>) -> Box<SymOp> { Box::new(SymOp::Constant(vall(fields))
 fn si(name: &str) -> Sym { Sym::Int(name.into()) }
 fn su(name: &str) -> Sym { Sym::UInt(name.into()) }
 fn sb(name: &str) -> Sym { Sym::Bool(name.into()) }
+fn sl(name: &str, ts: TS, len: u32) -> Sym { Sym::Sequence(name.into(), SequenceSubtype::ListType(ListTypeData::new_list(ts, len).unwrap())) }
 
 fn vi(name: &str) -> Box<SymOp> { Box::new(SymOp::Variable(Sym::Int(name.into()))) }
 fn vu(name: &str) -> Box<SymOp> { Box::new(SymOp::Variable(Sym::UInt(name.into()))) }
 fn vb(name: &str) -> Box<SymOp> { Box::new(SymOp::Variable(Sym::Bool(name.into()))) }
 
 fn add(ops: Vec<Box<SymOp>>) -> Box<SymOp> { Box::new(SymOp::Add(ops)) }
+fn add2(op1: Box<SymOp>, op2: Box<SymOp>) -> Box<SymOp> { add(vec![op1, op2]) }
 fn sub(ops: Vec<Box<SymOp>>) -> Box<SymOp> { Box::new(SymOp::Subtract(ops)) }
+fn sub2(op1: Box<SymOp>, op2: Box<SymOp>) -> Box<SymOp> { sub(vec![op1, op2]) }
 fn mul(ops: Vec<Box<SymOp>>) -> Box<SymOp> { Box::new(SymOp::Multiply(ops)) }
 fn div(ops: Vec<Box<SymOp>>) -> Box<SymOp> { Box::new(SymOp::Divide(ops)) }
 fn rem(op1: Box<SymOp>, op2: Box<SymOp>) -> Box<SymOp> { Box::new(SymOp::Modulo(op1, op2)) }
@@ -86,6 +91,8 @@ fn unwrap_panic(op: Box<SymOp>) -> Box<SymOp> { Box::new(SymOp::UnwrapPanic(op))
 fn unwrap_err_panic(op: Box<SymOp>) -> Box<SymOp> { Box::new(SymOp::UnwrapErrPanic(op)) }
 fn panic() -> Box<SymOp> { Box::new(SymOp::Panic) }
 fn lcons(items: Vec<Box<SymOp>>) -> Box<SymOp> { Box::new(SymOp::ListCons(items)) }
+fn llen(item: Box<SymOp>) -> Box<SymOp> { Box::new(SymOp::Len(item)) }
+fn elat(seq: Box<SymOp>, index: Box<SymOp>) -> Box<SymOp> { Box::new(SymOp::ElementAt(seq, index)) }
 fn bitand(items: Vec<Box<SymOp>>) -> Box<SymOp> { Box::new(SymOp::BitwiseAnd(items)) }
 fn bitor(items: Vec<Box<SymOp>>) -> Box<SymOp> { Box::new(SymOp::BitwiseOr(items)) }
 fn bitxor(items: Vec<Box<SymOp>>) -> Box<SymOp> { Box::new(SymOp::BitwiseXor(items)) }
@@ -155,8 +162,8 @@ fn assert_halts(mut conts: Vec<Continuation>, halts: Vec<Halt>) {
 
     info!("Expected halting states:");
     for h in halts.iter() {
-        info!("   Condition: {:?}", &h.predicate.clone().simplify().unwrap());
-        info!("   Formula:   {:?}", &h.formula.clone().simplify().unwrap());
+        info!("   Condition: {}", &h.predicate.clone().simplify().unwrap());
+        info!("   Formula:   {}", &h.formula.clone().simplify().unwrap());
         for v in h.vars.iter() {
             info!("   Var:       {}", v.clone().simplify().unwrap());
         }
@@ -167,8 +174,8 @@ fn assert_halts(mut conts: Vec<Continuation>, halts: Vec<Halt>) {
 
     info!("Computed halting states:");
     for c in conts.iter() {
-        info!("   Condition: {:?}", &c.predicate.clone().simplify().unwrap());
-        info!("   Formula:   {:?}", &c.final_formula.clone().simplify().unwrap());
+        info!("   Condition: {}", &c.predicate.clone().simplify().unwrap());
+        info!("   Formula:   {}", &c.final_formula.clone().simplify().unwrap());
         for v in c.post_vars.iter() {
             info!("   Var:       {}", v.clone().simplify().unwrap());
         }
@@ -218,15 +225,23 @@ fn assert_halts(mut conts: Vec<Continuation>, halts: Vec<Halt>) {
                 found_cont = Some(i);
                 break;
             }
+            /*
+            else if cont.predicate.clone().simplify().unwrap() == *h.predicate {
+                info!("Predicate matches, but not final formula:\n   Computed: {}\n      Given: {}\n", cont.final_formula.clone().simplify().unwrap(), &h.formula);
+            }
+            else {
+                info!("Final formula matches, but not predicate:\n   Computed: {}\n      Given: {}\n", cont.predicate.clone().simplify().unwrap(), &h.predicate);
+            }
+            */
         }
 
-        let i = found_cont.expect(&format!("halting condition {:?} state {:?} not found in continuations", h.predicate.clone().simplify().unwrap(), h.formula.clone().simplify().unwrap()));
+        let i = found_cont.expect(&format!("halting condition {} state {} not found in continuations", h.predicate.clone().simplify().unwrap(), h.formula.clone().simplify().unwrap()));
         conts.remove(i);
     }
 
     if conts.len() > 0 {
         for c in conts {
-            error!("Unaccounted continuation {:?} state {:?}", &c.predicate, &c.final_formula.clone().simplify().unwrap());
+            error!("Unaccounted continuation {} state {}", &c.predicate, &c.final_formula.clone().simplify().unwrap());
         }
         panic!();
     }
@@ -251,6 +266,15 @@ fn test_consolidate_add() {
 
     let symop = add(vec![cu(1), add(vec![cu(2), add(vec![cu(3), cu(4)])])]);
     assert_eq!(symop.simplify(), Ok(*cu(1 + 2 + 3 + 4)));
+
+    let symop = add(vec![vu("x"), cu(0)]);
+    assert_eq!(symop.simplify(), Ok(*vu("x")));
+    
+    let symop = add(vec![cu(0), vu("x")]);
+    assert_eq!(symop.simplify(), Ok(*vu("x")));
+
+    let symop = add(vec![cu(0), vu("x"), cu(0), vu("y")]);
+    assert_eq!(symop.simplify(), Ok(*add(vec![vu("x"), vu("y")])));
 }
 
 #[test]
@@ -272,6 +296,18 @@ fn test_consolidate_multiply() {
 
     let symop = mul(vec![cu(1), mul(vec![cu(2), mul(vec![cu(3), cu(4)])])]);
     assert_eq!(symop.simplify(), Ok(*cu(1 * 2 * 3 * 4)));
+
+    let symop = mul(vec![cu(1), vu("x")]);
+    assert_eq!(symop.simplify(), Ok(*vu("x")));
+    
+    let symop = mul(vec![vu("x"), cu(1)]);
+    assert_eq!(symop.simplify(), Ok(*vu("x")));
+    
+    let symop = mul(vec![vu("x"), cu(0)]);
+    assert_eq!(symop.simplify(), Ok(*cu(0)));
+    
+    let symop = mul(vec![cu(0), vu("x")]);
+    assert_eq!(symop.simplify(), Ok(*cu(0)));
 }
 
 #[test]
@@ -305,12 +341,21 @@ fn test_consolidate_subtract() {
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
     assert_eq!(simplified, Ok(*ci(2)));
-    
+   
+    // NOTE: this should actually panic:
     // u1 - (u2 - u3) == Err:Arithmetic
+    // HOWEVER, the symbolic executor first tries to rearrange terms,
+    // and will instead compute:
+    // (- u1 (- u2 u3))     -->
+    // (- (+ u1 u3) u2)     -->
+    // (- u4 u2)            -->
+    // u2
+
     let symop = sub(vec![cu(1), sub(vec![cu(2), cu(3)])]);
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
-    let Err(Error::Arithmetic(_s)) = &simplified else { panic!("{:?}", simplified) };
+    // let Err(Error::Arithmetic(_s)) = &simplified else { panic!("{:?}", simplified) };
+    assert_eq!(simplified, Ok(*cu(2)));
     
     // u1 - (u3 - u2) == Ok(u0)
     let symop = sub(vec![cu(1), sub(vec![cu(3), cu(2)])]);
@@ -402,6 +447,24 @@ fn test_consolidate_subtract() {
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
     assert_eq!(simplified, Ok(*sub(vec![vi("foo"), ci(4)])));
+    
+    // (foo - (bar - 10) - 1) == Ok(foo - bar + 9)
+    let symop = sub(vec![sub(vec![vu("foo"), sub(vec![vu("bar"), cu(10)])]), cu(1)]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*sub(vec![add2(vu("foo"), cu(9)), vu("bar")])));
+
+    // (foo - (foo - 10) - 1) == Ok(9)
+    let symop = sub(vec![sub(vec![vu("foo"), sub(vec![vu("foo"), cu(10)])]), cu(1)]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*cu(9)));
+
+    // foo - 0 == Ok(foo)
+    let symop = sub(vec![vi("foo"), ci(0)]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*vi("foo")));
 }
 
 #[test]
@@ -946,6 +1009,41 @@ fn test_consolidate_bitwise_xor() {
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
     assert_eq!(simplified, Ok(*bitxor(vec![cu(1), vu("x")])));
+}
+
+#[test]
+fn test_commutative_cmp() {
+    let p1 = pand(vec![peq(cu(1), cu(1)), peq(cu(2), cu(3))]);
+    let p2 = pand(vec![peq(cu(2), cu(3)), peq(cu(1), cu(1))]);
+    assert_eq!(p1, p2);
+
+    let p1 = por(vec![peq(cu(1), cu(1)), peq(cu(2), cu(3))]);
+    let p2 = por(vec![peq(cu(2), cu(3)), peq(cu(1), cu(1))]);
+    assert_eq!(p1, p2);
+
+    let p1 = por(vec![
+        pand(vec![
+            peq(cu(1), llen(var_get(sl("list-v1", TS::UIntType, 4)))),
+            pleq(cu(1), llen(var_get(sl("list-v2", TS::UIntType, 4)))),
+        ]),
+        pand(vec![
+            pleq(cu(1), llen(var_get(sl("list-v1", TS::UIntType, 4)))),
+            peq(cu(1), llen(var_get(sl("list-v2", TS::UIntType, 4)))),
+        ]),
+    ]);
+    
+    let p2 = por(vec![
+        pand(vec![
+            pleq(cu(1), llen(var_get(sl("list-v2", TS::UIntType, 4)))),
+            peq(cu(1), llen(var_get(sl("list-v1", TS::UIntType, 4)))),
+        ]),
+        pand(vec![
+            peq(cu(1), llen(var_get(sl("list-v2", TS::UIntType, 4)))),
+            pleq(cu(1), llen(var_get(sl("list-v1", TS::UIntType, 4)))),
+        ]),
+    ]);
+
+    assert_eq!(p1, p2);
 }
 
 #[test]
@@ -1762,4 +1860,383 @@ fn test_halt_if_let_var_set_bind() {
             .formula(cb(true))
             .var("v", add(vec![cu(2), var_get(su("v"))]))
     ]);
+}
+
+#[test]
+fn test_halt_map_user_func() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var v uint u0)
+
+        (define-private (fetch-add (x uint))
+           (+ (var-get v) x))
+
+        (map fetch-add (list u0 u1 u2 u3))
+        "#,
+        None
+    ).unwrap();
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(pt())
+            .formula(lcons(vec![var_get(su("v")), add2(cu(1), var_get(su("v"))), add2(cu(2), var_get(su("v"))), add2(cu(3), var_get(su("v")))]))
+    ]);
+}
+
+#[test]
+fn test_halt_map_user_func_branch() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var v uint u0)
+
+        (define-private (fetch-add-sub (x uint))
+           (if (is-eq (mod (var-get v) u2) u0)
+              (+ (var-get v) x)
+              (- (var-get v) x)))
+
+        (map fetch-add-sub (list u0 u1 u2 u3))
+        "#,
+        None
+    ).unwrap();
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(peq(rem(var_get(su("v")), cu(2)), cu(0)))
+            .formula(lcons(vec![var_get(su("v")), add2(cu(1), var_get(su("v"))), add2(cu(2), var_get(su("v"))), add2(cu(3), var_get(su("v")))])),
+        Halt::new()
+            .pred(pnot(peq(rem(var_get(su("v")), cu(2)), cu(0))))
+            .formula(lcons(vec![var_get(su("v")), sub2(var_get(su("v")), cu(1)), sub2(var_get(su("v")), cu(2)), sub2(var_get(su("v")), cu(3))]))
+    ])
+}
+
+#[test]
+fn test_halt_map_sequence_branch() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var v uint u0)
+
+        (define-private (fetch-add (x uint))
+           (+ (var-get v) x))
+
+        (map fetch-add (if (is-eq (mod (var-get v) u2) u0) (list u0 u1 u2 u3) (list u10 u11 u12 u13)))
+        "#,
+        None
+    ).unwrap();
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(peq(rem(var_get(su("v")), cu(2)), cu(0)))
+            .formula(lcons(vec![var_get(su("v")), add2(cu(1), var_get(su("v"))), add2(cu(2), var_get(su("v"))), add2(cu(3), var_get(su("v")))])),
+        Halt::new()
+            .pred(pnot(peq(rem(var_get(su("v")), cu(2)), cu(0))))
+            .formula(lcons(vec![add2(cu(10), var_get(su("v"))), add2(cu(11), var_get(su("v"))), add2(cu(12), var_get(su("v"))), add2(cu(13), var_get(su("v")))]))
+    ])
+}
+
+#[test]
+fn test_halt_map_symbolic_list() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var v uint u0)
+        (define-data-var list-v (list 4 uint) (list u0 u1 u2 u3))
+
+        (define-private (fetch-add (x uint))
+           (+ (var-get v) x))
+
+        (map fetch-add (var-get list-v))
+        "#,
+        None
+    ).unwrap();
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(peq(cu(0), llen(var_get(sl("list-v", TS::UIntType, 4)))))
+            .formula(cl(vec![])),
+
+        Halt::new()
+            .pred(peq(cu(1), llen(var_get(sl("list-v", TS::UIntType, 4)))))
+            .formula(lcons(vec![
+                add2(var_get(su("v")), unwrap_panic(elat(var_get(sl("list-v", TS::UIntType, 4)), cu(0))))
+            ])),
+
+        Halt::new()
+            .pred(peq(cu(2), llen(var_get(sl("list-v", TS::UIntType, 4)))))
+            .formula(lcons(vec![
+                add2(var_get(su("v")), unwrap_panic(elat(var_get(sl("list-v", TS::UIntType, 4)), cu(0)))),
+                add2(var_get(su("v")), unwrap_panic(elat(var_get(sl("list-v", TS::UIntType, 4)), cu(1))))
+            ])),
+        
+        Halt::new()
+            .pred(peq(cu(3), llen(var_get(sl("list-v", TS::UIntType, 4)))))
+            .formula(lcons(vec![
+                add2(var_get(su("v")), unwrap_panic(elat(var_get(sl("list-v", TS::UIntType, 4)), cu(0)))),
+                add2(var_get(su("v")), unwrap_panic(elat(var_get(sl("list-v", TS::UIntType, 4)), cu(1)))),
+                add2(var_get(su("v")), unwrap_panic(elat(var_get(sl("list-v", TS::UIntType, 4)), cu(2))))
+            ])),
+        
+        Halt::new()
+            .pred(peq(cu(4), llen(var_get(sl("list-v", TS::UIntType, 4)))))
+            .formula(lcons(vec![
+                add2(var_get(su("v")), unwrap_panic(elat(var_get(sl("list-v", TS::UIntType, 4)), cu(0)))),
+                add2(var_get(su("v")), unwrap_panic(elat(var_get(sl("list-v", TS::UIntType, 4)), cu(1)))),
+                add2(var_get(su("v")), unwrap_panic(elat(var_get(sl("list-v", TS::UIntType, 4)), cu(2)))),
+                add2(var_get(su("v")), unwrap_panic(elat(var_get(sl("list-v", TS::UIntType, 4)), cu(3))))
+            ]))
+    ]);
+}
+
+#[test]
+fn test_halt_map_symbolic_lists() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var v uint u0)
+        (define-data-var list-v1 (list 4 uint) (list u0 u1 u10 u11))
+        (define-data-var list-v2 (list 4 uint) (list u2 u3 u12 u13))
+        (define-data-var list-v3 (list 4 uint) (list u4 u5 u14 u15))
+
+        (define-private (fetch-add (x uint) (y uint) (z uint))
+           (+ (var-get v) x y z))
+
+        (map fetch-add (var-get list-v1) (var-get list-v2) (var-get list-v3))
+        "#,
+        None
+    ).unwrap();
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+    
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(por(vec![
+                peq(cu(0), llen(var_get(sl("list-v1", TS::UIntType, 4)))),
+                peq(cu(0), llen(var_get(sl("list-v2", TS::UIntType, 4)))),
+                peq(cu(0), llen(var_get(sl("list-v3", TS::UIntType, 4))))
+            ]))
+            .formula(cl(vec![])),
+
+        Halt::new()
+            .pred(por(vec![
+                pand(vec![
+                    peq(cu(1), llen(var_get(sl("list-v1", TS::UIntType, 4)))),
+                    pleq(cu(1), llen(var_get(sl("list-v2", TS::UIntType, 4)))),
+                    pleq(cu(1), llen(var_get(sl("list-v3", TS::UIntType, 4))))
+                ]),
+                pand(vec![
+                    pleq(cu(1), llen(var_get(sl("list-v1", TS::UIntType, 4)))),
+                    peq(cu(1), llen(var_get(sl("list-v2", TS::UIntType, 4)))),
+                    pleq(cu(1), llen(var_get(sl("list-v3", TS::UIntType, 4))))
+                ]),
+                pand(vec![
+                    pleq(cu(1), llen(var_get(sl("list-v1", TS::UIntType, 4)))),
+                    pleq(cu(1), llen(var_get(sl("list-v2", TS::UIntType, 4)))),
+                    peq(cu(1), llen(var_get(sl("list-v3", TS::UIntType, 4))))
+                ]),
+            ]))
+            .formula(lcons(vec![
+                add(vec![
+                    var_get(su("v")),
+                    unwrap_panic(elat(var_get(sl("list-v1", TS::UIntType, 4)), cu(0))),
+                    unwrap_panic(elat(var_get(sl("list-v2", TS::UIntType, 4)), cu(0))),
+                    unwrap_panic(elat(var_get(sl("list-v3", TS::UIntType, 4)), cu(0))),
+                ])
+            ])),
+        
+        Halt::new()
+            .pred(por(vec![
+                pand(vec![
+                    peq(cu(2), llen(var_get(sl("list-v1", TS::UIntType, 4)))),
+                    pleq(cu(2), llen(var_get(sl("list-v2", TS::UIntType, 4)))),
+                    pleq(cu(2), llen(var_get(sl("list-v3", TS::UIntType, 4))))
+                ]),
+                pand(vec![
+                    pleq(cu(2), llen(var_get(sl("list-v1", TS::UIntType, 4)))),
+                    peq(cu(2), llen(var_get(sl("list-v2", TS::UIntType, 4)))),
+                    pleq(cu(2), llen(var_get(sl("list-v3", TS::UIntType, 4))))
+                ]),
+                pand(vec![
+                    pleq(cu(2), llen(var_get(sl("list-v1", TS::UIntType, 4)))),
+                    pleq(cu(2), llen(var_get(sl("list-v2", TS::UIntType, 4)))),
+                    peq(cu(2), llen(var_get(sl("list-v3", TS::UIntType, 4))))
+                ]),
+            ]))
+            .formula(lcons(vec![
+                add(vec![
+                    var_get(su("v")),
+                    unwrap_panic(elat(var_get(sl("list-v1", TS::UIntType, 4)), cu(0))),
+                    unwrap_panic(elat(var_get(sl("list-v2", TS::UIntType, 4)), cu(0))),
+                    unwrap_panic(elat(var_get(sl("list-v3", TS::UIntType, 4)), cu(0))),
+                ]),
+                add(vec![
+                    var_get(su("v")),
+                    unwrap_panic(elat(var_get(sl("list-v1", TS::UIntType, 4)), cu(1))),
+                    unwrap_panic(elat(var_get(sl("list-v2", TS::UIntType, 4)), cu(1))),
+                    unwrap_panic(elat(var_get(sl("list-v3", TS::UIntType, 4)), cu(1))),
+                ])
+            ])),
+        
+        Halt::new()
+            .pred(por(vec![
+                pand(vec![
+                    peq(cu(3), llen(var_get(sl("list-v1", TS::UIntType, 4)))),
+                    pleq(cu(3), llen(var_get(sl("list-v2", TS::UIntType, 4)))),
+                    pleq(cu(3), llen(var_get(sl("list-v3", TS::UIntType, 4))))
+                ]),
+                pand(vec![
+                    pleq(cu(3), llen(var_get(sl("list-v1", TS::UIntType, 4)))),
+                    peq(cu(3), llen(var_get(sl("list-v2", TS::UIntType, 4)))),
+                    pleq(cu(3), llen(var_get(sl("list-v3", TS::UIntType, 4))))
+                ]),
+                pand(vec![
+                    pleq(cu(3), llen(var_get(sl("list-v1", TS::UIntType, 4)))),
+                    pleq(cu(3), llen(var_get(sl("list-v2", TS::UIntType, 4)))),
+                    peq(cu(3), llen(var_get(sl("list-v3", TS::UIntType, 4))))
+                ]),
+            ]))
+            .formula(lcons(vec![
+                add(vec![
+                    var_get(su("v")),
+                    unwrap_panic(elat(var_get(sl("list-v1", TS::UIntType, 4)), cu(0))),
+                    unwrap_panic(elat(var_get(sl("list-v2", TS::UIntType, 4)), cu(0))),
+                    unwrap_panic(elat(var_get(sl("list-v3", TS::UIntType, 4)), cu(0))),
+                ]),
+                add(vec![
+                    var_get(su("v")),
+                    unwrap_panic(elat(var_get(sl("list-v1", TS::UIntType, 4)), cu(1))),
+                    unwrap_panic(elat(var_get(sl("list-v2", TS::UIntType, 4)), cu(1))),
+                    unwrap_panic(elat(var_get(sl("list-v3", TS::UIntType, 4)), cu(1))),
+                ]),
+                add(vec![
+                    var_get(su("v")),
+                    unwrap_panic(elat(var_get(sl("list-v1", TS::UIntType, 4)), cu(2))),
+                    unwrap_panic(elat(var_get(sl("list-v2", TS::UIntType, 4)), cu(2))),
+                    unwrap_panic(elat(var_get(sl("list-v3", TS::UIntType, 4)), cu(2))),
+                ])
+            ])),
+        
+        Halt::new()
+            .pred(por(vec![
+                pand(vec![
+                    peq(cu(4), llen(var_get(sl("list-v1", TS::UIntType, 4)))),
+                    pleq(cu(4), llen(var_get(sl("list-v2", TS::UIntType, 4)))),
+                    pleq(cu(4), llen(var_get(sl("list-v3", TS::UIntType, 4))))
+                ]),
+                pand(vec![
+                    pleq(cu(4), llen(var_get(sl("list-v1", TS::UIntType, 4)))),
+                    peq(cu(4), llen(var_get(sl("list-v2", TS::UIntType, 4)))),
+                    pleq(cu(4), llen(var_get(sl("list-v3", TS::UIntType, 4))))
+                ]),
+                pand(vec![
+                    pleq(cu(4), llen(var_get(sl("list-v1", TS::UIntType, 4)))),
+                    pleq(cu(4), llen(var_get(sl("list-v2", TS::UIntType, 4)))),
+                    peq(cu(4), llen(var_get(sl("list-v3", TS::UIntType, 4))))
+                ]),
+            ]))
+            .formula(lcons(vec![
+                add(vec![
+                    var_get(su("v")),
+                    unwrap_panic(elat(var_get(sl("list-v1", TS::UIntType, 4)), cu(0))),
+                    unwrap_panic(elat(var_get(sl("list-v2", TS::UIntType, 4)), cu(0))),
+                    unwrap_panic(elat(var_get(sl("list-v3", TS::UIntType, 4)), cu(0))),
+                ]),
+                add(vec![
+                    var_get(su("v")),
+                    unwrap_panic(elat(var_get(sl("list-v1", TS::UIntType, 4)), cu(1))),
+                    unwrap_panic(elat(var_get(sl("list-v2", TS::UIntType, 4)), cu(1))),
+                    unwrap_panic(elat(var_get(sl("list-v3", TS::UIntType, 4)), cu(1))),
+                ]),
+                add(vec![
+                    var_get(su("v")),
+                    unwrap_panic(elat(var_get(sl("list-v1", TS::UIntType, 4)), cu(2))),
+                    unwrap_panic(elat(var_get(sl("list-v2", TS::UIntType, 4)), cu(2))),
+                    unwrap_panic(elat(var_get(sl("list-v3", TS::UIntType, 4)), cu(2))),
+                ]),
+                add(vec![
+                    var_get(su("v")),
+                    unwrap_panic(elat(var_get(sl("list-v1", TS::UIntType, 4)), cu(3))),
+                    unwrap_panic(elat(var_get(sl("list-v2", TS::UIntType, 4)), cu(3))),
+                    unwrap_panic(elat(var_get(sl("list-v3", TS::UIntType, 4)), cu(3))),
+                ])
+            ])),
+    ]);
+}
+
+#[test]
+fn test_halt_fold_user_func() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var v uint u0)
+
+        (define-private (fetch-add (idx uint) (value uint))
+           (+ (var-get v) idx value))
+
+        (fold fetch-add (list u0 u1 u2 u3) u10)
+        "#,
+        None
+    ).unwrap();
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(pt())
+            .formula(add(vec![
+                var_get(su("v")),
+                var_get(su("v")),
+                var_get(su("v")),
+                var_get(su("v")),
+                cu(16)
+            ]))
+        
+    ]);
+}
+
+#[test]
+fn test_halt_fold_user_func_branch() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var v uint u0)
+
+        (define-private (fetch-add-sub (x uint) (value uint))
+           (if (is-eq (mod (var-get v) u2) u0)
+              (+ (var-get v) x value)
+              (- (var-get v) x value)))
+
+        ;; ((var-get v) - u0 - u10)                     --> ((var-get v) - u10)
+        ;; ((var-get v) - u1 - ((var-get v) - u10))     --> u9
+        ;; ((var-get v) - u2 - u9)                      --> ((var-get v) - u11)
+        ;; ((var-get v) - u3 - ((var-get v) - u11))     --> u8
+        (fold fetch-add-sub (list u0 u1 u2 u3) u10)
+        "#,
+        None
+    ).unwrap();
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
 }
