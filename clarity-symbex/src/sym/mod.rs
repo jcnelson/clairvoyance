@@ -1096,7 +1096,7 @@ impl SymOp {
         let mut adds = vec![];
         let mut subs = vec![];
         
-        info!("flatten_subs original ops: {:?}", &ops);
+        debug!("flatten_subs original ops: {:?}", &ops);
         for (i, op) in ops.into_iter().enumerate() {
             match *op {
                 Self::Add(inner) => {
@@ -1137,13 +1137,13 @@ impl SymOp {
                 }
             }
         }
-        info!("flatten_subs adds = {:?}", &adds);
-        info!("flatten_subs subs = {:?}", &subs);
+        debug!("flatten_subs adds = {:?}", &adds);
+        debug!("flatten_subs subs = {:?}", &subs);
         
         let (mut adds, mut subs) = Self::combine_terms(adds, subs)?;
 
-        info!("combine_subs adds = {:?}", &adds);
-        info!("combine_subs subs = {:?}", &subs);
+        debug!("combine_subs adds = {:?}", &adds);
+        debug!("combine_subs subs = {:?}", &subs);
         if subs.len() == 0 {
             if adds.len() > 1 {
                 Ok(SymOp::Add(adds))
@@ -1179,36 +1179,6 @@ impl SymOp {
                 }
             }
         }
-        /*
-        if adds.len() == 0 {
-            return Ok(SymOp::Subtract(subs));
-        }
-        else {
-            if adds.len() == 1 {
-                let Some(add) = adds.pop() else {
-                    return Err(Error::Bug("unreachable".into()));
-                };
-                if subs.len() == 1 {
-                    let Some(sub) = subs.pop() else {
-                        return Err(Error::Bug("unreachable".into()));
-                    };
-                    Ok(SymOp::Subtract(vec![add, sub]))
-                }
-                else {
-                    Ok(SymOp::Subtract(vec![add, Box::new(SymOp::Add(subs))]))
-                }
-            }
-            else if subs.len() == 1 {
-                let Some(sub) = subs.pop() else {
-                    return Err(Error::Bug("unreachable".into()));
-                };
-                Ok(SymOp::Subtract(vec![Box::new(SymOp::Add(adds)), sub]))
-            }
-            else {
-                Ok(SymOp::Subtract(vec![Box::new(SymOp::Add(adds)), Box::new(SymOp::Add(subs))]))
-            }
-        }
-        */
     }
 
 
@@ -1225,7 +1195,7 @@ impl SymOp {
         // (a + b - c - d - e + f + g + h)
         // (a + b + f + g + h) - (c + d + e)
         // (- (+ a b f g h) (+ c d e))
-        info!("flatten_adds original ops: {:?}", &ops);
+        debug!("flatten_adds original ops: {:?}", &ops);
         let mut adds = vec![];
         let mut subs = vec![];
         for op in ops.into_iter() {
@@ -1255,13 +1225,13 @@ impl SymOp {
             }
         }
 
-        info!("flatten_adds adds = {:?}", &adds);
-        info!("flatten_adds subs = {:?}", &subs);
+        debug!("flatten_adds adds = {:?}", &adds);
+        debug!("flatten_adds subs = {:?}", &subs);
 
         let (mut adds, mut subs) = Self::combine_terms(adds, subs)?;
 
-        info!("combine_adds adds = {:?}", &adds);
-        info!("combine_adds subs = {:?}", &subs);
+        debug!("combine_adds adds = {:?}", &adds);
+        debug!("combine_adds subs = {:?}", &subs);
 
         if subs.len() == 0 {
             if adds.len() > 1 {
@@ -1304,11 +1274,11 @@ impl SymOp {
     fn fold_subtraction_constants(ops: Vec<Box<SymOp>>) -> Result<SymOp, Error> {
         let sub = Self::Subtract(ops.clone());
         let flattened_op = Self::flatten_subtractions(ops)?;
-        info!("{} becomes {}", &sub, &flattened_op);
+
+        debug!("{} becomes {}", &sub, &flattened_op);
         let Self::Subtract(mut ops) = flattened_op else {
             return Ok(flattened_op);
         };
-        // let mut ops = Self::combine_sub_constants(ops)?;
 
         if ops.len() == 1 {
             let Some(op) = ops.pop() else { unreachable!() };
@@ -1714,6 +1684,446 @@ impl SymOp {
         }
     }
 
+    /// When processing Self::And(..), combine all inner Self::Equals(..) and
+    /// Self::Not(Self::Equals(..)) statements that share at
+    /// least one non-constant term.  This will let us find a contradiction if we ever claim that the
+    /// same term is equal to two or more different constants.
+    ///
+    /// The terms in op must have been simplifed. In particular, each term is either a constant, or
+    /// a symbolic operation with at least one variable (i.e. no symbolic operation over just
+    /// constants)
+    fn and_flatten_equals(ops: Vec<Box<SymOp>>) -> Result<Vec<Box<SymOp>>, Error> {
+        // (and (is-eq a1 b1 c1 ...) (is-eq a1 b2 c2 ...)) becomes
+        // (and (is-eq a1 b1 c1 b2 c2)), since both (is-eq ..) lists
+        // contain at least one such term a1.
+      
+        // debug output
+        let before_s : Vec<_> = ops.iter().map(|s| s.to_string()).collect();
+
+        // map which terms are found in which ops (identified by op index and term index)
+        let mut terms : HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+        
+        // list of recombined terms
+        let mut combined_terms : Vec<Box<SymOp>> = vec![];
+
+        for (i, op) in ops.iter().enumerate() {
+            if let Self::Equals(inner) = &**op {
+                for (j, term) in inner.iter().enumerate() {
+                    let term_s = term.to_string();
+                    if let Some(eq_ops) = terms.get_mut(&term_s) {
+                        eq_ops.push((i, j));
+                    }
+                    else {
+                        terms.insert(term_s, vec![(i, j)]);
+                    }
+                }
+            }
+            else {
+                combined_terms.push(op.clone());
+            }
+        }
+
+        // combine unique terms across multiple (is-eq ..).
+        // If a term is present in at least two (is-eq ..), then it only needs to be present in the
+        // combined one.
+        // All of the terms in the (is-eq ..) lists that this term was present in
+        // can be combined into a single (is-eq ..).
+        let mut combined_eqs : HashMap<usize, Vec<Box<SymOp>>> = HashMap::new();
+        let mut consumed = HashSet::new();
+
+        // sort terms from most-represented to least-represented, so we cull terms that appear in
+        // multiple (is-eq ..) lists before those that appear in only one.
+        let mut terms_list : Vec<_> = terms
+            .into_iter()
+            .map(|(term_s, op_idx_list)| (term_s, op_idx_list))
+            .collect();
+
+        terms_list.sort_by(|a, b| a.1.len().cmp(&b.1.len()));
+        terms_list.reverse();
+
+        for (_term_s, mut op_idx_list) in terms_list.into_iter() {
+            let eq_set : HashSet<_> = op_idx_list
+                .iter()
+                .map(|(op_idx, _)| *op_idx)
+                .collect();
+
+            if eq_set.len() == 1 {
+                // this term only appears in one (is-eq ..), so put it with the same combined
+                // (is-eq ..) list from which it came.
+                let (op_idx, term_idx) = op_idx_list.pop().ok_or_else(|| Error::Bug("unreachable".into()))?;
+                if consumed.contains(&(op_idx, term_idx)) {
+                    continue;
+                }
+
+                let Self::Equals(inner) = &*ops[op_idx] else {
+                    return Err(Error::Bug("index is not an is-eq".into()));
+                };
+                let op = inner.get(term_idx).ok_or_else(|| Error::Bug("term index is not in is-eq terms".into()))?;
+                if let Some(eq_ops) = combined_eqs.get_mut(&op_idx) {
+                    eq_ops.push(op.clone());
+                }
+                else {
+                    combined_eqs.insert(op_idx, vec![op.clone()]);
+                }
+                consumed.insert((op_idx, term_idx));
+                debug!("{} combined_eqs = {:?}", &_term_s, &combined_eqs);
+            }
+            else {
+                // this term appears in more than one (is-eq ..), so put all of the other terms in
+                // each of its (is-eq ..) list into the same combined (is-eq ..) list, along with
+                // this one.
+                debug!("{} appears in terms {:?}", &_term_s, &op_idx_list);
+                let mut combined_idx = None;
+                for (op_idx, term_idx) in op_idx_list.into_iter() {
+                    if consumed.contains(&(op_idx, term_idx)) {
+                        continue;
+                    }
+                    let Self::Equals(inner) = &*ops[op_idx] else {
+                        return Err(Error::Bug("index is not an is-eq".into()));
+                    };
+                    let mut retained_inner = vec![];
+                    for (j, inner_op) in inner.iter().enumerate() {
+                        consumed.insert((op_idx, j));
+                        retained_inner.push(inner_op.clone());
+                    }
+
+                    let idx = *combined_idx.as_ref().unwrap_or(&op_idx);
+                    if let Some(eq_ops) = combined_eqs.get_mut(&idx) {
+                        eq_ops.extend(retained_inner.into_iter());
+                    }
+                    else {
+                        combined_eqs.insert(idx, retained_inner);
+                    }
+                    if combined_idx.is_none() {
+                        combined_idx = Some(op_idx);
+                    }
+
+                    debug!("{} combined_eqs = {:?}", &_term_s, &combined_eqs);
+                }
+            }
+        }
+
+        debug!("combined_eqs = {:?}", &combined_eqs);
+        let combined_eqs : Vec<_> = combined_eqs
+            .into_iter()
+            .map(|(_, ops)| {
+                let uniq : HashMap<String, Box<SymOp>> = ops
+                    .into_iter()
+                    .map(|op| (op.to_string(), op))
+                    .collect();
+
+                let op_uniq : Vec<Box<SymOp>> = uniq
+                    .into_iter()
+                    .map(|(_, op)| op)
+                    .collect();
+
+                Box::new(Self::Equals(op_uniq))
+            })
+            .collect();
+
+        let after_s : Vec<_> = combined_eqs.iter().map(|s| s.to_string()).collect();
+        debug!("flatten_equals: before:        {:?}", &before_s);
+        debug!("flatten_equals: combined_eqs:  {:?}", &after_s);
+        
+        combined_terms.extend(combined_eqs.into_iter());
+       
+        debug!("flatten_equals: combined_terms:  {:?}", &combined_terms);
+        Ok(combined_terms)
+    }
+
+    /// Detect and reduce and-equality contradictions in the form of
+    /// (and (is-eq a b ...) (not (is-eq a b ...))).
+    ///
+    /// NOTE: all terms in each (is-eq ..) in `combined_terms` must be unique!
+    fn and_equals_contradiction(combined_terms: Vec<Box<SymOp>>) -> Result<Vec<Box<SymOp>>, Error> {
+        let mut terms : HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+        let mut not_terms : HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+
+        // search for contradictions.
+        //   (and (is-eq a b c d e) (not (is-eq a b f g h))) is a contradiction
+        for (i, op) in combined_terms.iter().enumerate() {
+            if let Self::Equals(inner) = &**op {
+                for (j, term) in inner.iter().enumerate() {
+                    let term_s = term.to_string();
+                    if let Some(eq_ops) = terms.get_mut(&term_s) {
+                        eq_ops.push((i, j));
+                    }
+                    else {
+                        terms.insert(term_s, vec![(i, j)]);
+                    }
+                }
+            }
+            else if let Self::Not(neq) = &**op {
+                if let Self::Equals(inner) = &**neq {
+                    for (j, term) in inner.iter().enumerate() {
+                        let term_s = term.to_string();
+                        if let Some(eq_ops) = not_terms.get_mut(&term_s) {
+                            eq_ops.push((i, j));
+                        }
+                        else {
+                            not_terms.insert(term_s, vec![(i, j)]);
+                        }
+                    }
+                }
+            }
+        }
+
+        debug!("and_eq_contradiction: not_terms = {:?}", &not_terms);
+
+        // map a (is-eq ..) operation in combined_terms to the set of (not (is-eq ..)) operations in combined_terms which
+        // contain one of this operation's inner terms.
+        let mut negated : HashMap<usize, HashSet<usize>> = HashMap::new();
+
+        // find contradictions in the form of (and (is-eq a b ..) (not (is-eq a b ..)))
+        for (i, eq) in combined_terms.iter().enumerate() {
+            let Self::Equals(inner) = &**eq else {
+                continue;
+            };
+
+            for term in inner.iter() {
+                let term_s = term.to_string();
+
+                // is this term explicitly _not_ equal to other terms?
+                let Some(neq_idx) = not_terms.get(&term_s) else {
+                    continue;
+                };
+
+                for (op_idx, term_idx) in neq_idx.iter() {
+                    let Self::Not(neq) = &*combined_terms[*op_idx] else {
+                        continue;
+                    };
+                    let Self::Equals(not_inner) = &**neq else {
+                        continue;
+                    };
+                    let Some(not_term) = not_inner.get(*term_idx) else {
+                        continue;
+                    };
+                    if term_s == not_term.to_string() {
+                        if let Some(neg_set) = negated.get_mut(&i) {
+                            if neg_set.contains(&op_idx) {
+                                // at least two terms in this (is-eq ..) list have appeared in the
+                                // same (not (is-eq ..)) list (i.e. we have 
+                                // (and (is-eq a b ...) (not (is-eq a b ..)) ..)), so this is a
+                                // contradiction.
+                                debug!("and_eq_contradiction: contradiction detected");
+                                debug!("and_eq_contradiction: {i}: {}", combined_terms[i]);
+                                for neg_op_idx in neg_set.clone().iter() {
+                                    debug!("and_eq_contradiction: {neg_op_idx}: {}", combined_terms[*neg_op_idx]);
+                                }
+
+                                return Ok(vec![Box::new(Self::Constant(Value::Bool(false)))]);
+                            }
+                            neg_set.insert(*op_idx);
+                        }
+                        else {
+                            let mut neg_set = HashSet::new();
+                            neg_set.insert(*op_idx);
+                            negated.insert(i, neg_set);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(combined_terms)
+    }
+   
+    /// Eliminate redundant (not (is-eq a k2)) in (and (is-eq a k1) (not (is-eq a k2))) where
+    /// k1 != k2.  These conjunctions can get generated by an evaluation of (filter ..), and can
+    /// often be simplified.
+    fn and_equals_redundant(combined_terms: Vec<Box<SymOp>>) -> Result<Vec<Box<SymOp>>, Error> {
+        // eliminate redundant terms.
+        // If we have (and (is-eq x k1) (not (is-eq x k2))) and k1 != k2, then reduce to
+        // (is-eq x k1) if k1 != k2
+        //
+        // (is-eq x k1)        (not (is-eq x k2))       (and ..)      (is-eq x k1)
+        //   T (x == k1)           T (x != k2)             T               T
+        //   F (x != k1)           T (x != k2)             F               F
+        //   T (x == k1)           F (x == k2)             F               F (iff k1 != k2)
+        //   F (x != k1)           F (x == k2)             F               F
+
+        debug!("and_eqs_redundant: combined_terms = {:?}", &combined_terms);
+
+        // expand combined terms.  If we have (is-eq (a b c k1)), where k1 constant, split into
+        // (and (is-eq a k1) (is-eq b k1) (is-eq c k1))
+        let mut expanded_eq = vec![];
+        let mut expanded_neq = vec![];
+        let mut untouched = vec![];
+
+        let mut term_eqs : HashMap<String, Vec<usize>> = HashMap::new();
+        let mut term_neqs : HashMap<String, Vec<usize>> = HashMap::new();
+        for (op_i, op) in combined_terms.clone().into_iter().enumerate() {
+            if let Self::Equals(inner) = &*op {
+                // find all constants (even if there's more than one).
+                let mut constants = HashSet::new();
+                let mut last_constant = None;
+                for inner_op in inner.iter() {
+                    if let SymOp::Constant(..) = **inner_op {
+                        last_constant = Some(inner_op.clone());
+                        constants.insert(inner_op.clone());
+                    }
+                }
+                if constants.len() == 0 {
+                    // skip this
+                    untouched.push(op);
+                    continue;
+                }
+
+                if constants.len() > 1 {
+                    // contradiction -- (is-eq k1 k2 ...) where each ki is unique is never true
+                    return Ok(vec![Box::new(SymOp::Constant(Value::Bool(false)))]);
+                }
+
+                let Some(inner_const) = last_constant else {
+                    return Err(Error::Bug("unreachable".into()));
+                };
+
+                for inner_op in inner.iter() {
+                    if *inner_op != inner_const {
+                        let l = expanded_eq.len();
+                        expanded_eq.push((inner_op.clone(), inner_const.clone(), op_i));
+
+                        let term_s = inner_op.to_string();
+                        if let Some(pos) = term_eqs.get_mut(&term_s) {
+                            pos.push(l);
+                        }
+                        else {
+                            term_eqs.insert(inner_op.to_string(), vec![l]);
+                        }
+                    }
+                }
+            }
+            else if let Self::Not(eq) = &*op {
+                if let Self::Equals(inner) = &**eq {
+                    // find all constants (even if there's more than one).
+                    let mut constants = HashSet::new();
+                    let mut last_constant = None;
+                    for inner_op in inner.iter() {
+                        if let SymOp::Constant(..) = **inner_op {
+                            last_constant = Some(inner_op);
+                            constants.insert(inner_op);
+                        }
+                    }
+                    if constants.len() == 0 {
+                        // skip this
+                        untouched.push(op);
+                        continue;
+                    }
+
+                    if constants.len() > 1 {
+                        // (not (is-eq k1 k2)) when k1 != k2 is a tautology, so skip this op
+                        untouched.push(op);
+                        continue;
+                    }
+
+                    let Some(inner_const) = last_constant else {
+                        return Err(Error::Bug("unreachable".into()));
+                    };
+
+                    for inner_op in inner.iter() {
+                        if inner_op != inner_const {
+                            let l = expanded_neq.len();
+                            expanded_neq.push((inner_op.clone(), inner_const.clone(), op_i));
+                            
+                            let term_s = inner_op.to_string();
+                            if let Some(pos) = term_neqs.get_mut(&term_s) {
+                                pos.push(l);
+                            }
+                            else {
+                                term_neqs.insert(inner_op.to_string(), vec![l]);
+                            }
+                        }
+                    }
+                }
+                else {
+                    untouched.push(op);
+                }
+            }
+            else {
+                untouched.push(op);
+            }
+        }
+        debug!("and_eqs_redundant: expanded_eq = {:?}", &expanded_eq);
+        debug!("and_eqs_redundant: expanded_neq = {:?}", &expanded_neq);
+
+        debug!("and_eqs_redundant: term_eqs = {:?}", &term_eqs);
+        debug!("and_eqs_redundant: term_neqs = {:?}", &term_neqs);
+
+        // for each (is-eq x k1), identify and drop each corresponding (not (is-eq x k2)) 
+        // if k1 != k2.  If k1 == k2, then there is a contradiction and this should just return
+        // False.  While we're at it, if we found (is-eq x k1) and (is-eq x k2) where k1 != k2,
+        // then also return False.
+        let mut redundant_neqs = HashSet::new();
+        for (term_s, eqs) in term_eqs.into_iter() {
+            // consolidate constants
+            let mut constants = HashSet::new();
+            let mut last_constant = None;
+            for eq in eqs.iter() {
+                let constant = expanded_eq[*eq].1.clone();
+                last_constant = Some(constant.clone());
+                constants.insert(constant);
+            }
+            if constants.len() > 1 {
+                // this term is equal to two or more different constants
+                return Ok(vec![Box::new(Self::Constant(Value::Bool(false)))]);
+            }
+            if constants.len() == 0 {
+                return Err(Error::Bug("unreachable: no constants".into()));
+            }
+            let Some(k) = last_constant.take() else {
+                return Err(Error::Bug("unreachable: no last-constant".into()));
+            };
+            let Some(neqs) = term_neqs.get(&term_s) else {
+                continue;
+            };
+
+            for neq in neqs.iter() {
+                let neq_const = expanded_neq[*neq].1.clone();
+                if neq_const == k {
+                    // have (is-eq x k1) and (not (is-eq x k1))
+                    return Ok(vec![Box::new(Self::Constant(Value::Bool(false)))]);
+                }
+
+                // this not-equals is redundant
+                debug!("and_eqs_redundant: redundant term {neq} in {}", &combined_terms[expanded_neq[*neq].2]);
+                redundant_neqs.insert(*neq);
+            }
+        }
+
+        // consolidate eqs
+        let mut consolidated_eq : HashMap<usize, Vec<Box<SymOp>>> = HashMap::new();
+        for (eq_op, eq_const, op_i) in expanded_eq.into_iter() {
+            if let Some(ops) = consolidated_eq.get_mut(&op_i) {
+                ops.push(eq_op);
+            }
+            else {
+                let ops = vec![eq_op, eq_const];
+                consolidated_eq.insert(op_i, ops);
+            }
+        }
+
+        // consolidate neqs
+        let mut consolidated_neq : HashMap<usize, Vec<Box<SymOp>>> = HashMap::new();
+        for (neq_i, (neq_op, neq_const, op_i)) in expanded_neq.into_iter().enumerate() {
+            if let Some(ops) = consolidated_neq.get_mut(&op_i) {
+                ops.push(neq_op);
+            }
+            else if !redundant_neqs.contains(&neq_i) {
+                let ops = vec![neq_op, neq_const];
+                consolidated_neq.insert(op_i, ops);
+            }
+        }
+
+        // reconstitute
+        for (_, eq_ops) in consolidated_eq.into_iter() {
+            untouched.push(Box::new(Self::Equals(eq_ops)));
+        }
+        for (_, neq_ops) in consolidated_neq.into_iter() {
+            untouched.push(Box::new(Self::Not(Box::new(Self::Equals(neq_ops)))));
+        }
+
+        Ok(untouched)
+    }
+
     /// Fold and propagate constants in an And(..)
     fn fold_and_constants(ops: Vec<Box<SymOp>>) -> Result<SymOp, Error> {
         let mut consolidated_ops = vec![];
@@ -1728,7 +2138,16 @@ impl SymOp {
                 consolidated_ops.push(op);
             }
         }
+
+        // flatten (is-eq) terms which have overlapping inner terms
+        let consolidated_ops = Self::and_flatten_equals(consolidated_ops)?;
         
+        // eliminate and-eq contradictions 
+        let consolidated_ops = Self::and_equals_contradiction(consolidated_ops)?;
+
+        // remove (and (is-eq x k1) (not (is-eq x k2))) redundancies (where k1 != k2)
+        let consolidated_ops = Self::and_equals_redundant(consolidated_ops)?;
+
         // remove pure duplicates and simplfiy
         let simplified = Self::dedup_pure_booleans(consolidated_ops)?;
 
@@ -2095,7 +2514,7 @@ impl SymOp {
 
     /// Fold and propagate all constants
     fn fold_constants(symop: SymOp) -> Result<SymOp, Error> {
-        info!("Simplify {:?}", &symop);
+        debug!("Simplify {:?}", &symop);
         match symop {
             Self::Constant(v) => Ok(Self::Constant(v)),
             Self::Variable(v) => Ok(Self::Variable(v)),
@@ -3635,7 +4054,8 @@ impl Symbex {
             if let Some(left_conts) = left_conts_opt.take() {
                 let mut right_conts = vec![];
                 for left_cont in left_conts.into_iter() {
-                    if left_cont.panicking {
+                    if left_cont.halted() {
+                        right_conts.push(left_cont);
                         continue;
                     }
                     let left_cont_formula = left_cont.final_formula.clone();
@@ -4329,7 +4749,10 @@ impl Symbex {
                                                         let callee_cont = Continuation::from_caller(Rc::new(binding_cont), format!("{function_name}/{func_name}/body"), func.body.clone());
                                                         let body_conts : Vec<_> = self.eval(callee_cont, &func.body)?
                                                             .into_iter()
-                                                            .map(|cont| (len_eq_i.clone(), cont))
+                                                            .map(|cont| {
+                                                                let return_cont = Continuation::from_callee(Rc::new(cont), format!("{function_name}/{func_name}/return"), func.body.clone());
+                                                                (len_eq_i.clone(), return_cont)
+                                                            })
                                                             .collect();
 
                                                         next_conts.push(body_conts);
@@ -4403,7 +4826,17 @@ impl Symbex {
 
                                     // now we can evaluate the list
                                     let list_conts = self.eval(Continuation::from_parent(Rc::new(len_cont), format!("{function_name}.list"), list_sym.clone()), &list_sym)?;
-                                    
+
+                                    // if y is greater than or equal to the maximum length of x,
+                                    // then this will always succeed
+                                    let sz = if let Some(ts) = self.typemap.get_type_expected(&list_sym) {
+                                        Self::sequence_maxlen(ts)?
+                                    }
+                                    else {
+                                        return Err(Error::Bug(format!("No type information for sequence {list_sym:?}")));
+                                    };
+                                    let sz = u128::try_from(sz).map_err(|_| Error::Bug("Maximum sequence size does not fit into u128".into()))?;
+
                                     let mut new_conts = vec![];
                                     for list_cont in list_conts.into_iter() {
                                         if list_cont.halted() {
@@ -4415,19 +4848,26 @@ impl Symbex {
                                         let parent_predicate = list_cont.predicate.clone();
                                         let parent_rc = Rc::new(list_cont);
 
-                                        // case 1: the list's length is less than or equal to the
+                                        // case 1: the sequence's length is less than or equal to the
                                         // given length
                                         let mut some_cont = Continuation::from_parent(parent_rc.clone(), format!("{function_name}.case-some-seq"), body.clone());
                                         some_cont.final_formula = SymOp::ConsSome(Box::new(parent_final_formula.clone()));
                                         some_cont.predicate = parent_predicate.clone().and(Predicate::Leq(SymOp::Len(Box::new(parent_final_formula.clone())), SymOp::Constant(Value::UInt(x))));
 
-                                        // case 2: the list's length is greater than the given
-                                        // length
+                                        new_conts.push(some_cont);
+
+                                        // case 2: the sequence's length is greater than the given
+                                        // length. Only need this if the sequence's maximum length
+                                        // is greater than the new_len
+                                        if sz < x {
+                                            // we're growing this list size
+                                            continue;
+                                        }
+
                                         let mut none_cont = Continuation::from_parent(parent_rc.clone(), format!("{function_name}.case-none-seq"), body.clone());
                                         none_cont.final_formula = SymOp::none();
                                         none_cont.predicate = parent_predicate.and(Predicate::Greater(SymOp::Len(Box::new(parent_final_formula)), SymOp::Constant(Value::UInt(x))));
 
-                                        new_conts.push(some_cont);
                                         new_conts.push(none_cont);
                                     }
 
@@ -4640,7 +5080,7 @@ impl Symbex {
                                                 continue;
                                             }
                                             let parent_rc = Rc::new(cont);
-                                            let next = self.eval(Continuation::from_parent(parent_rc, format!("{function_name}/.tuple-item-{i}"), value_exp.clone()), value_exp)?;
+                                            let next = self.eval(Continuation::from_parent(parent_rc, format!("{function_name}/tuple-item-{i}"), value_exp.clone()), value_exp)?;
 
                                             for next_cont in next.into_iter() {
                                                 let mut key_values = prev_key_values.clone();
@@ -4726,7 +5166,6 @@ impl Symbex {
                                                 new_conts.push(cont);
                                                 continue;
                                             }
-
                                             let next_conts = self.eval(Continuation::from_parent(Rc::new(cont), function_name.to_string(), symexp.clone()), symexp)?;
                                             new_conts.extend(next_conts.into_iter());
                                         }
@@ -4839,7 +5278,7 @@ impl Symbex {
                                 }
                                 "default-to" => {
                                     // treat `(default-to x y)` as 
-                                    // `(if (is-none y) x y)`
+                                    // `(if (is-none y) x (unwrap-panic y))`
                                     //
                                     // HOWEVER, we must take care to only eval `x` once, and do so
                                     // before `y`.
@@ -4882,7 +5321,7 @@ impl Symbex {
                                             // case 1: this is (some ..)
                                             let mut some_cont = Continuation::from_parent(parent_rc.clone(), format!("{function_name}.is_some"), opt_sym.clone());
                                             some_cont.predicate = parent_predicate.clone().and(Predicate::IsSome(final_formula.clone()));
-                                            some_cont.final_formula = final_formula.clone();
+                                            some_cont.final_formula = SymOp::UnwrapPanic(Box::new(final_formula.clone()));
 
                                             // case 2: this is none
                                             let mut none_cont = Continuation::from_parent(parent_rc.clone(), format!("{function_name}.is_none"), opt_sym.clone());
@@ -4988,6 +5427,7 @@ impl Symbex {
                                             }
 
                                             // case 1: `(is-ok x)` is true or `(is-some x)` is true
+                                            // TODO: make new continuation
                                             let mut ok_cont = err_cont.clone();
                                             let cond_predicate = err_cont.predicate.clone();
                                             ok_cont.predicate = match self.typemap.get_type_expected(&cond_sym) {
@@ -5004,7 +5444,7 @@ impl Symbex {
                                                     return Err(Error::Bug(format!("Did not get any type information for symbol {cond_sym}")));
                                                 }
                                             };
-                                            ok_cont.final_formula = cond_formula.clone();
+                                            ok_cont.final_formula = SymOp::UnwrapPanic(Box::new(cond_formula.clone()));
 
                                             // case 2: (is-ok x) (or (is-some x)) is false
                                             err_cont.predicate = match self.typemap.get_type_expected(&cond_sym) {
@@ -5397,7 +5837,157 @@ impl Symbex {
                                     )?
                                 }
                                 "filter" => {
-                                    todo!()
+                                    let Some(func_name) = lv.get(1).ok_or_else(|| Error::Bug("Missing function".into()))?.match_atom() else {
+                                        return Err(Error::Bug("map function is not an atom".into()));
+                                    };
+                                    let sequence = lv.get(2).ok_or_else(|| Error::Bug("Missing sequence".into()))?;
+                                    let Some(seq_ts) = self.typemap.get_type_expected(sequence).cloned() else {
+                                        return Err(Error::Bug(format!("No type information for sequence {sequence:?}")));
+                                    };
+
+                                    let seq_maxlen = Self::sequence_maxlen(&seq_ts)?;
+
+                                    let mut final_conts = vec![];
+                                    let mut ret = vec![];
+
+                                    let conts = self.eval(Continuation::from_parent(Rc::new(continuation), format!("{function_name}/sequence"), sequence.clone()), &sequence)?;
+
+                                    // for each sequence continuation, apply the given
+                                    // function on each item in the sequence.
+                                    //
+                                    // We don't know how many items are in the sequence, so we need
+                                    // to generate a continuation for each possible length.
+                                    for cont in conts.into_iter() {
+                                        if cont.halted() {
+                                            ret.push(cont);
+                                            continue;
+                                        }
+
+                                        let seq_formula = cont.final_formula.clone();
+
+                                        // create zero-length continuations, but keep the
+                                        // predicates separate for now.
+                                        let mut zero_length_conts = vec![];
+                                        let len_eq_zero = SymOp::Equals(vec![Box::new(SymOp::Constant(Value::UInt(0))), Box::new(SymOp::Len(Box::new(seq_formula.clone())))]).try_as_predicate()?;
+
+                                        // make a continuation that descends from the sequence
+                                        // continuation and has a final formula with an empty
+                                        // sequence.
+                                        let parent_sym = cont.current_symexp.clone().expect("unreachable -- parent continuation of a sequence continuation should be a `filter` and thus have a symbolic expression");
+                                        let mut empty_cont = Continuation::from_parent(Rc::new(cont), format!("{function_name}/{func_name}/empty-case"), parent_sym);
+
+                                        // filter produces a sequence with the same type as the
+                                        // input sequence.
+                                        let final_formula = match seq_ts {
+                                            TypeSignature::SequenceType(SequenceSubtype::BufferType(..)) => SymOp::Constant(Value::buff_from(vec![])?),
+                                            TypeSignature::SequenceType(SequenceSubtype::ListType(..)) => SymOp::ListCons(vec![]),
+                                            TypeSignature::SequenceType(SequenceSubtype::StringType(StringSubtype::ASCII(..))) => SymOp::Constant(Value::string_ascii_from_bytes(vec![])?),
+                                            TypeSignature::SequenceType(SequenceSubtype::StringType(StringSubtype::UTF8(..))) => SymOp::Constant(Value::string_utf8_from_bytes(vec![])?),
+                                            _ => {
+                                                return Err(Error::Bug("mapped sequence does not have a sequence type".into()));
+                                            }
+                                        };
+
+                                        empty_cont.final_formula = final_formula.clone();
+                                        zero_length_conts.push((len_eq_zero, final_formula, empty_cont.clone()));
+
+                                        final_conts.push(zero_length_conts.clone());
+
+                                        let mut cont_sets = vec![zero_length_conts];
+
+                                        // for a sequence of length 1 or more, we call the function
+                                        // on the ith sequence item
+                                        for seq_i in 1..=seq_maxlen {
+                                            let seq_i = u128::try_from(seq_i).map_err(|_| Error::Bug("Cannot convert usize to u128".into()))?;
+                                            let len_eq_i = SymOp::Equals(vec![Box::new(SymOp::Constant(Value::UInt(seq_i))), Box::new(SymOp::Len(Box::new(seq_formula.clone())))]).try_as_predicate()?;
+                                           
+                                            // group continuations of executing up to the ith
+                                            // element by parent in order to preserve logical
+                                            // dependency.
+                                            let mut next_conts = vec![];
+                                            for cont_set in cont_sets.into_iter() {
+                                                for (_pred, seq_cons, cont) in cont_set.into_iter() {
+                                                    if cont.halted() {
+                                                        ret.push(cont);
+                                                        continue;
+                                                    }
+                                                    if let Some(func) = self.contract_context.functions.get(func_name) {
+                                                        // user-defined function
+                                                        if func.arguments.len() != 1 {
+                                                            return Err(Error::Bug(format!("Function `{func_name}` takes {} arguments but expected 1 argument", func.arguments.len())));
+                                                        }
+                                                        let mut binding_cont = Continuation::from_parent(Rc::new(cont), format!("{function_name}/{func_name}/binding"), func.body.clone());
+                                                        
+                                                        binding_cont.bind_symop(&func.arguments[0], SymOp::UnwrapPanic(Box::new(SymOp::ElementAt(Box::new(seq_formula.clone()), Box::new(SymOp::Constant(Value::UInt(seq_i - 1)))))));
+
+                                                        let callee_cont = Continuation::from_caller(Rc::new(binding_cont), format!("{function_name}/{func_name}/body"), func.body.clone());
+                                                        let body_conts = self.eval(callee_cont, &func.body)?;
+
+                                                        let mut return_conts = vec![];
+                                                        for cont in body_conts.into_iter() {
+                                                            // there are two continuations: either
+                                                            // the function evaluated to true, or
+                                                            // false.  In the first case, the final
+                                                            // formula is the previous
+                                                            // continuation's list cons plus this
+                                                            // sequence item.  In the second case,
+                                                            // it's the previous continuation's
+                                                            // list cons with no new items.
+                                                            // Both continuations entail the
+                                                            // `len_eq_i` predicate.
+                                                            let func_result = cont.final_formula.clone();
+                                                            let seq_item = SymOp::UnwrapPanic(Box::new(SymOp::ElementAt(Box::new(seq_formula.clone()), Box::new(SymOp::Constant(Value::UInt(seq_i - 1))))));
+                                                            let parent_rc = Rc::new(cont);
+
+                                                            let true_seq_cons = match seq_ts {
+                                                                TypeSignature::SequenceType(SequenceSubtype::BufferType(..)) => {
+                                                                    SymOp::Concat(Box::new(seq_cons.clone()), Box::new(seq_item))
+                                                                },
+                                                                TypeSignature::SequenceType(SequenceSubtype::ListType(..)) => {
+                                                                    seq_cons.clone().list_cons(seq_item)
+                                                                },
+                                                                TypeSignature::SequenceType(SequenceSubtype::StringType(StringSubtype::ASCII(..))) => {
+                                                                    SymOp::Concat(Box::new(seq_cons.clone()), Box::new(seq_item))
+                                                                },
+                                                                TypeSignature::SequenceType(SequenceSubtype::StringType(StringSubtype::UTF8(..))) =>  {
+                                                                    SymOp::Concat(Box::new(seq_cons.clone()), Box::new(seq_item))
+                                                                },
+                                                                _ => {
+                                                                    return Err(Error::Bug("filtered sequence does not have a sequence type".into()));
+                                                                }
+                                                            };
+
+                                                            let mut true_cont = Continuation::from_callee(parent_rc.clone(), format!("{function_name}/{func_name}/return-true"), func.body.clone());
+                                                            true_cont.predicate = true_cont.predicate.and(func_result.clone().try_as_predicate()?);
+                                                            true_cont.final_formula = true_seq_cons.clone();
+
+                                                            let mut false_cont = Continuation::from_callee(parent_rc, format!("{function_name}/{func_name}/return-false"), func.body.clone());
+                                                            false_cont.predicate = false_cont.predicate.and(func_result.clone().try_as_predicate()?.not());
+                                                            false_cont.final_formula = seq_cons.clone();
+                                                            
+                                                            return_conts.push((len_eq_i.clone(), true_seq_cons, true_cont));
+                                                            return_conts.push((len_eq_i.clone(), seq_cons.clone(), false_cont));
+                                                        }
+
+                                                        next_conts.push(return_conts);
+                                                    }
+                                                    else {
+                                                        // native function
+                                                        todo!("Native functions not supported yet for fold");
+                                                    }
+                                                }
+                                            }
+                                            cont_sets = next_conts;
+                                            final_conts.extend(cont_sets.clone().into_iter());
+                                        }
+                                    }
+                                    for cont_set in final_conts.into_iter() {
+                                        for (pred, _formula, mut cont) in cont_set.into_iter() {
+                                            cont.predicate = cont.predicate.clone().and(pred);
+                                            ret.push(cont);
+                                        }
+                                    }
+                                    ret
                                 },
 
                                 "define-constant"

@@ -55,6 +55,7 @@ fn si(name: &str) -> Sym { Sym::Int(name.into()) }
 fn su(name: &str) -> Sym { Sym::UInt(name.into()) }
 fn sb(name: &str) -> Sym { Sym::Bool(name.into()) }
 fn sl(name: &str, ts: TS, len: u32) -> Sym { Sym::Sequence(name.into(), SequenceSubtype::ListType(ListTypeData::new_list(ts, len).unwrap())) }
+fn so(name: &str, ts: TS) -> Sym { Sym::Optional(name.into(), ts) }
 
 fn vi(name: &str) -> Box<SymOp> { Box::new(SymOp::Variable(Sym::Int(name.into()))) }
 fn vu(name: &str) -> Box<SymOp> { Box::new(SymOp::Variable(Sym::UInt(name.into()))) }
@@ -151,6 +152,11 @@ impl Halt {
         self.vars.push(VarOp::Set(var_name.into(), *var_value));
         self
     }
+
+    pub fn early_return(mut self) -> Self {
+        self.early_return = true;
+        self
+    }
 }
 
 fn assert_halts(mut conts: Vec<Continuation>, halts: Vec<Halt>) {
@@ -225,14 +231,12 @@ fn assert_halts(mut conts: Vec<Continuation>, halts: Vec<Halt>) {
                 found_cont = Some(i);
                 break;
             }
-            /*
             else if cont.predicate.clone().simplify().unwrap() == *h.predicate {
-                info!("Predicate matches, but not final formula:\n   Computed: {}\n      Given: {}\n", cont.final_formula.clone().simplify().unwrap(), &h.formula);
+                info!("Predicate {} matches, but not final formula:\n   Computed: {:?}\n      Given: {:?}\n", &h.predicate, cont.final_formula.clone().simplify().unwrap(), &h.formula);
             }
             else {
-                info!("Final formula matches, but not predicate:\n   Computed: {}\n      Given: {}\n", cont.predicate.clone().simplify().unwrap(), &h.predicate);
+                info!("Final formula {} matches, but not predicate:\n   Computed: {:?}\n      Given: {:?}\n", &h.formula, cont.predicate.clone().simplify().unwrap(), &h.predicate);
             }
-            */
         }
 
         let i = found_cont.expect(&format!("halting condition {} state {} not found in continuations", h.predicate.clone().simplify().unwrap(), h.formula.clone().simplify().unwrap()));
@@ -649,6 +653,67 @@ fn test_consolidate_and() {
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
     assert_eq!(simplified, Ok(*vb("foo")));
+
+    // (foo == 1 && foo == 2) == Ok(false)
+    let symop = and(vec![eq(vu("foo"), cu(1)), eq(vu("foo"), cu(2))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*cb(false)));
+    
+    // ((mod foo u2) == 1 && (mod foo u2) == 2) === Ok(false)
+    let symop = and(vec![eq(rem(vu("foo"), cu(2)), cu(1)), eq(rem(vu("foo"), cu(2)), cu(2))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*cb(false)));
+    
+    // ((mod foo u2) == 1 && (mod foo u3) == 2) does not reduce
+    let symop = and(vec![eq(rem(vu("foo"), cu(2)), cu(1)), eq(rem(vu("foo"), cu(3)), cu(2))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*symop));
+    
+    // ((mod foo u2) == 2 && (mod foo u3) == 2) === ((mod foo u2) == (mod foo u3) == u2)
+    let symop = and(vec![eq(rem(vu("foo"), cu(2)), cu(2)), eq(rem(vu("foo"), cu(3)), cu(2))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*eqs(vec![rem(vu("foo"), cu(2)), rem(vu("foo"), cu(3)), cu(2)])));
+
+    // (and (is-eq foo u0) (not (is-eq (foo u1)))) === (is-eq foo u0)
+    let symop = and(vec![eq(vu("foo"), cu(0)), not(eq(vu("foo"), cu(1)))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*eq(vu("foo"), cu(0))));
+
+    // (and (is-eq (mod foo u2) (mod foo u3)) (is-eq (mod foo u3) (mod foo u3)))
+    // === (is-eq (mod foo u2) (mod foo u3))
+    let symop = and(vec![eq(rem(vu("foo"), cu(2)), rem(vu("foo"), cu(3))), eq(rem(vu("foo"), cu(3)), rem(vu("foo"), cu(3)))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*eqs(vec![rem(vu("foo"), cu(2)), rem(vu("foo"), cu(3))])));
+
+    // (and (is-eq foo u1) (not (is-eq foo u1))) === Ok(false)
+    let symop = and(vec![eq(vu("foo"), cu(1)), not(eq(vu("foo"), cu(1)))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*cb(false)));
+
+    // (and (is-eq foo bar) (not (is-eq foo baz))) does not reduce
+    let symop = and(vec![eq(vu("foo"), vu("bar")), not(eq(vu("foo"), vu("baz")))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*symop));
+    
+    // (and (is-eq foo bar) (is-eq foo baz)) == Ok((and (is-eq foo bar baz)))
+    let symop = and(vec![eq(vu("foo"), vu("bar")), eq(vu("foo"), vu("baz"))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*eqs(vec![vu("foo"), vu("bar"), vu("baz")])));
+
+    // (and (var-get x) (not (var-get y))) does not reduce
+    let symop = and(vec![var_get(sb("x")), not(var_get(sb("y")))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*symop));
 }
 
 #[test]
@@ -1044,6 +1109,319 @@ fn test_commutative_cmp() {
     ]);
 
     assert_eq!(p1, p2);
+}
+
+#[test]
+fn test_halt_if_sym() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var x bool true)
+        (if (var-get x)
+            u2
+            u3)
+        "#,
+        None
+    ).unwrap();
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+    
+    // two halting states
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(pi(var_get(sb("x"))))
+            .formula(cu(2)),
+
+        Halt::new()
+            .pred(pnot(pi(var_get(sb("x")))))
+            .formula(cu(3)),
+    ]);
+}
+
+#[test]
+fn test_halt_as_max_len_sym_shrink() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var x (list 3 bool) (list true))
+        ;; shrinking
+        (as-max-len? (var-get x) u2)
+        "#,
+        None
+    ).unwrap();
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+
+    // two halting states -- one where the shrink works, and one where it doesn't
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(pleq(llen(var_get(sl("x", TS::BoolType, 3))), cu(2)))
+            .formula(some(var_get(sl("x", TS::BoolType, 3)))),
+        
+        // TODO: propagate new length
+        Halt::new()
+            .pred(pgreater(llen(var_get(sl("x", TS::BoolType, 3))), cu(2)))
+            .formula(none())
+    ]);
+}
+
+#[test]
+fn test_halt_as_max_len_sym_grow() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var x (list 3 bool) (list true))
+        ;; shrinking
+        (as-max-len? (var-get x) u4)
+        "#,
+        None
+    ).unwrap();
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+
+    // one halting state, since the new length exceeds the type's max length
+    assert_halts(termination_states, vec![
+        // TODO: propagate new length
+        Halt::new()
+            .pred(pleq(llen(var_get(sl("x", TS::BoolType, 3))), cu(4)))
+            .formula(some(var_get(sl("x", TS::BoolType, 3)))),
+    ]);
+}
+
+#[test]
+fn test_halt_tuple_cons() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var x bool true)
+        (define-data-var y uint u0)
+        (define-data-var z (list 4 uint) (list ))
+
+        { x: (var-get x), y: (if (var-get x) (var-get y) (+ u1 (var-get y))), z: (var-get z) }
+        "#,
+        None
+    ).unwrap();
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+    
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(pi(var_get(sb("x"))))
+            .formula(tcons(vec![
+                ("x", var_get(sb("x"))),
+                ("y", var_get(su("y"))),
+                ("z", var_get(sl("z", TS::UIntType, 4)))
+            ])),
+
+        Halt::new()
+            .pred(pi(not(var_get(sb("x")))))
+            .formula(tcons(vec![
+                ("x", var_get(sb("x"))),
+                ("y", add2(cu(1), var_get(su("y")))),
+                ("z", var_get(sl("z", TS::UIntType, 4)))
+            ]))
+    ]);
+}
+
+#[test]
+fn test_halt_tuple_get() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var x bool true)
+        (get y (if (var-get x) { y: u1 } { y: u2 }))
+        "#,
+        None
+    ).unwrap();
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+   
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(pi(var_get(sb("x"))))
+            .formula(cu(1)),
+
+        Halt::new()
+            .pred(pnot(pi(var_get(sb("x")))))
+            .formula(cu(2))
+    ]);
+}
+
+#[test]
+fn test_halt_tuple_merge() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var x bool true)
+        (merge { x: (var-get x) } (if (var-get x) { y: u1 } { y: u2 }))
+        "#,
+        None
+    ).unwrap();
+    
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+   
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(pi(var_get(sb("x"))))
+            .formula(tcons(vec![
+                ("x", var_get(sb("x"))),
+                ("y", cu(1))
+            ])),
+
+        Halt::new()
+            .pred(pnot(pi(var_get(sb("x")))))
+            .formula(tcons(vec![
+                ("x", var_get(sb("x"))),
+                ("y", cu(2))
+            ]))
+    ]);
+}
+
+#[test]
+fn test_halt_begin() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var x bool true)
+        (define-data-var y bool true)
+        (begin
+            (if (var-get x)
+                (var-set x false)
+                true)
+
+            (if (var-get y)
+                (var-set y false)
+                true))
+        "#,
+        None
+    ).unwrap();
+
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(pand(vec![
+                pi(var_get(sb("x"))),
+                pi(var_get(sb("y")))
+            ]))
+            .formula(cb(true))
+            .var("x", lv("x", cb(false)))
+            .var("y", lv("y", cb(false))),
+
+        Halt::new()
+            .pred(pand(vec![
+                pnot(pi(var_get(sb("x")))),
+                pi(var_get(sb("y")))
+            ]))
+            .formula(cb(true))
+            .var("y", lv("y", cb(false))),
+
+        Halt::new()
+            .pred(pand(vec![
+                pi(var_get(sb("x"))),
+                pnot(pi(var_get(sb("y"))))
+            ]))
+            .formula(cb(true))
+            .var("x", lv("x", cb(false))),
+
+        Halt::new()
+            .pred(pand(vec![
+                pnot(pi(var_get(sb("x")))),
+                pnot(pi(var_get(sb("y"))))
+            ]))
+            .formula(cb(true))
+    ]);
+}
+
+#[test]
+fn test_halt_default_to() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var x (optional bool) none)
+        (default-to false (var-get x))
+        "#,
+        None
+    ).unwrap();
+
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+    
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(pi(is_some(var_get(so("x", TS::BoolType)))))
+            .formula(unwrap_panic(var_get(so("x", TS::BoolType)))),
+
+        Halt::new()
+            .pred(pi(is_none(var_get(so("x", TS::BoolType)))))
+            .formula(cb(false))
+    ]);
+}
+
+#[test]
+fn test_halt_asserts() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var x bool true)
+        (asserts! (var-get x) (err u0))
+        "#,
+        None
+    ).unwrap();
+
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+   
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(pi(var_get(sb("x"))))
+            .formula(cb(true)),
+
+        Halt::new()
+            .pred(pnot(pi(var_get(sb("x")))))
+            .formula(Box::new(err(cu(0)).simplify().unwrap()))
+            .early_return()
+
+    ]);
+}
+
+#[test]
+fn test_halt_unwrap_opt() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var x (optional bool) (some true))
+        (unwrap! (var-get x) (err u0))
+        "#,
+        None
+    ).unwrap();
+
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+   
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(pi(var_get(sb("x"))))
+            .formula(unwrap_panic(var_get(sb("x")))),
+
+        Halt::new()
+            .pred(pnot(pi(var_get(sb("x")))))
+            .formula(Box::new(err(cu(0)).simplify().unwrap()))
+            .early_return()
+
+    ]);
 }
 
 #[test]
@@ -2226,6 +2604,7 @@ fn test_halt_fold_user_func_branch() {
               (+ (var-get v) x value)
               (- (var-get v) x value)))
 
+        ;; If v is odd, then this `fold` evaluates to:
         ;; ((var-get v) - u0 - u10)                     --> ((var-get v) - u10)
         ;; ((var-get v) - u1 - ((var-get v) - u10))     --> u9
         ;; ((var-get v) - u2 - u9)                      --> ((var-get v) - u11)
@@ -2239,4 +2618,432 @@ fn test_halt_fold_user_func_branch() {
         info!("{}", t.trace());
         info!("termination state: ==================================\n{}\n", &t.clone().rollup());
     }
+
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(peq(rem(var_get(su("v")), cu(2)), cu(0)))
+            .formula(add(vec![
+                var_get(su("v")),
+                var_get(su("v")),
+                var_get(su("v")),
+                var_get(su("v")),
+                cu(16)
+            ])),
+
+        Halt::new()
+            .pred(pnot(peq(rem(var_get(su("v")), cu(2)), cu(0))))
+            .formula(cu(8))
+    ]);
+}
+
+#[test]
+fn test_halt_fold_sequence_branch() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var v uint u0)
+
+        (define-private (fetch-add (x uint) (value uint))
+           (+ (var-get v) x value))
+
+        (fold fetch-add (if (is-eq (mod (var-get v) u2) u0) (list u0 u1 u2 u3) (list u10 u11 u12 u13)) u10)
+        "#,
+        None
+    ).unwrap();
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(peq(rem(var_get(su("v")), cu(2)), cu(0)))
+            .formula(add(vec![
+                var_get(su("v")),
+                var_get(su("v")),
+                var_get(su("v")),
+                var_get(su("v")),
+                cu(16)
+            ])),
+
+        Halt::new()
+            .pred(pnot(peq(rem(var_get(su("v")), cu(2)), cu(0))))
+            .formula(add(vec![
+                var_get(su("v")),
+                var_get(su("v")),
+                var_get(su("v")),
+                var_get(su("v")),
+                cu(56)
+            ])),
+    ]);
+}
+
+#[test]
+fn test_halt_fold_symbolic_lists() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var v uint u0)
+        (define-data-var list-v1 (list 4 uint) (list u0 u1 u10 u11))
+
+        (define-private (fetch-add (x uint) (value uint))
+           (+ (var-get v) x value))
+
+        (fold fetch-add (var-get list-v1) u10)
+        "#,
+        None
+    ).unwrap();
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+   
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(peq(llen(var_get(sl("list-v1", TS::UIntType, 4))), cu(0)))
+            .formula(cu(10)),
+
+        Halt::new()
+            .pred(peq(llen(var_get(sl("list-v1", TS::UIntType, 4))), cu(1)))
+            .formula(add(vec![
+                var_get(su("v")),
+                unwrap_panic(elat(var_get(sl("list-v1", TS::UIntType, 4)), cu(0))),
+                cu(10)
+            ])),
+
+        Halt::new()
+            .pred(peq(llen(var_get(sl("list-v1", TS::UIntType, 4))), cu(2)))
+            .formula(add(vec![
+                var_get(su("v")),
+                var_get(su("v")),
+                unwrap_panic(elat(var_get(sl("list-v1", TS::UIntType, 4)), cu(0))),
+                unwrap_panic(elat(var_get(sl("list-v1", TS::UIntType, 4)), cu(1))),
+                cu(10)
+            ])),
+
+        Halt::new()
+            .pred(peq(llen(var_get(sl("list-v1", TS::UIntType, 4))), cu(3)))
+            .formula(add(vec![
+                var_get(su("v")),
+                var_get(su("v")),
+                var_get(su("v")),
+                unwrap_panic(elat(var_get(sl("list-v1", TS::UIntType, 4)), cu(0))),
+                unwrap_panic(elat(var_get(sl("list-v1", TS::UIntType, 4)), cu(1))),
+                unwrap_panic(elat(var_get(sl("list-v1", TS::UIntType, 4)), cu(2))),
+                cu(10)
+            ])),
+
+        Halt::new()
+            .pred(peq(llen(var_get(sl("list-v1", TS::UIntType, 4))), cu(4)))
+            .formula(add(vec![
+                var_get(su("v")),
+                var_get(su("v")),
+                var_get(su("v")),
+                var_get(su("v")),
+                unwrap_panic(elat(var_get(sl("list-v1", TS::UIntType, 4)), cu(0))),
+                unwrap_panic(elat(var_get(sl("list-v1", TS::UIntType, 4)), cu(1))),
+                unwrap_panic(elat(var_get(sl("list-v1", TS::UIntType, 4)), cu(2))),
+                unwrap_panic(elat(var_get(sl("list-v1", TS::UIntType, 4)), cu(3))),
+                cu(10)
+            ]))
+    ]);
+}
+
+#[test]
+fn test_halt_filter_list_user_func() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var v uint u1)
+
+        (define-private (parity (x uint))
+            (is-eq (mod x u2) (var-get v)))
+
+        (filter parity (list u0 u1 u2 u3))
+        "#,
+        None
+    ).unwrap();
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(peq(var_get(su("v")), cu(0)))
+            .formula(cl(vec![valu(0), valu(2)])),
+
+        Halt::new()
+            .pred(peq(var_get(su("v")), cu(1)))
+            .formula(cl(vec![valu(1), valu(3)])),
+
+        Halt::new()
+            .pred(pand(vec![pnot(peq(var_get(su("v")), cu(0))), pnot(peq(var_get(su("v")), cu(1)))]))
+            .formula(cl(vec![]))
+    ]);
+}
+
+#[test]
+fn test_halt_filter_user_func_branch() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var v uint u0)
+
+        (define-private (parity-is-three (x uint))
+           (if (is-eq (mod x u2) u0)
+              (is-eq (var-get v) u3)
+              (is-eq x u3)))
+
+        (filter parity-is-three (list u0 u1 u2 u3))
+        "#,
+        None
+    ).unwrap();
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(peq(var_get(su("v")), cu(3)))
+            .formula(cl(vec![valu(0), valu(2), valu(3)])),
+
+        Halt::new()
+            .pred(pnot(peq(var_get(su("v")), cu(3))))
+            .formula(cl(vec![valu(3)]))
+    ]);
+}
+
+#[test]
+fn test_halt_filter_sequence_branch() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var v uint u1)
+
+        (define-private (parity (x uint))
+            (is-eq (mod x u2) (var-get v)))
+
+        (filter parity (if (is-eq (var-get v) u1) (list u0 u1 u2 u3) (list u5 u10 u15 u20)))
+        "#,
+        None
+    ).unwrap();
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(peq(var_get(su("v")), cu(1)))
+            .formula(cl(vec![valu(1), valu(3)])),
+
+        Halt::new()
+            .pred(peq(var_get(su("v")), cu(0)))
+            .formula(cl(vec![valu(10), valu(20)])),
+
+        Halt::new()
+            .pred(pand(vec![pnot(peq(var_get(su("v")), cu(0))), pnot(peq(var_get(su("v")), cu(1)))]))
+            .formula(cl(vec![]))
+    ]);
+}
+
+#[test]
+fn test_halt_filter_symbolic_lists() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var v uint u1)
+        (define-data-var l (list 3 uint) (list u0 u1 u2))
+
+        (define-private (parity (x uint))
+            (is-eq (mod x u2) (var-get v)))
+
+        (filter parity (var-get l))
+        "#,
+        None
+    ).unwrap();
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+
+    assert_halts(termination_states, vec![
+        // length 0 -- 1 possibility
+        Halt::new()
+            .pred(peq(llen(var_get(sl("l", TS::UIntType, 3))), cu(0)))
+            .formula(cl(vec![])),
+
+        // length 1 -- 2 possibilities
+        Halt::new()
+            .pred(pand(vec![
+                peq(llen(var_get(sl("l", TS::UIntType, 3))), cu(1)),
+                peq(var_get(su("v")), rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(0))), cu(2)))
+            ]))
+            .formula(lcons(vec![unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(0)))])),
+        
+        Halt::new()
+            .pred(pand(vec![
+                peq(llen(var_get(sl("l", TS::UIntType, 3))), cu(1)),
+                pnot(peq(var_get(su("v")), rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(0))), cu(2))))
+            ]))
+            .formula(cl(vec![])),
+           
+        // length 2 -- 4 possibilities
+        Halt::new()
+            .pred(pand(vec![
+                peq(llen(var_get(sl("l", TS::UIntType, 3))), cu(2)),
+                peqs(vec![
+                    var_get(su("v")),
+                    rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(0))), cu(2)),
+                    rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(1))), cu(2)),
+                ])
+            ]))
+            .formula(lcons(vec![
+                unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(0))),
+                unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(1)))
+            ])),
+
+        Halt::new()
+            .pred(pand(vec![
+                peq(llen(var_get(sl("l", TS::UIntType, 3))), cu(2)),
+                peq(var_get(su("v")), rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(0))), cu(2))),
+                pnot(peq(var_get(su("v")), rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(1))), cu(2)))),
+            ]))
+            .formula(lcons(vec![
+                unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(0))),
+            ])),
+
+        Halt::new()
+            .pred(pand(vec![
+                peq(llen(var_get(sl("l", TS::UIntType, 3))), cu(2)),
+                pnot(peq(var_get(su("v")), rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(0))), cu(2)))),
+                peq(var_get(su("v")), rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(1))), cu(2))),
+            ]))
+            .formula(lcons(vec![
+                unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(1))),
+            ])),
+
+        Halt::new()
+            .pred(pand(vec![
+                peq(llen(var_get(sl("l", TS::UIntType, 3))), cu(2)),
+                pnot(peq(var_get(su("v")), rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(0))), cu(2)))),
+                pnot(peq(var_get(su("v")), rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(1))), cu(2)))),
+            ]))
+            .formula(cl(vec![])),
+
+        // length 3 -- 8 possibilities
+        Halt::new()
+            .pred(pand(vec![
+                peq(llen(var_get(sl("l", TS::UIntType, 3))), cu(3)),
+                peqs(vec![
+                    var_get(su("v")),
+                    rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(0))), cu(2)),
+                    rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(1))), cu(2)),
+                    rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(2))), cu(2))
+                ])
+            ]))
+            .formula(lcons(vec![
+                unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(0))),
+                unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(1))),
+                unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(2)))
+            ])),
+
+        Halt::new()
+            .pred(pand(vec![
+                peq(llen(var_get(sl("l", TS::UIntType, 3))), cu(3)),
+                peqs(vec![
+                    var_get(su("v")),
+                    rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(0))), cu(2)),
+                    rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(1))), cu(2)),
+                ]),
+                pnot(peq(var_get(su("v")), rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(2))), cu(2)))),
+            ]))
+            .formula(lcons(vec![
+                unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(0))),
+                unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(1))),
+            ])),
+        
+        Halt::new()
+            .pred(pand(vec![
+                peq(llen(var_get(sl("l", TS::UIntType, 3))), cu(3)),
+                peqs(vec![
+                    var_get(su("v")),
+                    rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(0))), cu(2)),
+                    rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(2))), cu(2))
+                ]),
+                pnot(peq(var_get(su("v")), rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(1))), cu(2)))),
+            ]))
+            .formula(lcons(vec![
+                unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(0))),
+                unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(2))),
+            ])),
+        
+        Halt::new()
+            .pred(pand(vec![
+                peq(llen(var_get(sl("l", TS::UIntType, 3))), cu(3)),
+                peqs(vec![
+                    var_get(su("v")),
+                    rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(1))), cu(2)),
+                    rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(2))), cu(2))
+                ]),
+                pnot(peq(var_get(su("v")), rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(0))), cu(2)))),
+            ]))
+            .formula(lcons(vec![
+                unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(1))),
+                unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(2))),
+            ])),
+        
+        Halt::new()
+            .pred(pand(vec![
+                peq(llen(var_get(sl("l", TS::UIntType, 3))), cu(3)),
+                peqs(vec![
+                    var_get(su("v")),
+                    rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(1))), cu(2))
+                ]),
+                pnot(peq(var_get(su("v")), rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(0))), cu(2)))),
+                pnot(peq(var_get(su("v")), rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(2))), cu(2)))),
+            ]))
+            .formula(lcons(vec![
+                unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(1))),
+            ])),
+
+        Halt::new()
+            .pred(pand(vec![
+                peq(llen(var_get(sl("l", TS::UIntType, 3))), cu(3)),
+                peqs(vec![
+                    var_get(su("v")),
+                    rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(0))), cu(2))
+                ]),
+                pnot(peq(var_get(su("v")), rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(1))), cu(2)))),
+                pnot(peq(var_get(su("v")), rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(2))), cu(2)))),
+            ]))
+            .formula(lcons(vec![
+                unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(0))),
+            ])),
+
+        Halt::new()
+            .pred(pand(vec![
+                peq(llen(var_get(sl("l", TS::UIntType, 3))), cu(3)),
+                peqs(vec![
+                    var_get(su("v")),
+                    rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(2))), cu(2))
+                ]),
+                pnot(peq(var_get(su("v")), rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(0))), cu(2)))),
+                pnot(peq(var_get(su("v")), rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(1))), cu(2)))),
+            ]))
+            .formula(lcons(vec![
+                unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(2))),
+            ])),
+
+        Halt::new()
+            .pred(pand(vec![
+                peq(llen(var_get(sl("l", TS::UIntType, 3))), cu(3)),
+                pnot(peq(var_get(su("v")), rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(0))), cu(2)))),
+                pnot(peq(var_get(su("v")), rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(1))), cu(2)))),
+                pnot(peq(var_get(su("v")), rem(unwrap_panic(elat(var_get(sl("l", TS::UIntType, 3)), cu(2))), cu(2)))),
+            ]))
+            .formula(cl(vec![])),
+    ]);
 }
