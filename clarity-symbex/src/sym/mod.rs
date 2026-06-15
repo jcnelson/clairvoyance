@@ -2971,7 +2971,7 @@ impl SymOp {
                         Ok(*inner)
                     }
                     op => {
-                        match Self::simplify_native_1arg("unwrap-err-panic", Box::new(op), |x| Self::UnwrapPanic(x)) {
+                        match Self::simplify_native_1arg("unwrap-err-panic", Box::new(op), |x| Self::UnwrapErrPanic(x)) {
                             Err(Error::VM(VmExecutionError::Runtime(RuntimeError::UnwrapFailure, _))) => {
                                 Ok(Self::Panic)
                             }
@@ -4015,7 +4015,6 @@ impl Symbex {
            .filter(|c| {
                if let Some(SymOp::Panic) = c.simplified_final_formula {
                    debug!("Continuation always panics:\n{c}");
-                   return false;
                }
 
                if c.simplified_predicate != Some(Predicate::False) {
@@ -5420,16 +5419,18 @@ impl Symbex {
                                         let parent_rc = Rc::new(cond_cont);
                                         let err_conts = self.eval(Continuation::from_parent(parent_rc, format!("{function_name}.err-case"), err_sym.clone()), &err_sym)?;
 
-                                        for mut err_cont in err_conts.into_iter() {
-                                            if err_cont.halted() {
-                                                new_conts.push(err_cont);
+                                        for parent_cont in err_conts.into_iter() {
+                                            if parent_cont.halted() {
+                                                new_conts.push(parent_cont);
                                                 continue;
                                             }
 
+                                            let cond_predicate = parent_cont.predicate.clone();
+                                            let parent_rc = Rc::new(parent_cont);
+
                                             // case 1: `(is-ok x)` is true or `(is-some x)` is true
                                             // TODO: make new continuation
-                                            let mut ok_cont = err_cont.clone();
-                                            let cond_predicate = err_cont.predicate.clone();
+                                            let mut ok_cont = Continuation::from_parent(parent_rc.clone(), format!("{function_name}.ok-case"), cond_sym.clone());
                                             ok_cont.predicate = match self.typemap.get_type_expected(&cond_sym) {
                                                 Some(TypeSignature::OptionalType(..)) => {
                                                     cond_predicate.clone().and(Predicate::IsSome(cond_formula.clone()))
@@ -5444,8 +5445,10 @@ impl Symbex {
                                                     return Err(Error::Bug(format!("Did not get any type information for symbol {cond_sym}")));
                                                 }
                                             };
+
                                             ok_cont.final_formula = SymOp::UnwrapPanic(Box::new(cond_formula.clone()));
 
+                                            let mut err_cont = Continuation::from_parent(parent_rc.clone(), format!("{function_name}.err-case"), err_sym.clone());
                                             // case 2: (is-ok x) (or (is-some x)) is false
                                             err_cont.predicate = match self.typemap.get_type_expected(&cond_sym) {
                                                 Some(TypeSignature::OptionalType(..)) => {
@@ -5501,19 +5504,22 @@ impl Symbex {
                                         let parent_rc = Rc::new(cond_cont);
                                         let err_conts = self.eval(Continuation::from_parent(parent_rc, format!("{function_name}.err-case"), err_sym.clone()), &err_sym)?;
 
-                                        for mut err_cont in err_conts.into_iter() {
-                                            if err_cont.halted() {
-                                                new_conts.push(err_cont);
+                                        for parent_cont in err_conts.into_iter() {
+                                            if parent_cont.halted() {
+                                                new_conts.push(parent_cont);
                                                 continue;
                                             }
 
+                                            let cond_predicate = parent_cont.predicate.clone();
+                                            let parent_rc = Rc::new(parent_cont);
+
                                             // case 1: `(is-err x)` is true
-                                            let mut is_err_cont = err_cont.clone();
-                                            let cond_predicate = err_cont.predicate.clone();
+                                            let mut is_err_cont = Continuation::from_parent(parent_rc.clone(), format!("{function_name}.is-err"), cond_sym.clone());
                                             is_err_cont.predicate = cond_predicate.clone().and(Predicate::IsErr(cond_formula.clone()));
-                                            is_err_cont.final_formula = cond_formula.clone();
+                                            is_err_cont.final_formula = SymOp::UnwrapErrPanic(Box::new(cond_formula.clone()));
 
                                             // case 2: `(is-err x)` is false
+                                            let mut err_cont = Continuation::from_parent(parent_rc.clone(), format!("{function_name}.is-ok"), err_sym.clone());
                                             err_cont.predicate = cond_predicate.and(Predicate::IsOkay(cond_formula.clone()));
                                             err_cont.early_return = true;
 
@@ -5539,17 +5545,18 @@ impl Symbex {
                                     // evaluate `x`
                                     let cond_conts = self.eval(continuation, &cond_sym)?;
 
-                                    for mut cond_cont in cond_conts.into_iter() {
+                                    for cond_cont in cond_conts.into_iter() {
                                         if cond_cont.halted() {
                                             new_conts.push(cond_cont);
                                             continue;
                                         }
 
                                         let cond_formula = cond_cont.final_formula.clone();
+                                        let cond_predicate = cond_cont.predicate.clone();
+                                        let parent_rc = Rc::new(cond_cont);
 
                                         // case 1: `(is-ok x)` is true or `(is-some x)` is true
-                                        let mut ok_cont = cond_cont.clone();
-                                        let cond_predicate = cond_cont.predicate.clone();
+                                        let mut ok_cont = Continuation::from_parent(parent_rc.clone(), format!("{function_name}/unwrap-success"), cond_sym.clone());
                                         ok_cont.predicate = match self.typemap.get_type_expected(&cond_sym) {
                                             Some(TypeSignature::OptionalType(..)) => {
                                                 cond_predicate.clone().and(Predicate::IsSome(cond_formula.clone()))
@@ -5564,11 +5571,12 @@ impl Symbex {
                                                 return Err(Error::Bug(format!("Did not get any type information for symbol {cond_sym}")));
                                             }
                                         };
-                                        ok_cont.final_formula = cond_formula.clone();
+                                        ok_cont.final_formula = SymOp::UnwrapPanic(Box::new(cond_formula.clone()));
 
                                         // case 2: (is-ok x) (or (is-some x)) is false. This
                                         // panics
-                                        cond_cont.predicate = match self.typemap.get_type_expected(&cond_sym) {
+                                        let mut panic_cont = Continuation::from_parent(parent_rc.clone(), format!("{function_name}/unwrap-failure"), cond_sym.clone());
+                                        panic_cont.predicate = match self.typemap.get_type_expected(&cond_sym) {
                                             Some(TypeSignature::OptionalType(..)) => {
                                                 cond_predicate.and(Predicate::IsNone(cond_formula.clone()))
                                             }
@@ -5583,10 +5591,11 @@ impl Symbex {
                                             }
                                         };
 
-                                        cond_cont.panicking = true;
+                                        panic_cont.panicking = true;
+                                        panic_cont.final_formula = SymOp::Panic;
 
                                         new_conts.push(ok_cont);
-                                        new_conts.push(cond_cont);
+                                        new_conts.push(panic_cont);
                                     }
 
                                     new_conts
@@ -5606,27 +5615,31 @@ impl Symbex {
                                     // evaluate `x`
                                     let cond_conts = self.eval(continuation, &cond_sym)?;
 
-                                    for mut cond_cont in cond_conts.into_iter() {
+                                    for cond_cont in cond_conts.into_iter() {
                                         if cond_cont.halted() {
                                             new_conts.push(cond_cont);
                                             continue;
                                         }
 
+                                        let cond_predicate = cond_cont.predicate.clone();
                                         let cond_formula = cond_cont.final_formula.clone();
 
+                                        let parent_rc = Rc::new(cond_cont);
+
                                         // case 1: `(is-err x)` is true
-                                        let mut err_cont = cond_cont.clone();
-                                        let cond_predicate = cond_cont.predicate.clone();
-                                        err_cont.predicate = cond_predicate.clone().and(Predicate::IsErr(cond_formula.clone()));
-                                        err_cont.final_formula = cond_formula.clone();
+                                        let mut is_err_cont = Continuation::from_parent(parent_rc.clone(), format!("{function_name}/unwrap-err-success"), cond_sym.clone());
+                                        is_err_cont.predicate = cond_predicate.clone().and(Predicate::IsErr(cond_formula.clone()));
+                                        is_err_cont.final_formula = SymOp::UnwrapErrPanic(Box::new(cond_formula.clone()));
 
                                         // case 2: (is-ok x) is true This
                                         // panics
-                                        cond_cont.predicate = cond_predicate.and(Predicate::IsOkay(cond_formula.clone()));
-                                        cond_cont.panicking = true;
+                                        let mut panic_cont = Continuation::from_parent(parent_rc.clone(), format!("{function_name}/unwrap-err-failure"), cond_sym.clone());
+                                        panic_cont.predicate = cond_predicate.and(Predicate::IsOkay(cond_formula.clone()));
+                                        panic_cont.panicking = true;
+                                        panic_cont.final_formula = SymOp::Panic;
 
-                                        new_conts.push(err_cont);
-                                        new_conts.push(cond_cont);
+                                        new_conts.push(is_err_cont);
+                                        new_conts.push(panic_cont);
                                     }
 
                                     new_conts
@@ -5672,7 +5685,7 @@ impl Symbex {
                                             let mut ok_cont = Continuation::from_parent(parent_rc.clone(), format!("{function_name}/ok-case"), cond_ok_sym.clone());
 
                                             ok_cont.predicate = parent_pred.clone().and(Predicate::IsOkay(cond_formula.clone()));
-                                            ok_cont.bind_symop(&ok_sym_name.clone(), cond_formula.clone());
+                                            ok_cont.bind_symop(&ok_sym_name.clone(), SymOp::UnwrapPanic(Box::new(cond_formula.clone())));
 
                                             let ok_conts = self.eval(ok_cont, &cond_ok_sym)?;
                                             new_conts.extend(ok_conts.into_iter());
@@ -5681,7 +5694,7 @@ impl Symbex {
                                             let mut err_cont = Continuation::from_parent(parent_rc.clone(), format!("{function_name}/err-case"), cond_err_sym.clone());
 
                                             err_cont.predicate = parent_pred.clone().and(Predicate::IsErr(cond_formula.clone()));
-                                            err_cont.bind_symop(&err_sym_name.clone(), cond_formula.clone());
+                                            err_cont.bind_symop(&err_sym_name.clone(), SymOp::UnwrapErrPanic(Box::new(cond_formula.clone())));
 
                                             let err_conts = self.eval(err_cont, &cond_err_sym)?;
                                             new_conts.extend(err_conts.into_iter());
@@ -5724,7 +5737,7 @@ impl Symbex {
                                             let mut some_cont = Continuation::from_parent(parent_rc.clone(), format!("{function_name}/some-case"), cond_some_sym.clone());
 
                                             some_cont.predicate = parent_pred.clone().and(Predicate::IsSome(cond_formula.clone()));
-                                            some_cont.bind_symop(&some_sym_name.clone(), cond_formula.clone());
+                                            some_cont.bind_symop(&some_sym_name.clone(), SymOp::UnwrapPanic(Box::new(cond_formula.clone())));
 
                                             let some_conts = self.eval(some_cont, &cond_some_sym)?;
                                             new_conts.extend(some_conts.into_iter());
@@ -5754,17 +5767,20 @@ impl Symbex {
 
                                     let mut new_conts = vec![];
                                     let cond_conts = self.eval(Continuation::from_parent(parent_rc, format!("{function_name}/inner"), exp_sym.clone()), &exp_sym)?;
-                                    for mut cond_cont in cond_conts.into_iter() {
+                                    for cond_cont in cond_conts.into_iter() {
                                         if cond_cont.halted() {
                                             new_conts.push(cond_cont);
                                             continue;
                                         }
 
                                         let cond_formula = cond_cont.final_formula.clone();
+                                        let cond_predicate = cond_cont.predicate.clone();
+
+                                        let parent_rc = Rc::new(cond_cont);
 
                                         // case 1: `(is-ok x)` is true or `(is-some x)` is true
-                                        let mut ok_cont = cond_cont.clone();
-                                        let cond_predicate = cond_cont.predicate.clone();
+                                        let mut ok_cont = Continuation::from_parent(parent_rc.clone(), format!("{function_name}/try-success"), exp_sym.clone());
+
                                         ok_cont.predicate = match self.typemap.get_type_expected(&exp_sym) {
                                             Some(TypeSignature::OptionalType(..)) => {
                                                 cond_predicate.clone().and(Predicate::IsSome(cond_formula.clone()))
@@ -5779,15 +5795,22 @@ impl Symbex {
                                                 return Err(Error::Bug(format!("Did not get any type information for symbol {exp_sym}")));
                                             }
                                         };
-                                        ok_cont.final_formula = cond_formula.clone();
+                                        ok_cont.final_formula = SymOp::UnwrapPanic(Box::new(cond_formula.clone()));
 
                                         // case 2: (is-ok x) (or (is-some x)) is false
-                                        cond_cont.predicate = match self.typemap.get_type_expected(&exp_sym) {
+                                        let mut fail_cont = Continuation::from_parent(parent_rc.clone(), format!("{function_name}/try-failure"), exp_sym.clone());
+                                        let (fail_formula, fail_predicate) = match self.typemap.get_type_expected(&exp_sym) {
                                             Some(TypeSignature::OptionalType(..)) => {
-                                                cond_predicate.and(Predicate::IsNone(cond_formula.clone()))
+                                                (
+                                                    SymOp::none(),
+                                                    cond_predicate.and(Predicate::IsNone(cond_formula.clone()))
+                                                )
                                             }
                                             Some(TypeSignature::ResponseType(..)) => {
-                                                cond_predicate.and(Predicate::IsErr(cond_formula.clone()))
+                                                (
+                                                    SymOp::UnwrapErrPanic(Box::new(cond_formula.clone())),
+                                                    cond_predicate.and(Predicate::IsErr(cond_formula.clone()))
+                                                )
                                             }
                                             Some(x) => {
                                                 return Err(Error::Bug(format!("Did not get (optional ..) or (response ..) type (got {x:?}) for symbol {exp_sym}")));
@@ -5796,10 +5819,12 @@ impl Symbex {
                                                 return Err(Error::Bug(format!("Did not get any type information for symbol {exp_sym}")));
                                             }
                                         };
-                                        cond_cont.early_return = true;
+                                        fail_cont.early_return = true;
+                                        fail_cont.final_formula = fail_formula;
+                                        fail_cont.predicate = fail_predicate;
 
                                         new_conts.push(ok_cont);
-                                        new_conts.push(cond_cont);
+                                        new_conts.push(fail_cont);
                                     }
 
                                     new_conts

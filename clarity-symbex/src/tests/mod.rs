@@ -56,6 +56,7 @@ fn su(name: &str) -> Sym { Sym::UInt(name.into()) }
 fn sb(name: &str) -> Sym { Sym::Bool(name.into()) }
 fn sl(name: &str, ts: TS, len: u32) -> Sym { Sym::Sequence(name.into(), SequenceSubtype::ListType(ListTypeData::new_list(ts, len).unwrap())) }
 fn so(name: &str, ts: TS) -> Sym { Sym::Optional(name.into(), ts) }
+fn sr(name: &str, ok_ts: TS, err_ts: TS) -> Sym { Sym::Response(name.into(), ok_ts, err_ts) }
 
 fn vi(name: &str) -> Box<SymOp> { Box::new(SymOp::Variable(Sym::Int(name.into()))) }
 fn vu(name: &str) -> Box<SymOp> { Box::new(SymOp::Variable(Sym::UInt(name.into()))) }
@@ -150,6 +151,11 @@ impl Halt {
 
     pub fn var(mut self, var_name: &str, var_value: Box<SymOp>) -> Self {
         self.vars.push(VarOp::Set(var_name.into(), *var_value));
+        self
+    }
+
+    pub fn panic(mut self) -> Self {
+        self.panicking = true;
         self
     }
 
@@ -1413,16 +1419,267 @@ fn test_halt_unwrap_opt() {
    
     assert_halts(termination_states, vec![
         Halt::new()
-            .pred(pi(var_get(sb("x"))))
-            .formula(unwrap_panic(var_get(sb("x")))),
+            .pred(pi(is_some(var_get(so("x", TS::BoolType)))))
+            .formula(unwrap_panic(var_get(so("x", TS::BoolType)))),
 
         Halt::new()
-            .pred(pnot(pi(var_get(sb("x")))))
+            .pred(pi(is_none(var_get(so("x", TS::BoolType)))))
             .formula(Box::new(err(cu(0)).simplify().unwrap()))
             .early_return()
 
     ]);
 }
+
+#[test]
+fn test_halt_unwrap_res() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var x (response bool uint) (ok true))
+        (unwrap! (var-get x) (err u0))
+        "#,
+        None
+    ).unwrap();
+
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+   
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(pi(is_ok(var_get(sr("x", TS::BoolType, TS::UIntType)))))
+            .formula(unwrap_panic(var_get(sr("x", TS::BoolType, TS::UIntType)))),
+
+        Halt::new()
+            .pred(pi(is_err(var_get(sr("x", TS::BoolType, TS::UIntType)))))
+            .formula(Box::new(err(cu(0)).simplify().unwrap()))
+            .early_return()
+
+    ]);
+}
+
+#[test]
+fn test_halt_unwrap_err() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var x (response bool uint) (err u1))
+        (unwrap-err! (var-get x) (err u0))
+        "#,
+        None
+    ).unwrap();
+
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+   
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(pi(is_err(var_get(sr("x", TS::BoolType, TS::UIntType)))))
+            .formula(unwrap_err_panic(var_get(sr("x", TS::BoolType, TS::UIntType)))),
+
+        Halt::new()
+            .pred(pi(is_ok(var_get(sr("x", TS::BoolType, TS::UIntType)))))
+            .formula(Box::new(err(cu(0)).simplify().unwrap()))
+            .early_return()
+
+    ]);
+}
+
+#[test]
+fn test_halt_unwrap_panic_opt() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var x (optional bool) (some true))
+        (unwrap-panic (var-get x))
+        "#,
+        None
+    ).unwrap();
+
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+   
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(pi(is_some(var_get(so("x", TS::BoolType)))))
+            .formula(unwrap_panic(var_get(so("x", TS::BoolType)))),
+
+        Halt::new()
+            .pred(pi(is_none(var_get(so("x", TS::BoolType)))))
+            .formula(panic())
+            .panic()
+
+    ]);
+}
+
+#[test]
+fn test_halt_unwrap_panic_res() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var x (response bool uint) (ok true))
+        (unwrap-panic (var-get x))
+        "#,
+        None
+    ).unwrap();
+
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+   
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(pi(is_ok(var_get(sr("x", TS::BoolType, TS::UIntType)))))
+            .formula(unwrap_panic(var_get(sr("x", TS::BoolType, TS::UIntType)))),
+
+        Halt::new()
+            .pred(pi(is_err(var_get(sr("x", TS::BoolType, TS::UIntType)))))
+            .formula(panic())
+            .panic()
+
+    ]);
+}
+
+#[test]
+fn test_halt_unwrap_err_panic() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var x (response bool uint) (err u0))
+        (unwrap-err-panic (var-get x))
+        "#,
+        None
+    ).unwrap();
+
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+   
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(pi(is_err(var_get(sr("x", TS::BoolType, TS::UIntType)))))
+            .formula(unwrap_err_panic(var_get(sr("x", TS::BoolType, TS::UIntType)))),
+
+        Halt::new()
+            .pred(pi(is_ok(var_get(sr("x", TS::BoolType, TS::UIntType)))))
+            .formula(panic())
+            .panic()
+
+    ]);
+}
+
+#[test]
+fn test_halt_match_opt() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var x (optional uint) (some u10))
+        (match (var-get x)
+            y (+ y u1)
+            u2)
+        "#,
+        None
+    ).unwrap();
+
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(pi(is_some(var_get(so("x", TS::UIntType)))))
+            .formula(add2(cu(1), unwrap_panic(var_get(so("x", TS::UIntType))))),
+
+        Halt::new()
+            .pred(pi(is_none(var_get(so("x", TS::UIntType)))))
+            .formula(cu(2))
+    ]);
+}
+
+#[test]
+fn test_halt_match_res() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var x (response uint uint) (ok u10))
+        (match (var-get x)
+            ok-y (+ ok-y u1)
+            err-y (- err-y u1))
+        "#,
+        None
+    ).unwrap();
+
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(pi(is_ok(var_get(sr("x", TS::UIntType, TS::UIntType)))))
+            .formula(add2(cu(1), unwrap_panic(var_get(sr("x", TS::UIntType, TS::UIntType))))),
+
+        Halt::new()
+            .pred(pi(is_err(var_get(sr("x", TS::UIntType, TS::UIntType)))))
+            .formula(sub2(unwrap_err_panic(var_get(sr("x", TS::UIntType, TS::UIntType))), cu(1)))
+    ]);
+}
+
+#[test]
+fn test_halt_try_opt() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var x (optional uint) (some u10))
+        (try! (var-get x))
+        "#,
+        None
+    ).unwrap();
+
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(pi(is_some(var_get(so("x", TS::UIntType)))))
+            .formula(unwrap_panic(var_get(so("x", TS::UIntType)))),
+
+        Halt::new()
+            .pred(pi(is_none(var_get(so("x", TS::UIntType)))))
+            .formula(none())
+            .early_return()
+    ]);
+}
+
+#[test]
+fn test_halt_try_res() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var x (response uint uint) (ok u10))
+        (try! (var-get x))
+        "#,
+        None
+    ).unwrap();
+
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+
+    assert_halts(termination_states, vec![
+        Halt::new()
+            .pred(pi(is_ok(var_get(sr("x", TS::UIntType, TS::UIntType)))))
+            .formula(unwrap_panic(var_get(sr("x", TS::UIntType, TS::UIntType)))),
+
+        Halt::new()
+            .pred(pi(is_err(var_get(sr("x", TS::UIntType, TS::UIntType)))))
+            .formula(unwrap_err_panic(var_get(sr("x", TS::UIntType, TS::UIntType))))
+            .early_return()
+    ]);
+}
+
 
 #[test]
 fn test_halt_symop_add() {
