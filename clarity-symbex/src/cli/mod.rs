@@ -20,6 +20,7 @@ use std::fs;
 use std::io::Read;
 
 pub mod ast;
+pub mod sym;
 
 use crate::core::Error;
 
@@ -105,6 +106,9 @@ pub fn run_subcommand(argv: &mut Vec<String>) -> (i32, String) {
     match subcommand.as_str() {
         "contract" => {
             ast::run_cli_contract(argv)
+        }
+        "sym" => {
+            sym::run_cli_sym(argv)
         }
         _ => {
             return (1, format!("Unrecognized subcommand '{subcommand}'"))

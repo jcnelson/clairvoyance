@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use clarity::vm::contexts::ExecutionState;
 use clarity::vm::contexts::InvocationContext;
 use clarity::vm::contexts::LocalContext;
@@ -31,6 +33,8 @@ use crate::sym::{Sym, SymOp, Symbex, SymId, Predicate, VarOp, MapOp, Continuatio
 use crate::core::Error;
 use crate::core::DEFAULT_STACKS_EPOCH;
 
+fn f() -> Box<SymOp> { Box::new(SymOp::False()) }
+fn t() -> Box<SymOp> { Box::new(SymOp::True()) }
 fn valu(x: u128) -> Value { Value::UInt(x) }
 fn vali(x: i128) -> Value { Value::Int(x) }
 fn valb(x: bool) -> Value { Value::Bool(x) }
@@ -67,6 +71,7 @@ fn add2(op1: Box<SymOp>, op2: Box<SymOp>) -> Box<SymOp> { add(vec![op1, op2]) }
 fn sub(ops: Vec<Box<SymOp>>) -> Box<SymOp> { Box::new(SymOp::Subtract(ops)) }
 fn sub2(op1: Box<SymOp>, op2: Box<SymOp>) -> Box<SymOp> { sub(vec![op1, op2]) }
 fn mul(ops: Vec<Box<SymOp>>) -> Box<SymOp> { Box::new(SymOp::Multiply(ops)) }
+fn mul2(op1: Box<SymOp>, op2: Box<SymOp>) -> Box<SymOp> { mul(vec![op1, op2]) }
 fn div(ops: Vec<Box<SymOp>>) -> Box<SymOp> { Box::new(SymOp::Divide(ops)) }
 fn rem(op1: Box<SymOp>, op2: Box<SymOp>) -> Box<SymOp> { Box::new(SymOp::Modulo(op1, op2)) }
 fn and(ops: Vec<Box<SymOp>>) -> Box<SymOp> { Box::new(SymOp::And(ops)) }
@@ -100,6 +105,7 @@ fn bitor(items: Vec<Box<SymOp>>) -> Box<SymOp> { Box::new(SymOp::BitwiseOr(items
 fn bitxor(items: Vec<Box<SymOp>>) -> Box<SymOp> { Box::new(SymOp::BitwiseXor(items)) }
 fn var_get(s: Sym) -> Box<SymOp> { lv(s.clone().id(), Box::new(SymOp::Variable(s))) }
 fn lv(n: &str, s: Box<SymOp>) -> Box<SymOp> { Box::new(SymOp::LoadedDataVariable(n.into(), s)) }
+fn lm(n: &str, key: Box<SymOp>, value: Box<SymOp>) -> Box<SymOp> { Box::new(SymOp::LoadedMapEntry(n.into(), key, Some(value))) }
 
 fn pt() -> Box<Predicate> { Box::new(Predicate::True) }
 fn pf() -> Box<Predicate> { Box::new(Predicate::False) }
@@ -122,7 +128,7 @@ pub struct Halt {
     predicate: Box<Predicate>,
     formula: Box<SymOp>,
     vars: Vec<VarOp>,
-    maps: Vec<MapOp>,
+    map_state: HashMap<ClarityName, HashMap<SymOp, SymOp>>,
     early_return: bool,
     panicking: bool
 }
@@ -133,7 +139,7 @@ impl Halt {
             predicate: pf(),
             formula: cb(false),
             vars: vec![],
-            maps: vec![],
+            map_state: HashMap::new(),
             early_return: false,
             panicking: false
         }
@@ -179,8 +185,12 @@ fn assert_halts(mut conts: Vec<Continuation>, halts: Vec<Halt>) {
         for v in h.vars.iter() {
             info!("   Var:       {}", v.clone().simplify().unwrap());
         }
-        for m in h.maps.iter() {
-            info!("   Map:       {}", m);
+        for (map_name, map) in h.map_state.iter() {
+            info!("   Map {map_name}");
+            for (key, value) in map.iter() {
+                info!("      key:   {key}");
+                info!("      value: {value}");
+            }
         }
     }
 
@@ -191,8 +201,14 @@ fn assert_halts(mut conts: Vec<Continuation>, halts: Vec<Halt>) {
         for v in c.post_vars.iter() {
             info!("   Var:       {}", v.clone().simplify().unwrap());
         }
-        for m in c.post_maps.iter() {
-            info!("   Map:       {}", m.clone().simplify().unwrap());
+        for (map_name, map) in c.map_state.iter() {
+            info!("   Map {map_name}");
+            for (key, value) in map.iter() {
+                let key = key.clone().simplify().unwrap();
+                let value = value.clone().simplify().unwrap();
+                info!("      key:   {key}");
+                info!("      value: {value}");
+            }
         }
     }
 
@@ -220,19 +236,7 @@ fn assert_halts(mut conts: Vec<Continuation>, halts: Vec<Halt>) {
                 }
                 assert_eq!(post_vars.len(), 0, "continuation had unaccounted final variables {:?}", &post_vars);
 
-                let mut post_maps = cont.post_maps.clone();
-                for m in h.maps.iter() {
-                    let mut found_map = None;
-                    for (j, map) in post_maps.iter().enumerate() {
-                        if map.clone().simplify().unwrap() == m.clone().simplify().unwrap() {
-                            found_map = Some(j);
-                            break;
-                        }
-                    }
-                    let j = found_map.expect(&format!("Did not find expected map value {m:?} in continuation {cont:?}"));
-                    post_maps.remove(j);
-                }
-                assert_eq!(post_maps.len(), 0, "continuation had unaccounted final map values {:?}", &post_maps);
+                assert_eq!(cont.map_state, h.map_state);
 
                 found_cont = Some(i);
                 break;
@@ -318,6 +322,23 @@ fn test_consolidate_multiply() {
     
     let symop = mul(vec![cu(0), vu("x")]);
     assert_eq!(symop.simplify(), Ok(*cu(0)));
+    
+    // (x - 1) * (x - 2) == (x*x + 2) - (x * 3)
+    let symop = mul(vec![sub2(vu("x"), cu(1)), sub2(vu("x"), cu(2))]);
+    let simplified = symop.clone().simplify().unwrap();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    info!("symop = {symop}, simplifed = {simplified}");
+    assert_eq!(simplified, *sub2(add2(mul2(vu("x"), vu("x")), cu(2)), mul2(vu("x"), cu(3))));
+
+    // (x - 1) * (x - 2) * (x - 3)
+    // (x*x - 3*x + 2) * (x - 3)
+    // (x*x*x - 3*x*x + 2*x - 3*x*x + 9*x - 6
+    // (x*x*x + 11*x) - (6*x*x + 6)
+    let symop = mul(vec![sub2(vu("x"), cu(1)), sub2(vu("x"), cu(2)), sub2(vu("x"), cu(3))]);
+    let simplified = symop.clone().simplify().unwrap();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    info!("symop = {symop}, simplifed = {simplified}");
+    assert_eq!(simplified, *sub2(add2(mul(vec![vu("x"), vu("x"), vu("x")]), mul2(vu("x"), cu(11))), add2(mul(vec![cu(6), vu("x"), vu("x")]), cu(6))));
 }
 
 #[test]
@@ -703,6 +724,15 @@ fn test_consolidate_and() {
     info!("symop = {symop:?}, simplifed = {simplified:?}");
     assert_eq!(simplified, Ok(*cb(false)));
 
+    // (and (not (is-eq foo baz)) (not (is-eq baz foo))) === Ok((not (is-eq foo baz)))
+    assert_eq!(eq(vu("foo"), vu("baz")), eq(vu("baz"), vu("foo")));
+    assert_eq!(not(eq(vu("foo"), vu("baz"))), not(eq(vu("baz"), vu("foo"))));
+
+    let symop = and(vec![not(eq(vu("foo"), vu("baz"))), not(eq(vu("baz"), vu("foo")))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*not(eq(vu("foo"), vu("baz")))));
+
     // (and (is-eq foo bar) (not (is-eq foo baz))) does not reduce
     let symop = and(vec![eq(vu("foo"), vu("bar")), not(eq(vu("foo"), vu("baz")))]);
     let simplified = symop.clone().simplify();
@@ -720,6 +750,242 @@ fn test_consolidate_and() {
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
     assert_eq!(simplified, Ok(*symop));
+
+    // (and (x >= 0) (x < 0)) is False
+    let symop = and(vec![geq(vi("x"), ci(0)), lt(vi("x"), ci(0))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*f()));
+    
+    // (and (x > 0) (x <= 0)) is False
+    let symop = and(vec![gt(vi("x"), ci(0)), leq(vi("x"), ci(0))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*f()));
+    
+    // (and (x > 0) (x < 0)) is False
+    let symop = and(vec![gt(vi("x"), ci(0)), lt(vi("x"), ci(0))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*f()));
+
+    // (and (x < 0) (x == 0)) is False
+    let symop = and(vec![eq(vi("x"), ci(0)), lt(vi("x"), ci(0))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*f()));
+    
+    // (and (x > 0) (x == 0)) is False
+    let symop = and(vec![eq(vi("x"), ci(0)), gt(vi("x"), ci(0))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*f()));
+
+    // (and (x >= 100) (x < 99)) is False
+    let symop = and(vec![geq(vi("x"), ci(100)), lt(vi("x"), ci(99))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*f()));
+    
+    // (and (x > 100) (x <= 99)) is False
+    let symop = and(vec![gt(vi("x"), ci(100)), leq(vi("x"), ci(99))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*f()));
+    
+    // (and (x >= 100) (x <= 99)) is False
+    let symop = and(vec![geq(vi("x"), ci(100)), leq(vi("x"), ci(99))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*f()));
+    
+    // (and (x > 100) (x < 99)) is False
+    let symop = and(vec![gt(vi("x"), ci(100)), lt(vi("x"), ci(99))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*f()));
+    
+    // (and (x >= 100) (x < 110)) does not reduce
+    let symop = and(vec![geq(vi("x"), ci(100)), lt(vi("x"), ci(110))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*symop));
+
+    // (and (>= u0 x) (not (is-eq x u0))) is a contradiction
+    let symop = and(vec![geq(cu(0), vu("x")), not(eq(vu("x"), cu(0)))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*f()));
+    
+    // (and (>= i128::MIN x) (not (is-eq x i128::MIN))) is a contradiction
+    let symop = and(vec![geq(ci(i128::MIN), vi("x")), not(eq(vi("x"), ci(i128::MIN)))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*f()));
+    
+    // (and (<= u128::MAX x) (not (is-eq x u128::MAX))) is a contradiction
+    let symop = and(vec![leq(cu(u128::MAX), vu("x")), not(eq(vu("x"), cu(u128::MAX)))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*f()));
+    
+    // (and (<= i128::MAX x) (not (is-eq x i128::MAX))) is a contradiction
+    let symop = and(vec![leq(ci(i128::MAX), vi("x")), not(eq(vi("x"), ci(i128::MAX)))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*f()));
+
+    // (and (<= x u10) (is-eq x u10)) == Ok((is-eq x u10))
+    let symop = and(vec![leq(vu("x"), cu(10)), eq(vu("x"), cu(10))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*eq(vu("x"), cu(10))));
+    
+    // (and (>= x u10) (is-eq x u10)) == Ok((is-eq x u10))
+    let symop = and(vec![geq(vu("x"), cu(10)), eq(vu("x"), cu(10))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*eq(vu("x"), cu(10))));
+    
+    // (and (<= x 10) (is-eq x 10)) == Ok((is-eq x 10))
+    let symop = and(vec![leq(vi("x"), ci(10)), eq(vi("x"), ci(10))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*eq(vi("x"), ci(10))));
+    
+    // (and (>= x 10) (is-eq x 10)) == Ok((is-eq x 10))
+    let symop = and(vec![geq(vi("x"), ci(10)), eq(vi("x"), ci(10))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*eq(vi("x"), ci(10))));
+
+    // (and (x < u100) (x < u50)) === Ok(x < u50)
+    let symop = and(vec![lt(vu("x"), cu(100)), lt(vu("x"), cu(50))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*lt(vu("x"), cu(50))));
+    
+    // (and (x < 100) (x < 50)) === Ok(x < 50)
+    let symop = and(vec![lt(vi("x"), ci(100)), lt(vi("x"), ci(50))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*lt(vi("x"), ci(50))));
+    
+    // (and (x <= u100) (x <= u50)) === Ok(x <= u50)
+    let symop = and(vec![leq(vu("x"), cu(100)), leq(vu("x"), cu(50))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*leq(vu("x"), cu(50))));
+    
+    // (and (x <= 100) (x <= 50)) === Ok(x <= 50)
+    let symop = and(vec![leq(vi("x"), ci(100)), leq(vi("x"), ci(50))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*leq(vi("x"), ci(50))));
+    
+    // (and (x < u100) (x <= u50)) === Ok(x <= u50)
+    let symop = and(vec![lt(vu("x"), cu(100)), leq(vu("x"), cu(50))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*leq(vu("x"), cu(50))));
+    
+    // (and (x < 100) (x <= 50)) === Ok(x <= u50)
+    let symop = and(vec![lt(vi("x"), ci(100)), leq(vi("x"), ci(50))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*leq(vi("x"), ci(50))));
+    
+    // (and (x <= u100) (x < u50)) === Ok(x < u50)
+    let symop = and(vec![leq(vu("x"), cu(100)), lt(vu("x"), cu(50))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*lt(vu("x"), cu(50))));
+    
+    // (and (x <= 100) (x < 50)) === Ok(x < 50)
+    let symop = and(vec![leq(vi("x"), ci(100)), lt(vi("x"), ci(50))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*lt(vi("x"), ci(50))));
+    
+    // (and (x > u100) (x > u50)) === Ok(x > u100)
+    let symop = and(vec![gt(vu("x"), cu(100)), gt(vu("x"), cu(50))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*gt(vu("x"), cu(100))));
+    
+    // (and (x > 100) (x > 50)) === Ok(x > 100)
+    let symop = and(vec![gt(vi("x"), ci(100)), gt(vi("x"), ci(50))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*gt(vi("x"), ci(100))));
+    
+    // (and (x >= u100) (x >= u50)) === Ok(x >= u100)
+    let symop = and(vec![geq(vu("x"), cu(100)), geq(vu("x"), cu(50))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*geq(vu("x"), cu(100))));
+    
+    // (and (x >= 100) (x >= 50)) === Ok(x >= 100)
+    let symop = and(vec![geq(vi("x"), ci(100)), geq(vi("x"), ci(50))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*geq(vi("x"), ci(100))));
+    
+    // (and (x > u100) (x >= u50)) === Ok(x > u100)
+    let symop = and(vec![gt(vu("x"), cu(100)), geq(vu("x"), cu(50))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*gt(vu("x"), cu(100))));
+    
+    // (and (x > 100) (x >= 50)) === Ok(x > u100)
+    let symop = and(vec![gt(vi("x"), ci(100)), geq(vi("x"), ci(50))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*gt(vi("x"), ci(100))));
+    
+    // (and (x >= u100) (x > u50)) === Ok(x >= u100)
+    let symop = and(vec![geq(vu("x"), cu(100)), gt(vu("x"), cu(50))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*geq(vu("x"), cu(100))));
+    
+    // (and (x >= 100) (x > 50)) === Ok(x >= 100)
+    let symop = and(vec![geq(vi("x"), ci(100)), gt(vi("x"), ci(50))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*geq(vi("x"), ci(100))));
+
+    // (and (x > u0) (not (is-eq x u1)) (x < u2)) is a contradiction
+    let symop = and(vec![gt(vu("x"), cu(0)), not(eq(vu("x"), cu(1))), lt(vu("x"), cu(2))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*f()));
+    
+    // (and (x > u0) (not (is-eq x u2)) (not (is-eq x u1)) (x < u3)) is a contradiction
+    let symop = and(vec![gt(vu("x"), cu(0)), not(eq(vu("x"), cu(1))), lt(vu("x"), cu(2))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*f()));
+
+    // (and (x > u10) (is-eq x u11)) === Ok((is-eq x u11))
+    let symop = and(vec![gt(vu("x"), cu(10)), eq(vu("x"), cu(11))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*eq(vu("x"), cu(11))));
+
+    // (and (is-eq (len (list u0 u1 u2 u3) u4)) (not (is-eq x u0)) (not (is-eq x u1))) 
+    // reduces to (and (not (is-eq x u0)) (not (is-eq x u1)))
+    let symop = and(vec![eq(llen(lcons(vec![cu(0), cu(1), cu(2), cu(3)])), cu(4)), not(eq(vu("x"), cu(0))), not(eq(vu("x"), cu(1)))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*and(vec![not(eq(vu("x"), cu(0))), not(eq(vu("x"), cu(1)))])));
+    
+    // (and (is-eq (len (list u0 u1 u2 u3) u4)) (not (is-eq x u0)) (not (is-eq x u1))) 
+    // reduces to (and (not (is-eq x u0)) (not (is-eq x u1)))
+    let symop = and(vec![not(eq(cu(0), lv("x", vu("x")))), not(eq(cu(1), lv("x", vu("x")))), eq(cu(4), llen(lcons(vec![cu(0), cu(1), cu(2), cu(3)])))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*and(vec![not(eq(lv("x", vu("x")), cu(0))), not(eq(lv("x", vu("x")), cu(1)))])));
 }
 
 #[test]
@@ -886,8 +1152,38 @@ fn test_consolidate_tuple_get() {
     info!("symop = {symop:?}, simplifed = {simplified:?}");
     assert_eq!(simplified, Ok(*cu(1)));
 
-    // (get x { x : y }) == Ok(x)
+    // (get x { x : y }) == Ok(y)
     let symop = tget("x", tcons(vec![("x", vu("y"))]));
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*vu("y")));
+
+    // (get x (loaded-var z { x : y })) == Ok(y)
+    let symop = tget("x", lv("z", tcons(vec![("x", vu("y"))])));
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*vu("y")));
+    
+    // (get x (loaded-var z (some { x : y }))) == Ok(y)
+    let symop = tget("x", lv("z", some(tcons(vec![("x", vu("y"))]))));
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*vu("y")));
+    
+    // (get x (some (loaded-var z { x : y }))) == Ok(y)
+    let symop = tget("x", some(lv("z", tcons(vec![("x", vu("y"))]))));
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*vu("y")));
+
+    // (get x (map-get? m z { x : y })) == Ok(y)
+    let symop = tget("x", lm("m", vu("z"), tcons(vec![("x", vu("y"))]))); 
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*vu("y")));
+    
+    // (get x (loaded-entry m z (some { x : y }))) == Ok(y)
+    let symop = tget("x", lm("m", vu("z"), tcons(vec![("x", vu("y"))]))); 
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
     assert_eq!(simplified, Ok(*vu("y")));
@@ -1083,6 +1379,59 @@ fn test_consolidate_bitwise_xor() {
 }
 
 #[test]
+fn test_flatten_multiply() {
+    // x * (x + 1) == x*x + 1*x
+    let symop = mul2(vu("x"), add2(vu("x"), cu(1)));
+    let SymOp::Multiply(inner) = *symop.clone() else { panic!() };
+    let simplified = SymOp::flatten_multiply(inner);
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*add2(mul2(vu("x"), vu("x")), mul2(cu(1), vu("x")))));
+
+    // ((x * x) + (1 * 2)) * x = ((x * x) * x) + ((1 * 2) * x)
+    let symop = mul2(add2(mul2(vu("x"), vu("x")), mul2(cu(1), cu(2))), vu("x"));
+    let SymOp::Multiply(inner) = *symop.clone() else { panic!() };
+    let simplified = SymOp::flatten_multiply(inner);
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*add2(mul2(mul2(vu("x"), vu("x")), vu("x")), mul2(mul2(cu(1), cu(2)), vu("x")))));
+
+    // ((x * x) * x) * (y * (y * (y * y))) == (x * x * x * y * y * y * y)
+    let symop = mul2(mul2(mul2(vu("x"), vu("x")), vu("x")), mul2(vu("y"), mul2(vu("y"), mul2(vu("y"), vu("y")))));
+    let SymOp::Multiply(inner) = *symop.clone() else { panic!() };
+    let simplified = SymOp::flatten_multiply(inner);
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*mul(vec![vu("x"), vu("x"), vu("x"), vu("y"), vu("y"), vu("y"), vu("y")])));
+
+    // (x + 1) * (x + 2) == x*x + 2*x + 1*x + 2*1
+    let symop = mul2(add2(vu("x"), cu(1)), add2(vu("x"), cu(2)));
+    let SymOp::Multiply(inner) = *symop.clone() else { panic!() };
+    let simplified = SymOp::flatten_multiply(inner);
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*add(vec![mul2(vu("x"), vu("x")), mul2(cu(2), vu("x")), mul2(cu(1), vu("x")), mul2(cu(2), cu(1))])));
+    
+    // (x + 1 + y) * (x + 2) == x*x + 2*x + 1*x + 2*1 + y*x + y*2
+    let symop = mul2(add(vec![vu("x"), cu(1), vu("y")]), add2(vu("x"), cu(2)));
+    let SymOp::Multiply(inner) = *symop.clone() else { panic!() };
+    let simplified = SymOp::flatten_multiply(inner);
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*add(vec![
+        mul2(vu("x"), vu("x")),
+        mul2(cu(2), vu("x")),
+        mul2(cu(1), vu("x")),
+        mul2(cu(2), cu(1)),
+        mul2(vu("y"), vu("x")),
+        mul2(vu("y"), cu(2))
+    ])));
+
+    // (x - 1) * (x - 2) == x*x - 1*x - 3*x + 2 == (x*x + 1*2) - (1*x + 2*x)
+    let symop = mul2(sub2(vu("x"), cu(1)), sub2(vu("x"), cu(2)));
+    let SymOp::Multiply(inner) = *symop.clone() else { panic!() };
+    let simplified = SymOp::flatten_multiply(inner);
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*sub2(add2(mul2(vu("x"), vu("x")), mul2(cu(1), cu(2))), add2(mul2(cu(1), vu("x")), mul2(cu(2), vu("x"))))));
+}
+
+
+#[test]
 fn test_commutative_cmp() {
     let p1 = pand(vec![peq(cu(1), cu(1)), peq(cu(2), cu(3))]);
     let p2 = pand(vec![peq(cu(2), cu(3)), peq(cu(1), cu(1))]);
@@ -1116,6 +1465,64 @@ fn test_commutative_cmp() {
 
     assert_eq!(p1, p2);
 }
+
+#[test]
+fn test_bind_symbol() {
+    // (to-int (x uint)), x <-- u3
+    // ---------------------------
+    //             3
+    let symop = SymOp::ToInt(vu("x"));
+    let simplified = symop
+        .clone()
+        .bind_symbol("x".into(), *cu(3))
+        .simplify()
+        .unwrap();
+
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, *ci(3));
+
+    // (to-int (x uint)), x <-- y + u3
+    // -------------------------------
+    //    (to-int (+ (y uint) u3))
+    let symop = SymOp::ToInt(vu("x"));
+    let simplified = symop
+        .clone()
+        .bind_symbol("x".into(), *add2(vu("y"), cu(3)))
+        .simplify()
+        .unwrap();
+
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, SymOp::ToInt(add2(vu("y"), cu(3))));
+
+    // (+ x y u3), x <-- u1, y <-- u2
+    // ------------------------------
+    //           u6
+    let symop = add(vec![vu("x"), vu("y"), cu(3)]);
+    let simplified = symop
+        .clone()
+        .bind_symbol("x".into(), *cu(1))
+        .bind_symbol("y".into(), *cu(2))
+        .simplify()
+        .unwrap();
+
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, *cu(6));
+
+    // (map-entry foo (+ x u3) (+ y u6)), y <-- u5
+    // -------------------------------------------
+    //                u11
+    let symop = lm("foo", add2(vu("x"), cu(3)), add2(vu("y"), cu(6)));
+    let simplified = symop
+        .clone()
+        .bind_symbol("y".into(), *cu(5))
+        .simplify()
+        .unwrap();
+
+
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, *cu(11));
+}
+
 
 #[test]
 fn test_halt_if_sym() {
@@ -1509,6 +1916,7 @@ fn test_halt_unwrap_panic_opt() {
         Halt::new()
             .pred(pi(is_none(var_get(so("x", TS::BoolType)))))
             .formula(panic())
+            .early_return()
             .panic()
 
     ]);
@@ -1537,6 +1945,7 @@ fn test_halt_unwrap_panic_res() {
         Halt::new()
             .pred(pi(is_err(var_get(sr("x", TS::BoolType, TS::UIntType)))))
             .formula(panic())
+            .early_return()
             .panic()
 
     ]);
@@ -1565,6 +1974,7 @@ fn test_halt_unwrap_err_panic() {
         Halt::new()
             .pred(pi(is_ok(var_get(sr("x", TS::BoolType, TS::UIntType)))))
             .formula(panic())
+            .early_return()
             .panic()
 
     ]);
@@ -1679,7 +2089,6 @@ fn test_halt_try_res() {
             .early_return()
     ]);
 }
-
 
 #[test]
 fn test_halt_symop_add() {
@@ -2243,7 +2652,11 @@ fn test_halt_var_get_set_if_tree() {
 
     assert_halts(termination_states, vec![
         Halt::new()
-            .pred(pand(vec![peq(rem(var_get(su("v")), cu(2)), cu(0)), peq(rem(var_get(su("w")), cu(2)), cu(0))]))
+            .pred(peqs(vec![
+                rem(var_get(su("v")), cu(2)),
+                rem(var_get(su("w")), cu(2)),
+                cu(0)
+            ]))
             .formula(cl(vec![valu(101), valu(101)]))
             .var("v", cu(101))
             .var("w", cu(101)),
@@ -2295,7 +2708,11 @@ fn test_halt_var_get_set_tower_if_tree() {
 
     assert_halts(termination_states, vec![
         Halt::new()
-            .pred(pand(vec![peq(rem(var_get(su("v")), cu(2)), cu(0)), peq(rem(var_get(su("w")), cu(2)), cu(0))]))
+            .pred(peqs(vec![
+                rem(var_get(su("v")), cu(2)),
+                rem(var_get(su("w")), cu(2)),
+                cu(0)
+            ]))
             .formula(add(vec![cu(6), var_get(su("w"))]))
             .var("v", add(vec![cu(6), var_get(su("w"))]))
             .var("w", add(vec![cu(5), var_get(su("w"))])),
@@ -2350,18 +2767,22 @@ fn test_halt_var_get_set_if_sequence() {
 
     assert_halts(termination_states, vec![
         Halt::new()
-            .pred(pand(vec![
-                peq(rem(var_get(su("v")), cu(2)), cu(0)),
-                peq(rem(var_get(su("v")), cu(3)), cu(0)),
-                peq(rem(var_get(su("v")), cu(5)), cu(0))
+            .pred(peqs(vec![
+                rem(var_get(su("v")), cu(2)),
+                rem(var_get(su("v")), cu(3)),
+                rem(var_get(su("v")), cu(5)),
+                cu(0)
             ]))
             .formula(lcons(vec![var_get(su("v")), cu(40)]))
             .var("w", cu(40)),
 
         Halt::new()
             .pred(pand(vec![
-                peq(rem(var_get(su("v")), cu(2)), cu(0)),
-                peq(rem(var_get(su("v")), cu(3)), cu(0)),
+                peqs(vec![
+                    rem(var_get(su("v")), cu(2)),
+                    rem(var_get(su("v")), cu(3)),
+                    cu(0)
+                ]),
                 pnot(peq(rem(var_get(su("v")), cu(5)), cu(0)))
             ]))
             .formula(cl(vec![valu(6), valu(30)]))
@@ -2675,17 +3096,17 @@ fn test_halt_map_symbolic_lists() {
             .pred(por(vec![
                 pand(vec![
                     peq(cu(1), llen(var_get(sl("list-v1", TS::UIntType, 4)))),
-                    pleq(cu(1), llen(var_get(sl("list-v2", TS::UIntType, 4)))),
-                    pleq(cu(1), llen(var_get(sl("list-v3", TS::UIntType, 4))))
+                    pgeq(llen(var_get(sl("list-v2", TS::UIntType, 4))), cu(1)),
+                    pgeq(llen(var_get(sl("list-v3", TS::UIntType, 4))), cu(1))
                 ]),
                 pand(vec![
-                    pleq(cu(1), llen(var_get(sl("list-v1", TS::UIntType, 4)))),
+                    pgeq(llen(var_get(sl("list-v1", TS::UIntType, 4))), cu(1)),
                     peq(cu(1), llen(var_get(sl("list-v2", TS::UIntType, 4)))),
-                    pleq(cu(1), llen(var_get(sl("list-v3", TS::UIntType, 4))))
+                    pgeq(llen(var_get(sl("list-v3", TS::UIntType, 4))), cu(1))
                 ]),
                 pand(vec![
-                    pleq(cu(1), llen(var_get(sl("list-v1", TS::UIntType, 4)))),
-                    pleq(cu(1), llen(var_get(sl("list-v2", TS::UIntType, 4)))),
+                    pgeq(llen(var_get(sl("list-v1", TS::UIntType, 4))), cu(1)),
+                    pgeq(llen(var_get(sl("list-v2", TS::UIntType, 4))), cu(1)),
                     peq(cu(1), llen(var_get(sl("list-v3", TS::UIntType, 4))))
                 ]),
             ]))
@@ -2702,17 +3123,17 @@ fn test_halt_map_symbolic_lists() {
             .pred(por(vec![
                 pand(vec![
                     peq(cu(2), llen(var_get(sl("list-v1", TS::UIntType, 4)))),
-                    pleq(cu(2), llen(var_get(sl("list-v2", TS::UIntType, 4)))),
-                    pleq(cu(2), llen(var_get(sl("list-v3", TS::UIntType, 4))))
+                    pgeq(llen(var_get(sl("list-v2", TS::UIntType, 4))), cu(2)),
+                    pgeq(llen(var_get(sl("list-v3", TS::UIntType, 4))), cu(2))
                 ]),
                 pand(vec![
-                    pleq(cu(2), llen(var_get(sl("list-v1", TS::UIntType, 4)))),
+                    pgeq(llen(var_get(sl("list-v1", TS::UIntType, 4))), cu(2)),
                     peq(cu(2), llen(var_get(sl("list-v2", TS::UIntType, 4)))),
-                    pleq(cu(2), llen(var_get(sl("list-v3", TS::UIntType, 4))))
+                    pgeq(llen(var_get(sl("list-v3", TS::UIntType, 4))), cu(2))
                 ]),
                 pand(vec![
-                    pleq(cu(2), llen(var_get(sl("list-v1", TS::UIntType, 4)))),
-                    pleq(cu(2), llen(var_get(sl("list-v2", TS::UIntType, 4)))),
+                    pgeq(llen(var_get(sl("list-v1", TS::UIntType, 4))), cu(2)),
+                    pgeq(llen(var_get(sl("list-v2", TS::UIntType, 4))), cu(2)),
                     peq(cu(2), llen(var_get(sl("list-v3", TS::UIntType, 4))))
                 ]),
             ]))
@@ -2735,17 +3156,17 @@ fn test_halt_map_symbolic_lists() {
             .pred(por(vec![
                 pand(vec![
                     peq(cu(3), llen(var_get(sl("list-v1", TS::UIntType, 4)))),
-                    pleq(cu(3), llen(var_get(sl("list-v2", TS::UIntType, 4)))),
-                    pleq(cu(3), llen(var_get(sl("list-v3", TS::UIntType, 4))))
+                    pgeq(llen(var_get(sl("list-v2", TS::UIntType, 4))), cu(3)),
+                    pgeq(llen(var_get(sl("list-v3", TS::UIntType, 4))), cu(3))
                 ]),
                 pand(vec![
-                    pleq(cu(3), llen(var_get(sl("list-v1", TS::UIntType, 4)))),
+                    pgeq(llen(var_get(sl("list-v1", TS::UIntType, 4))), cu(3)),
                     peq(cu(3), llen(var_get(sl("list-v2", TS::UIntType, 4)))),
-                    pleq(cu(3), llen(var_get(sl("list-v3", TS::UIntType, 4))))
+                    pgeq(llen(var_get(sl("list-v3", TS::UIntType, 4))), cu(3))
                 ]),
                 pand(vec![
-                    pleq(cu(3), llen(var_get(sl("list-v1", TS::UIntType, 4)))),
-                    pleq(cu(3), llen(var_get(sl("list-v2", TS::UIntType, 4)))),
+                    pgeq(llen(var_get(sl("list-v1", TS::UIntType, 4))), cu(3)),
+                    pgeq(llen(var_get(sl("list-v2", TS::UIntType, 4))), cu(3)),
                     peq(cu(3), llen(var_get(sl("list-v3", TS::UIntType, 4))))
                 ]),
             ]))
@@ -2774,17 +3195,17 @@ fn test_halt_map_symbolic_lists() {
             .pred(por(vec![
                 pand(vec![
                     peq(cu(4), llen(var_get(sl("list-v1", TS::UIntType, 4)))),
-                    pleq(cu(4), llen(var_get(sl("list-v2", TS::UIntType, 4)))),
-                    pleq(cu(4), llen(var_get(sl("list-v3", TS::UIntType, 4))))
+                    pgeq(llen(var_get(sl("list-v2", TS::UIntType, 4))), cu(4)),
+                    pgeq(llen(var_get(sl("list-v3", TS::UIntType, 4))), cu(4))
                 ]),
                 pand(vec![
-                    pleq(cu(4), llen(var_get(sl("list-v1", TS::UIntType, 4)))),
+                    pgeq(llen(var_get(sl("list-v1", TS::UIntType, 4))), cu(4)),
                     peq(cu(4), llen(var_get(sl("list-v2", TS::UIntType, 4)))),
-                    pleq(cu(4), llen(var_get(sl("list-v3", TS::UIntType, 4))))
+                    pgeq(llen(var_get(sl("list-v3", TS::UIntType, 4))), cu(4))
                 ]),
                 pand(vec![
-                    pleq(cu(4), llen(var_get(sl("list-v1", TS::UIntType, 4)))),
-                    pleq(cu(4), llen(var_get(sl("list-v2", TS::UIntType, 4)))),
+                    pgeq(llen(var_get(sl("list-v1", TS::UIntType, 4))), cu(4)),
+                    pgeq(llen(var_get(sl("list-v2", TS::UIntType, 4))), cu(4)),
                     peq(cu(4), llen(var_get(sl("list-v3", TS::UIntType, 4))))
                 ]),
             ]))
@@ -2840,10 +3261,7 @@ fn test_halt_fold_user_func() {
         Halt::new()
             .pred(pt())
             .formula(add(vec![
-                var_get(su("v")),
-                var_get(su("v")),
-                var_get(su("v")),
-                var_get(su("v")),
+                mul2(cu(4), var_get(su("v"))),
                 cu(16)
             ]))
         
@@ -2880,10 +3298,7 @@ fn test_halt_fold_user_func_branch() {
         Halt::new()
             .pred(peq(rem(var_get(su("v")), cu(2)), cu(0)))
             .formula(add(vec![
-                var_get(su("v")),
-                var_get(su("v")),
-                var_get(su("v")),
-                var_get(su("v")),
+                mul2(cu(4), var_get(su("v"))),
                 cu(16)
             ])),
 
@@ -2915,23 +3330,11 @@ fn test_halt_fold_sequence_branch() {
     assert_halts(termination_states, vec![
         Halt::new()
             .pred(peq(rem(var_get(su("v")), cu(2)), cu(0)))
-            .formula(add(vec![
-                var_get(su("v")),
-                var_get(su("v")),
-                var_get(su("v")),
-                var_get(su("v")),
-                cu(16)
-            ])),
+            .formula(add2(mul2(var_get(su("v")), cu(4)), cu(16))),
 
         Halt::new()
             .pred(pnot(peq(rem(var_get(su("v")), cu(2)), cu(0))))
-            .formula(add(vec![
-                var_get(su("v")),
-                var_get(su("v")),
-                var_get(su("v")),
-                var_get(su("v")),
-                cu(56)
-            ])),
+            .formula(add2(mul2(var_get(su("v")), cu(4)), cu(56))),
     ]);
 }
 
@@ -2971,8 +3374,7 @@ fn test_halt_fold_symbolic_lists() {
         Halt::new()
             .pred(peq(llen(var_get(sl("list-v1", TS::UIntType, 4))), cu(2)))
             .formula(add(vec![
-                var_get(su("v")),
-                var_get(su("v")),
+                mul2(cu(2), var_get(su("v"))),
                 unwrap_panic(elat(var_get(sl("list-v1", TS::UIntType, 4)), cu(0))),
                 unwrap_panic(elat(var_get(sl("list-v1", TS::UIntType, 4)), cu(1))),
                 cu(10)
@@ -2981,9 +3383,7 @@ fn test_halt_fold_symbolic_lists() {
         Halt::new()
             .pred(peq(llen(var_get(sl("list-v1", TS::UIntType, 4))), cu(3)))
             .formula(add(vec![
-                var_get(su("v")),
-                var_get(su("v")),
-                var_get(su("v")),
+                mul2(cu(3), var_get(su("v"))),
                 unwrap_panic(elat(var_get(sl("list-v1", TS::UIntType, 4)), cu(0))),
                 unwrap_panic(elat(var_get(sl("list-v1", TS::UIntType, 4)), cu(1))),
                 unwrap_panic(elat(var_get(sl("list-v1", TS::UIntType, 4)), cu(2))),
@@ -2993,10 +3393,7 @@ fn test_halt_fold_symbolic_lists() {
         Halt::new()
             .pred(peq(llen(var_get(sl("list-v1", TS::UIntType, 4))), cu(4)))
             .formula(add(vec![
-                var_get(su("v")),
-                var_get(su("v")),
-                var_get(su("v")),
-                var_get(su("v")),
+                mul2(cu(4), var_get(su("v"))),
                 unwrap_panic(elat(var_get(sl("list-v1", TS::UIntType, 4)), cu(0))),
                 unwrap_panic(elat(var_get(sl("list-v1", TS::UIntType, 4)), cu(1))),
                 unwrap_panic(elat(var_get(sl("list-v1", TS::UIntType, 4)), cu(2))),
@@ -3304,3 +3701,201 @@ fn test_halt_filter_symbolic_lists() {
             .formula(cl(vec![])),
     ]);
 }
+
+#[test]
+fn test_halt_map_get() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-map squares uint uint)
+
+        (define-private (add-or-square (x uint))
+            (match (map-get? squares x)
+                y (* y y)
+                (+ x x)))
+
+        (add-or-square u3)
+        "#,
+        None
+    ).unwrap();
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+
+}
+
+#[test]
+fn test_halt_map_set() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-map squares uint uint)
+
+        (define-private (add-and-square (x uint))
+            (match (map-get? squares x)
+                y (map-set squares y (* y y))
+                (map-set squares x (+ x x))))
+
+        (add-and-square u3)
+        "#,
+        None
+    ).unwrap();
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+}
+
+#[test]
+fn test_halt_multiple_map_set() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-map squares uint uint)
+
+        (begin
+            (map-set squares u1 u1)
+            (map-set squares u1 u2)
+            (map-set squares u1 u3))
+
+        (map-get? squares u1)
+        "#,
+        None
+    ).unwrap();
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+}
+
+#[test]
+fn test_halt_multiple_sym_map_set() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-data-var x uint u1)
+        (define-map squares uint uint)
+
+        (begin
+            (map-set squares (var-get x) (var-get x))
+            (map-set squares (var-get x) (+ u1 (var-get x)))
+            (map-set squares (var-get x) (+ u2 (var-get x))))
+
+        (map-get? squares (var-get x))
+        "#,
+        None
+    ).unwrap();
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+}
+
+#[test]
+fn test_halt_multiple_map_get_none() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-map squares uint uint)
+
+        (begin
+            (map-set squares u1 u1)
+            (map-set squares u1 u2)
+            (map-set squares u1 u3))
+
+        (map-get? squares u2)
+        "#,
+        None
+    ).unwrap();
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+}
+
+#[test]
+fn test_halt_limit_function_exploration() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-map squares uint uint)
+
+        (define-private (ignored-function (x uint) (y uint))
+            (map-set squares x (* y y)))
+
+        (define-private (store-squares (x uint) (y uint))
+            (begin
+                (ignored-function x y)
+                (ignored-function y x)))
+
+        (store-squares u2 u3)
+        "#,
+        None
+    )
+    .unwrap()
+    .with_skipped_function_call("ignored-function".into());
+
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+}
+
+#[test]
+fn test_halt_eager_function_evaluation() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-map squares uint uint)
+
+        (define-private (evaled-function (x uint) (y uint))
+            (begin
+                (map-set squares x (* y y))
+                y))
+
+        (define-private (store-squares (x uint) (y uint))
+            (begin
+                (fold evaled-function (list x y) y)
+                (asserts! (is-eq x u2) (err u1))
+                (ok true)))
+
+        (store-squares u2 u3)
+        "#,
+        None
+    )
+    .unwrap()
+    .with_eager_function_eval("evaled-function".into());
+
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+}
+
+#[test]
+fn test_halt_rollup_early_return() {
+    let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "contract".into());
+    let mut symbex = Symbex::from_contract(contract_id, r#"
+        (define-public (early-return-if-mod-6 (x uint))
+            (begin
+                (asserts! (is-eq (mod x u3) u0) (err u1))
+                (asserts! (is-eq (mod x u2) u0) (err u2))
+                (ok (* x x x))))
+
+        (define-data-var input uint u12)
+        (early-return-if-mod-6 (var-get input))
+        "#,
+        None
+    )
+    .unwrap()
+    .with_eager_function_eval("early-return-if-mod-6".into());
+
+    let termination_states = symbex.eval_all().unwrap();
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+}
+        
+                

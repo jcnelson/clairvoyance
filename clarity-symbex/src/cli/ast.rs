@@ -132,6 +132,37 @@ pub fn cli_dump_analysis(argv: &[String]) -> (i32, String) {
     (0, analysis_str)
 }
 
+pub fn cli_contract_help() -> (i32, String) {
+    let help = r#"Subcommands for the `contract` command:
+
+ast CONTRACT_ID SRC_PATH
+
+    Load a contract's AST from its source code SRC_PATH.  If SRC_PATH
+    is -, then the contract will be read from stdin.  The contract's ID
+    will be set to CONTRACT_ID in the resulting AST.  The AST will be
+    written to stdout as JSON.
+
+context CONTRACT_ID SRC_PATH
+
+    Load the contract's context data from its source code SRC_PATH.
+    If SRC_PATH is -, then the contract will be read from stdin.  The 
+    contract's ID will be set to CONTRACT_ID in the resulting AST.  The
+    contract context will be written to stdout as JSON.
+
+analyze CONTRACT_ID SRC_PATH
+
+    Load the contract's analysis data from its source code SRC_PATH.
+    If SRC_PATH is -, then the contract will be read from stdin.  The
+    contract's ID will be set to CONTRACT_ID in the resulting analysis.
+    The contract analysis will be written to stdout as JSON
+
+help
+
+    Print this message to stderr and exit 1.
+"#;
+    (1, help.to_string())
+}
+
 pub fn run_cli_contract(argv: &mut Vec<String>) -> (i32, String) {
     if argv.len() == 0 {
         return (1, "Missing subcommand".into());
@@ -148,8 +179,11 @@ pub fn run_cli_contract(argv: &mut Vec<String>) -> (i32, String) {
         "analyze" => {
             cli_dump_analysis(&argv)
         }
+        "help" => {
+            cli_contract_help()
+        }
         _ => {
-            (1, format!("Unrecognized subcommand '{subcommand}'"))
+            (1, format!("Unrecognized contract subcommand '{subcommand}'. Try `contract help` for details"))
         }
     }
 }
