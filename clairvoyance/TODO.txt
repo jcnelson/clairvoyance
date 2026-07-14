@@ -1,0 +1,9 @@
+TODO items:
+
+* Map testing
+* Tokens
+* asset guards
+* traits
+* contract-calls
+* Term-gathering across a comparison operation, for simplification
+ 
