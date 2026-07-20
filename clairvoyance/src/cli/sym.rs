@@ -19,7 +19,7 @@ use clarity_types::ClarityName;
 use crate::sym::Symbex;
 use crate::sym::Continuation;
 use crate::sym::Callgraph;
-use crate::sym::CallableName;
+use crate::sym::FullName;
 use crate::core::Error;
 use crate::cli;
 
@@ -32,7 +32,7 @@ fn exec_user_function(
     tx_sponsor: Option<StandardPrincipalData>,
     contract_tx_sponsor: Option<StandardPrincipalData>,
     skip_functions: bool,
-    skip_function_list: Vec<ClarityName>,
+    skip_function_list: Vec<FullName>,
     explore_all: bool
 ) -> Result<Vec<Continuation>, Error> {
     let mut symbex = Symbex::from_contract_ex(contract_id, src, contract_tx_sponsor)?
@@ -55,10 +55,13 @@ fn exec_user_function(
 fn cli_get_callgraph(
     src: &str,
     user_function: &str,
-) -> Result<(Callgraph, CallableName), Error> {
+) -> Result<(Callgraph, FullName), Error> {
     let contract_id = QualifiedContractIdentifier::transient();
     let symbex = Symbex::from_contract(contract_id.clone(), src)?;
-    Ok((symbex.callgraph, CallableName(contract_id, ClarityName::try_from(user_function).map_err(|_| Error::Invalid("Invalid function name {user_function}".into()))?)))
+    Ok((
+        symbex.callgraph.clone(),
+        FullName(contract_id, ClarityName::try_from(user_function).map_err(|_| Error::Invalid("Invalid function name {user_function}".into()))?)
+    ))
 }
 
 /// NOTE: This prints out continuations as they arrive.
@@ -105,9 +108,9 @@ fn cli_eval_user_function(argv: &[String]) -> (i32, String) {
     };
 
     let mut skip_functions = vec![];
-    while let Ok(Some(func_name_s)) = cli::consume_arg(&mut remaining_args, &["--skip-function"], true) {
-        let Ok(name) = ClarityName::try_from(func_name_s.clone()) else {
-            return (1, format!("Invalid function name '{func_name_s}'"));
+    while let Ok(Some(fq_func_name_s)) = cli::consume_arg(&mut remaining_args, &["--skip-function"], true) {
+        let Ok(name) = FullName::try_from(&fq_func_name_s) else {
+            return (1, format!("Invalid function name '{fq_func_name_s}'"));
         };
         skip_functions.push(name);
     }

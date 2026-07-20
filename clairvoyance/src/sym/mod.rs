@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::collections::BTreeSet;
 use std::borrow::Borrow;
 use std::hash::{Hash, Hasher};
+use std::convert::TryFrom;
 
 use clarity_types::Value;
 use clarity_types::ClarityName;
@@ -216,13 +217,73 @@ impl Sym {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FullName(pub QualifiedContractIdentifier, pub ClarityName);
+
+impl fmt::Display for FullName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        write!(f, "{}.{}", &self.0, &self.1)
+    }
+}
+
+impl FullName {
+    pub fn name(&self) -> &ClarityName {
+        &self.1
+    }
+
+    pub fn contract_id(&self) -> &QualifiedContractIdentifier {
+        &self.0
+    }
+}
+
+impl TryFrom<&str> for FullName {
+    type Error = Error;
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        let mut parts =  s.split(".");
+        let Some(contract_addr_str) = parts.next() else {
+            return Err(Error::Invalid("Missing contract address".into()));
+        };
+        let Some(contract_name_str) = parts.next() else {
+            return Err(Error::Invalid("Missing contract name".into()));
+        };
+        let Some(func_name_str) = parts.next() else {
+            return Err(Error::Invalid("Missing function name".into()));
+        };
+        if let Some(extra_str) = parts.next() {
+            return Err(Error::Invalid(format!("Extra name component '{extra_str}' in '{contract_addr_str}.{contract_name_str}.{func_name_str}'")));
+        }
+
+        let Ok(contract_id) = QualifiedContractIdentifier::parse(&format!("{contract_addr_str}.{contract_name_str}")) else {
+            return Err(Error::Invalid("Failed to parse qualified contract identifier".into()));
+        };
+        let Ok(func_name) = ClarityName::try_from(func_name_str) else {
+            return Err(Error::Invalid("Failed to parse function name".into()));
+        };
+        Ok(Self(contract_id, func_name))
+    }
+}
+
+impl TryFrom<&String> for FullName {
+    type Error = Error;
+    fn try_from(s: &String) -> Result<Self, Self::Error> {
+        Self::try_from(s.as_str())
+    }
+}
+
+impl TryFrom<String> for FullName {
+    type Error = Error;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::try_from(s.as_str())
+    }
+}
+
 /// computations over symbols.
 /// not all relations are well-defined here; we rely on the Clarity type-checker for this.
 #[derive(Debug, Clone, Eq)]
 pub enum SymOp {
     Constant(Value),
     Variable(Sym),
-    LoadedDataVariable(ClarityName, Box<SymOp>),
+    LoadedDataVariable(FullName, Box<SymOp>),
     Add(Vec<Box<SymOp>>),
     Subtract(Vec<Box<SymOp>>),
     Multiply(Vec<Box<SymOp>>),
@@ -261,11 +322,11 @@ pub enum SymOp {
     ListCons(Vec<Box<SymOp>>),
     FetchVar(ClarityName),
     SetVar(ClarityName, Box<SymOp>),
-    FetchEntry(ClarityName, Box<SymOp>),
-    LoadedMapEntry(ClarityName, Box<SymOp>, Option<Box<SymOp>>),
-    SetEntry(ClarityName, Box<SymOp>, Box<SymOp>),
-    InsertEntry(ClarityName, Box<SymOp>, Box<SymOp>),
-    DeleteEntry(ClarityName, Box<SymOp>),
+    FetchEntry(FullName, Box<SymOp>),
+    LoadedMapEntry(FullName, Box<SymOp>, Option<Box<SymOp>>),
+    SetEntry(FullName, Box<SymOp>, Box<SymOp>),
+    InsertEntry(FullName, Box<SymOp>, Box<SymOp>),
+    DeleteEntry(FullName, Box<SymOp>),
     TupleCons(Vec<(ClarityName, Box<SymOp>)>),
     TupleGet(ClarityName, Box<SymOp>),
     TupleMerge(Box<SymOp>, Box<SymOp>),
@@ -288,15 +349,15 @@ pub enum SymOp {
     ConsError(Box<SymOp>),
     ConsOkay(Box<SymOp>),
     ConsSome(Box<SymOp>),
-    GetTokenBalance(ClarityName, Box<SymOp>),
-    GetNftOwner(ClarityName, Box<SymOp>),
-    TransferToken(ClarityName, Box<SymOp>, Box<SymOp>, Box<SymOp>),
-    TransferNft(ClarityName, Box<SymOp>, Box<SymOp>, Box<SymOp>),
-    MintToken(ClarityName, Box<SymOp>, Box<SymOp>),
-    MintNft(ClarityName, Box<SymOp>, Box<SymOp>),
-    GetTokenSupply(ClarityName),
-    BurnToken(ClarityName, Box<SymOp>),
-    BurnNft(ClarityName, Box<SymOp>, Box<SymOp>),
+    GetTokenBalance(FullName, Box<SymOp>),
+    GetNftOwner(FullName, Box<SymOp>),
+    TransferToken(FullName, Box<SymOp>, Box<SymOp>, Box<SymOp>),
+    TransferNft(FullName, Box<SymOp>, Box<SymOp>, Box<SymOp>),
+    MintToken(FullName, Box<SymOp>, Box<SymOp>),
+    MintNft(FullName, Box<SymOp>, Box<SymOp>),
+    GetTokenSupply(FullName),
+    BurnToken(FullName, Box<SymOp>),
+    BurnNft(FullName, Box<SymOp>, Box<SymOp>),
     GetStxBalance(Box<SymOp>),
     StxTransfer(Box<SymOp>, Box<SymOp>, Box<SymOp>),
     StxTransferMemo(Box<SymOp>, Box<SymOp>, Box<SymOp>, Box<SymOp>),
@@ -328,7 +389,7 @@ pub enum SymOp {
     // INTERNAL -- symbolic execution detected an unconditional panic
     Panic,
     // INTERNAL -- a "stub" function call that will not be explored.
-    FunctionCall(ClarityName, Vec<Box<SymOp>>)
+    FunctionCall(FullName, Vec<Box<SymOp>>)
 }
 
 /// Compare two vectors of symops, as part of comparing a commutative operation where order doesn't
@@ -599,7 +660,8 @@ impl fmt::Display for SymOp {
             Self::InsertEntry(name, op1, op2) => write!(f, "(map-insert {name} {op1} {op2})"),
             Self::DeleteEntry(name, op1) => write!(f, "(map-delete {name} {op1})"),
             Self::TupleCons(fields) => {
-                let frags : Vec<_> = fields.iter().map(|(name, op)| format!("{name}: {op}")).collect();
+                let mut frags : Vec<_> = fields.iter().map(|(name, op)| format!("{name}: {op}")).collect();
+                frags.sort();
                 let inner = frags.join(", ");
                 write!(f, "{{ {inner} }}")
             }
@@ -4856,8 +4918,8 @@ pub enum MapOp {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum VarOp {
-    Get(ClarityName),
-    Set(ClarityName, SymOp)
+    Get(FullName),
+    Set(FullName, SymOp)
 }
 
 impl VarOp {
@@ -4868,7 +4930,7 @@ impl VarOp {
         }
     }
 
-    pub fn var_name(&self) -> &ClarityName {
+    pub fn var_name(&self) -> &FullName {
         match self {
             Self::Get(name) => name,
             Self::Set(name, ..) => name
@@ -4973,14 +5035,14 @@ fn last_cont_id() -> u64 {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct VarAccess {
-    pub name: ClarityName,
+    pub name: FullName,
     pub value: SymOp,
     pub line: u32
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MapAccess {
-    pub name: ClarityName,
+    pub name: FullName,
     pub key: SymOp,
     pub value: Option<SymOp>,
     pub line: u32
@@ -4992,7 +5054,7 @@ pub struct Continuation {
     /// internal identifier to ensure uniqueness
     id: u64,
     /// Current "function" (really, it identifies what code is being evaluated)
-    current_function: Option<String>,
+    function_path: Option<String>,
     /// line in the source code
     current_line: Option<u32>,
     /// Bindings between symbols and their evaluated formulae
@@ -5024,11 +5086,11 @@ pub struct Continuation {
     pub post_vars: Vec<VarOp>,
     /// map data that was read (but not written), and thus serves as input
     /// TODO: do a copy-on-write version of this, like we do for data vars
-    pub pre_map_state: HashMap<ClarityName, HashSet<SymOp>>,
+    pub pre_map_state: HashMap<FullName, HashSet<SymOp>>,
     /// current view of each map
     /// TODO: do a copy-on-write version of this, like we do for data vars
-    pub map_state: HashMap<ClarityName, HashMap<SymOp, SymOp>>,
-    pub map_tombstones: HashMap<ClarityName, HashSet<SymOp>>,
+    pub map_state: HashMap<FullName, HashMap<SymOp, SymOp>>,
+    pub map_tombstones: HashMap<FullName, HashSet<SymOp>>,
     /// map accesses, and what they returned
     pub map_accesses: Vec<MapAccess>,
     /// var accesses, and what they returned
@@ -5036,19 +5098,19 @@ pub struct Continuation {
     /// map state that could be accessed (i.e. is reachable by) a function that was not explored in
     /// this continuation's evaluation
     /// TODO: do a copy-on-write version of this, like we do for data vars
-    pub reachable_map_reads: HashSet<ClarityName>,
+    pub reachable_map_reads: HashSet<FullName>,
     /// map state that could be written by a function that was not explored in
     /// this continuation's evaluation
     /// TODO: do a copy-on-write version of this, like we do for data vars
-    pub reachable_map_writes: HashSet<ClarityName>,
+    pub reachable_map_writes: HashSet<FullName>,
     /// var state that could be accessed (i.e. is reachable by) a function that was not explored in
     /// this continuation's evaluation
     /// TODO: do a copy-on-write version of this, like we do for data vars
-    pub reachable_var_reads: HashSet<ClarityName>,
+    pub reachable_var_reads: HashSet<FullName>,
     /// var state that could be written (i.e. is reachable by) a function that was not explored in
     /// this continuation's evaluation
     /// TODO: do a copy-on-write version of this, like we do for data vars
-    pub reachable_var_writes: HashSet<ClarityName>,
+    pub reachable_var_writes: HashSet<FullName>,
     /// events generated 
     events: Vec<SymOp>,
     /// whether or not this continuation panicked
@@ -5060,7 +5122,7 @@ pub struct Continuation {
 impl fmt::Display for Continuation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         writeln!(f, "ID:               {}", &self.id)?;
-        writeln!(f, "Path:             {}", &self.current_function.as_ref().unwrap_or(&"".to_string()))?;
+        writeln!(f, "Path:             {}", &self.function_path.as_ref().unwrap_or(&"".to_string()))?;
         writeln!(f, "Panicked:         {}", &self.panicking)?;
         writeln!(f, "Early return:     {}", &self.early_return)?;
         writeln!(f, "tx-sender:        {}", &self.get_tx_sender())?;
@@ -5091,7 +5153,7 @@ impl fmt::Display for Continuation {
 
         writeln!(f, "Output vars computed:")?;
         if self.post_vars.len() > 0 {
-            let mut seen_vars : HashSet<&ClarityName> = HashSet::new();
+            let mut seen_vars : HashSet<&FullName> = HashSet::new();
             for varop in self.post_vars.iter().rev() {
                 if let VarOp::Set(name, ..) = varop {
                     if seen_vars.contains(name) {
@@ -5119,7 +5181,7 @@ impl fmt::Display for Continuation {
                     writeln!(f, "   map: {map}")?;
                     for key in data.iter() {
                         if is_debug() {
-                            writeln!(f, "        key (not simplified): {key}")?;
+                            writeln!(f, "      key (not simplified): {key}")?;
                         }
                         let key = key.clone().simplify().map(|k| k.to_string()).unwrap_or("ERROR: failed to simplify".to_string());
                         writeln!(f, "      key:   {key}")?;
@@ -5191,7 +5253,7 @@ impl fmt::Display for Continuation {
 
         writeln!(f, "Possibly-read data vars:\n   {}",
             if self.reachable_var_reads.len() > 0 {
-                let as_strs: Vec<_> = self.reachable_var_reads.iter().map(|n| n.as_str().to_string()).collect();
+                let as_strs: Vec<_> = self.reachable_var_reads.iter().map(|n| n.to_string()).collect();
                 as_strs.join(", ")
             }
             else {
@@ -5200,7 +5262,7 @@ impl fmt::Display for Continuation {
         
         writeln!(f, "Possibly-written data vars:\n   {}",
             if self.reachable_var_writes.len() > 0 {
-                let as_strs: Vec<_> = self.reachable_var_writes.iter().map(|n| n.as_str().to_string()).collect();
+                let as_strs: Vec<_> = self.reachable_var_writes.iter().map(|n| n.to_string()).collect();
                 as_strs.join(", ")
             }
             else {
@@ -5209,7 +5271,7 @@ impl fmt::Display for Continuation {
         
         writeln!(f, "Possibly-read maps:\n   {}",
             if self.reachable_map_reads.len() > 0 {
-                let as_strs: Vec<_> = self.reachable_map_reads.iter().map(|n| n.as_str().to_string()).collect();
+                let as_strs: Vec<_> = self.reachable_map_reads.iter().map(|n| n.to_string()).collect();
                 as_strs.join(", ")
             }
             else {
@@ -5218,7 +5280,7 @@ impl fmt::Display for Continuation {
         
         writeln!(f, "Possibly-written maps:\n   {}",
             if self.reachable_map_writes.len() > 0 {
-                let as_strs: Vec<_> = self.reachable_map_writes.iter().map(|n| n.as_str().to_string()).collect();
+                let as_strs: Vec<_> = self.reachable_map_writes.iter().map(|n| n.to_string()).collect();
                 as_strs.join(", ")
             }
             else {
@@ -5232,7 +5294,7 @@ impl Continuation {
     pub fn root(symbex: &Symbex, current_contract: PrincipalData) -> Self {
         let mut cont = Self {
             id: next_cont_id(),
-            current_function: None,
+            function_path: None,
             current_line: None,
             bound_formulae: HashMap::new(),
             dropped_formulae: vec![],
@@ -5284,7 +5346,7 @@ impl Continuation {
         let parent_id = parent.id;
         let cont = Self {
             id: next_cont_id(),
-            current_function: Some(function_name),
+            function_path: Some(function_name),
             current_line: Some(start_line),
             bound_formulae: HashMap::new(),
             dropped_formulae: vec![],
@@ -5299,7 +5361,7 @@ impl Continuation {
             pre_vars: vec![],
             pre_map_state: parent.pre_map_state.clone(),
             map_state: parent.map_state.clone(),
-            map_tombstones: HashMap::new(),
+            map_tombstones: parent.map_tombstones.clone(),
             map_accesses: vec![],
             var_accesses: vec![],
             reachable_map_reads: parent.reachable_map_reads.clone(),
@@ -5311,7 +5373,7 @@ impl Continuation {
             panicking: false,
             early_return: false,
         };
-        debug!("Created continuation {} ({}) from parent {}: pred={}", cont.id, cont.current_function.as_ref().map(|s| s.as_str()).unwrap_or("unreachable"), parent_id, &cont.predicate);
+        debug!("Created continuation {} ({}) from parent {}: pred={}", cont.id, cont.function_path.as_ref().map(|s| s.as_str()).unwrap_or("unreachable"), parent_id, &cont.predicate);
         cont
     }
     
@@ -5321,7 +5383,7 @@ impl Continuation {
         let parent_id = parent.id;
         let mut cont = Self::from_parent(parent, function_name, start_line);
         cont.caller = Some(parent_copy);
-        debug!("Created continuation {} ({}) from caller {}", cont.id, cont.current_function.as_ref().map(|s| s.as_str()).unwrap_or("unreachable"), parent_id);
+        debug!("Created continuation {} ({}) from caller {}", cont.id, cont.function_path.as_ref().map(|s| s.as_str()).unwrap_or("unreachable"), parent_id);
         cont
     }
 
@@ -5341,7 +5403,7 @@ impl Continuation {
         cont.bound_formulae = parent_caller_caller.as_ref().map(|parent_caller| parent_caller.bound_formulae.clone()).unwrap_or(HashMap::new());
         cont.caller = parent_caller_caller;
 
-        debug!("Created continuation {} ({}) from callee {}", cont.id, cont.current_function.as_ref().map(|s| s.as_str()).unwrap_or("unreachable"), parent_id);
+        debug!("Created continuation {} ({}) from callee {}", cont.id, cont.function_path.as_ref().map(|s| s.as_str()).unwrap_or("unreachable"), parent_id);
         cont
     }
 
@@ -5355,17 +5417,22 @@ impl Continuation {
         assert!(!parent.panicking, "BUG: tried to continue from a panic");
         assert!(!free.panicking, "BUG: tried to build from a panicked free continuation");
 
+        // TODO: bind contract-caller and tx-sender
+       
+        assert_eq!(free.bound_formulae.len(), 0);
         let mut bound_formulae = free.bound_formulae.clone();
         bound_formulae.extend(parent.bound_formulae.clone().into_iter());
 
-        let mut predicate = free.predicate.clone().as_symop().and(parent.predicate.clone().as_symop());
+        let mut free_predicate = free.predicate.clone().as_symop();
         for (sym_id, symop) in bound_formulae.iter() {
-            predicate = *predicate.bind_symbol(sym_id.clone(), symop.clone());
+            debug!("Bind predicate symbol {sym_id} = {symop}");
+            free_predicate = *free_predicate.bind_symbol(sym_id.clone(), symop.clone());
         }
-        let predicate = predicate.try_as_predicate()?;
+        let predicate = free_predicate.and(parent.predicate.clone().as_symop()).try_as_predicate()?;
 
         let mut final_formula = free.final_formula.clone();
         for (sym_id, symop) in bound_formulae.iter() {
+            debug!("Bind final formula symbol {sym_id} = {symop}");
             final_formula = *final_formula.bind_symbol(sym_id.clone(), symop.clone());
         }
         
@@ -5377,6 +5444,7 @@ impl Continuation {
                     let mut new_op = op.clone();
                     for (sym_id, symop) in bound_formulae.iter() {
                         let symop = symop.clone().simplify()?;
+                        debug!("Bind (var-set {n}) symbol {sym_id} = {symop}");
                         new_op = new_op.bind_symbol(sym_id.clone(), symop).simplify()?;
                     }
                     VarOp::Set(n.clone(), new_op)
@@ -5391,6 +5459,7 @@ impl Continuation {
                 let mut new_key_sym = key_sym.clone();
                 for (sym_id, symop) in bound_formulae.iter() {
                     let symop = symop.clone().simplify()?;
+                    debug!("Bind (pre-map-write {map_name} {key_sym}) symbol {sym_id} = {symop}");
                     new_key_sym = new_key_sym.bind_symbol(sym_id.clone(), symop.clone()).simplify()?;
                 }
                 if let Some(new_map_info) = pre_map_state.get_mut(map_name) {
@@ -5411,6 +5480,7 @@ impl Continuation {
                 let mut new_val_sym = val_sym.clone();
                 for (sym_id, symop) in bound_formulae.iter() {
                     let symop = symop.clone().simplify()?;
+                    debug!("Bind (map-write {map_name} {key_sym}) symbol {sym_id} = {symop}");
                     new_key_sym = new_key_sym.bind_symbol(sym_id.clone(), symop.clone()).simplify()?;
                     new_val_sym = new_val_sym.bind_symbol(sym_id.clone(), symop.clone()).simplify()?;
                 }
@@ -5431,6 +5501,7 @@ impl Continuation {
                 let mut new_key_sym = key_sym.clone();
                 for (sym_id, symop) in bound_formulae.iter() {
                     let symop = symop.clone().simplify()?;
+                    debug!("Bind (map-delete {map_name} {key_sym}) symbol {sym_id} = {symop}");
                     new_key_sym = new_key_sym.bind_symbol(sym_id.clone(), symop.clone()).simplify()?;
                 }
                 if let Some(new_map_info) = map_tombstones.get_mut(map_name) {
@@ -5468,7 +5539,7 @@ impl Continuation {
 
         let cont = Self {
             id: next_cont_id(),
-            current_function: Some(function_name),
+            function_path: Some(function_name),
             current_line: free.current_line.clone(),
             bound_formulae: HashMap::new(),
             dropped_formulae: vec![],
@@ -5496,7 +5567,7 @@ impl Continuation {
             early_return: free.early_return || parent.early_return,
         };
 
-        info!("Created continuation {} ({}) from pre-evaluated continuation {} and parent {}", cont.id, cont.current_function.as_ref().map(|s| s.as_str()).unwrap_or("unreachable"), free.id, parent.id);
+        info!("Created continuation {} ({}) from pre-evaluated continuation {} and parent {}", cont.id, cont.function_path.as_ref().map(|s| s.as_str()).unwrap_or("unreachable"), free.id, parent.id);
         info!("Parent continuation\n{}", parent);
         info!("Free continuation\n{}", free);
         info!("Evaluated continuation\n{}", &cont);
@@ -5525,7 +5596,14 @@ impl Continuation {
     }
 
     /// Find the data var formula with the given data var name
-    fn lookup_data_var(&self, name: &ClarityName) -> Option<&SymOp> {
+    fn lookup_data_var(&mut self, name: &ClarityName) -> Option<&SymOp> {
+        // no need to claim that this is "possibly" reached
+        let var_full_name = FullName(self.get_current_contract_id(), name.clone());
+        self.reachable_var_reads.remove(&var_full_name);
+        self.inner_lookup_data_var(&var_full_name)
+    }
+
+    fn inner_lookup_data_var(&self, name: &FullName) -> Option<&SymOp> {
         let mut cursor = self;
         loop {
             for var_val in cursor.post_vars.iter().rev() {
@@ -5557,6 +5635,7 @@ impl Continuation {
 
     /// record that a map access happend
     pub fn read_data_var(&mut self, name: ClarityName, val: SymOp, line: u32) {
+        let name = FullName(self.get_current_contract_id(), name);
         self.var_accesses.push(VarAccess {
             name,
             value: val,
@@ -5566,18 +5645,22 @@ impl Continuation {
 
     /// Find the map entry formula with the given map name and key
     /// key_op must be simplified
-    pub fn lookup_map_entry(&self, name: &ClarityName, key_op: &SymOp) -> Option<&SymOp> {
-        if self.is_map_deleted(name, key_op) {
+    pub fn lookup_map_entry(&mut self, name: &ClarityName, key_op: &SymOp) -> Option<&SymOp> {
+        let name = FullName(self.get_current_contract_id(), name.clone());
+
+        // no need to claim that this is "possibly" reached
+        self.reachable_map_reads.remove(&name);
+        if self.is_map_deleted(&name, key_op) {
             return None;
         }
 
-        let map_index = self.map_state.get(name)?;
+        let map_index = self.map_state.get(&name)?;
         map_index.get(key_op)
     }
     
     /// See if this key was recently deleted
     /// key_op must be simplified
-    pub fn is_map_deleted(&self, name: &ClarityName, key_op: &SymOp) -> bool {
+    pub fn is_map_deleted(&self, name: &FullName, key_op: &SymOp) -> bool {
         if let Some(tombstone_idx) = self.map_tombstones.get(name) && tombstone_idx.get(key_op).is_some() {
             return true;
         }
@@ -5687,18 +5770,24 @@ impl Continuation {
     
     /// Set an initial data var formula
     pub fn set_pre_data_var(&mut self, name: &ClarityName, symop: SymOp) {
-        self.pre_vars.push(VarOp::Set(name.clone(), SymOp::LoadedDataVariable(name.clone(), Box::new(symop))));
+        let fqname = FullName(self.get_current_contract_id(), name.clone());
+        self.pre_vars.push(VarOp::Set(fqname.clone(), SymOp::LoadedDataVariable(fqname, Box::new(symop))));
     }
 
     /// Set a data-var formula consequent to a (var-set ..)
     /// symop should be simplified
     pub fn set_post_data_var(&mut self, name: &ClarityName, symop: SymOp) {
-        self.post_vars.push(VarOp::Set(name.clone(), SymOp::LoadedDataVariable(name.clone(), Box::new(symop))));
+        let fqname = FullName(self.get_current_contract_id(), name.clone());
+        self.post_vars.push(VarOp::Set(fqname.clone(), SymOp::LoadedDataVariable(fqname.clone(), Box::new(symop))));
+
+        // no need to claim that this is "possibly" reached
+        self.reachable_var_writes.remove(&fqname);
     }
 
     /// Record that a map entry was accessed, and possibly had the given value at the time
     pub fn read_map_entry(&mut self, name: ClarityName, key_symop: SymOp, val_symop: Option<SymOp>, line: u32) {
-        if val_symop.is_none() {
+        let name = FullName(self.get_current_contract_id(), name.clone());
+        if val_symop.is_none() && !self.is_map_deleted(&name, &key_symop) {
             // this is the first time this was accessed, so it's input
             if let Some(recs) = self.pre_map_state.get_mut(&name) {
                 recs.insert(key_symop.clone());
@@ -5720,10 +5809,11 @@ impl Continuation {
     /// Set a map entry consequent to a (map-set ..)
     /// key_symop must be simplified.
     pub fn set_map_entry(&mut self, name: &ClarityName, key_symop: SymOp, val_symop: SymOp) {
-        if let Some(idx) = self.map_tombstones.get_mut(name) {
+        let name = FullName(self.get_current_contract_id(), name.clone());
+        if let Some(idx) = self.map_tombstones.get_mut(&name) {
             idx.remove(&key_symop);
         }
-        if let Some(map) = self.map_state.get_mut(name) {
+        if let Some(map) = self.map_state.get_mut(&name) {
             map.insert(key_symop, val_symop);
         }
         else {
@@ -5731,11 +5821,14 @@ impl Continuation {
             map.insert(key_symop, val_symop);
             self.map_state.insert(name.clone(), map);
         }
+        // no need to claim that this is "possibly" reached
+        self.reachable_map_writes.remove(&name);
     }
     
     /// Delete a map entry
     pub fn delete_map_entry(&mut self, name: &ClarityName, key_symop: &SymOp) -> bool {
-        let present = if let Some(map) = self.map_state.get_mut(name) {
+        let name = FullName(self.get_current_contract_id(), name.clone());
+        let present = if let Some(map) = self.map_state.get_mut(&name) {
             let present = map.contains_key(&key_symop);
             map.remove(key_symop);
             present
@@ -5743,7 +5836,12 @@ impl Continuation {
         else {
             false
         };
-        if let Some(idx) = self.map_tombstones.get_mut(name) {
+        let empty = self.map_state.get(&name).map(|map| map.is_empty()).unwrap_or(false);
+        if empty {
+            self.map_state.remove(&name);
+        }
+
+        if let Some(idx) = self.map_tombstones.get_mut(&name) {
             idx.insert(key_symop.clone());
         }
         else {
@@ -5751,6 +5849,8 @@ impl Continuation {
             idx.insert(key_symop.clone());
             self.map_tombstones.insert(name.clone(), idx);
         }
+        // no need to claim that this is "possibly" reached
+        self.reachable_map_writes.remove(&name);
         present
     }
 
@@ -5761,7 +5861,7 @@ impl Continuation {
             
         let mut self_trace = TraceItem {
             depth: 0,
-            identifier: self.current_function.clone().unwrap_or("".to_string()),
+            identifier: self.function_path.clone().unwrap_or("".to_string()),
             contract_id: self.get_current_contract_id(),
             start_line: self.current_line.clone().unwrap_or(0),
             cont_id: self.id,
@@ -5792,7 +5892,7 @@ impl Continuation {
 
             let trace_item = TraceItem {
                 depth,
-                identifier: cursor.current_function.clone().unwrap_or("".to_string()),
+                identifier: cursor.function_path.clone().unwrap_or("".to_string()),
                 contract_id: cursor.get_current_contract_id(),
                 start_line: cursor.current_line.clone().unwrap_or(0),
                 cont_id: cursor.id,
@@ -5805,7 +5905,7 @@ impl Continuation {
 
         let depth = trace_items.len();
         trace_items.iter_mut().for_each(|t| t.depth = depth - t.depth);
-        self_trace.depth = depth;
+        self_trace.depth = depth + 1;
         trace_items.push(self_trace);
         trace_items.reverse();
         Trace(trace_items)
@@ -5896,7 +5996,7 @@ impl Continuation {
             panicking = panicking || cursor.panicking;
         }
 
-        let mut seen_vars : HashSet<ClarityName> = HashSet::new();
+        let mut seen_vars : HashSet<FullName> = HashSet::new();
         let mut post_vars = vec![];
         for varop in final_vars.into_iter().rev() {
             if let VarOp::Set(name, ..) = &varop {
@@ -5955,7 +6055,7 @@ impl Continuation {
             "".to_string()
         };
         debug!("Roll up continuation {} to ancestor {:?} to create continuation {} {} {}", self.id, ancestor_id, merged.id, &bound_formulae_str, &unbound_formulae_str);
-        debug!("Continuation name: {}", merged.current_function.as_ref().map(|s| s.as_str()).unwrap_or(""));
+        debug!("Continuation name: {}", merged.function_path.as_ref().map(|s| s.as_str()).unwrap_or(""));
         debug!("Continuation:\n{}", &merged);
         debug!("Trace:\n{}", &merged.trace());
         debug!("Old continuation:\n{old_cont_str}");
@@ -6004,7 +6104,7 @@ impl Continuation {
     /// Determine whether or not a given function in the callgraph may read state that has been
     /// written in this continuation (i.e. if not, then perhaps we don't need to evaluate this
     /// function).
-    pub fn is_causally_independent(&self, func_name: &CallableName, callgraph: &Callgraph) -> Result<bool, Error> {
+    pub fn is_causally_independent(&self, func_name: &FullName, callgraph: &Callgraph) -> Result<bool, Error> {
         let reachable_map_accesses : HashSet<_> = callgraph.reachable_map_accesses_from(func_name)?
             .into_iter()
             .collect();
@@ -6013,17 +6113,20 @@ impl Continuation {
             .into_iter()
             .collect();
 
-        let mut all_accesses = HashSet::new();
-        all_accesses.extend(reachable_map_accesses.into_iter());
-        all_accesses.extend(reachable_var_accesses.into_iter());
-
         let rolled_up = self.clone().rollup();
-        for accessed in all_accesses.into_iter() {
+        for accessed in reachable_map_accesses.into_iter() {
             if rolled_up.map_state.contains_key(&accessed) {
                 // this function may access a map written in this continuation
                 info!("Function {func_name} reads state from map {accessed}, which was written to by continuation {}", self.id);
                 return Ok(false);
             }
+            if rolled_up.reachable_map_writes.contains(&accessed) {
+                // this function may access a map that might have been written before
+                info!("Function {func_name} reads state from map {accessed}, which may be written to by continuation {}", self.id);
+                return Ok(false);
+            }
+        }
+        for accessed in reachable_var_accesses.into_iter() {
             if rolled_up.post_vars.iter().find(|v| if let VarOp::Set(varname, ..) = v && varname == &accessed { true } else { false }).is_some() {
                 // this function may access a var written in this continuation
                 info!("Function {func_name} reads state from data-var {accessed}, which was written to by continuation {}", self.id);
@@ -6032,11 +6135,6 @@ impl Continuation {
             if rolled_up.reachable_var_writes.contains(&accessed) {
                 // this function may access a var that might have been written before
                 info!("Function {func_name} reads state from data-var {accessed}, which may be written to by continuation {}", self.id);
-                return Ok(false);
-            }
-            if rolled_up.reachable_map_writes.contains(&accessed) {
-                // this function may access a map that might have been written before
-                info!("Function {func_name} reads state from map {accessed}, which may be written to by continuation {}", self.id);
                 return Ok(false);
             }
         }
@@ -6049,7 +6147,7 @@ impl Continuation {
     /// That is, the values it reads from vars or maps have not previously been written by this
     /// continuation.
     pub fn is_read_independent(&self, evaled_cont: &Continuation) -> Result<bool, Error> {
-        let mut evaled_map_reads : HashMap<ClarityName, HashSet<SymOp>> = HashMap::new();
+        let mut evaled_map_reads : HashMap<FullName, HashSet<SymOp>> = HashMap::new();
 
         for map_access in evaled_cont.map_accesses.iter() {
             let map_name = &map_access.name;
@@ -6079,7 +6177,7 @@ impl Continuation {
         
         for var_access in evaled_cont.var_accesses.iter() {
             let var_name = &var_access.name;
-            if self.lookup_data_var(var_name).is_some() {
+            if self.inner_lookup_data_var(var_name).is_some() {
                 // this cont write a var that evaled_cont reads
                 info!("Evaled continuation {} reads var {var_name}, which continuation {} wrote", evaled_cont.id, self.id);
                 return Ok(false);
@@ -6118,7 +6216,7 @@ impl Continuation {
 
     /// Given a function and a callgraph, add to this continuation the set of map and var accesses
     /// that may be reached from it
-    pub fn add_reachable_storage_accesses(&mut self, func_name: &CallableName, callgraph: &Callgraph) -> Result<(), Error> {
+    pub fn add_reachable_storage_accesses(&mut self, func_name: &FullName, callgraph: &Callgraph) -> Result<(), Error> {
         let reachable_map_accesses : HashSet<_> = callgraph.reachable_map_accesses_from(func_name)?
             .into_iter()
             .collect();
@@ -6143,29 +6241,9 @@ impl Continuation {
     }
 }
 
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct CallableName(pub QualifiedContractIdentifier, pub ClarityName);
-
-impl fmt::Display for CallableName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        write!(f, "{}.{}", &self.0, &self.1)
-    }
-}
-
-impl CallableName {
-    pub fn name(&self) -> &ClarityName {
-        &self.1
-    }
-
-    pub fn contract_id(&self) -> &QualifiedContractIdentifier {
-        &self.0
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Hash)]
 pub struct CallgraphFunction {
-    pub fq_name: CallableName,
+    pub fq_name: FullName,
     pub start_line: u32
 }
 
@@ -6176,14 +6254,14 @@ impl fmt::Display for CallgraphFunction {
 }
 
 impl CallgraphFunction {
-    pub fn new(fq_name: CallableName, start_line: u32) -> Self {
+    pub fn new(fq_name: FullName, start_line: u32) -> Self {
         Self {
             fq_name,
             start_line
         }
     }
 
-    pub fn call_name(&self) -> &CallableName {
+    pub fn call_name(&self) -> &FullName {
         &self.fq_name
     }
 
@@ -6198,13 +6276,13 @@ pub struct CallgraphNode {
     /// list of functions called
     pub callable: Vec<CallgraphFunction>,
     /// list of vars that this function may read from
-    pub var_reads: HashSet<ClarityName>,
+    pub var_reads: HashSet<FullName>,
     /// list of maps that this function may read from
-    pub map_reads: HashSet<ClarityName>,
+    pub map_reads: HashSet<FullName>,
     /// list of vars that this function may write to
-    pub var_writes: HashSet<ClarityName>,
+    pub var_writes: HashSet<FullName>,
     /// list of maps that this function may write to
-    pub map_writes: HashSet<ClarityName>,
+    pub map_writes: HashSet<FullName>,
     /// whether or not this function is pure -- as in, it does not do I/O, nor do any of its
     /// reachable functions.
     pub is_pure: bool,
@@ -6233,7 +6311,6 @@ impl fmt::Display for CallgraphNode {
         Ok(())
     }
 }
-    
 
 impl CallgraphNode {
     pub fn new() -> Self {
@@ -6247,32 +6324,32 @@ impl CallgraphNode {
         }
     }
     
-    pub fn add_readable_var(&mut self, var_name: ClarityName) {
+    pub fn add_readable_var(&mut self, var_name: FullName) {
         self.var_reads.insert(var_name);
     }
 
-    pub fn add_readable_map(&mut self, map_name: ClarityName) {
+    pub fn add_readable_map(&mut self, map_name: FullName) {
         self.map_reads.insert(map_name);
     }
 
-    pub fn add_writable_var(&mut self, var_name: ClarityName) {
+    pub fn add_writable_var(&mut self, var_name: FullName) {
         self.var_writes.insert(var_name);
     }
 
-    pub fn add_writable_map(&mut self, map_name: ClarityName) {
+    pub fn add_writable_map(&mut self, map_name: FullName) {
         self.map_writes.insert(map_name);
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Callgraph {
-    reachable: HashMap<CallableName, CallgraphNode>,
+    reachable: HashMap<FullName, CallgraphNode>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CallgraphView<'a> {
     callgraph: &'a Callgraph,
-    cursor: CallableName
+    cursor: FullName
 }
 
 impl<'a> fmt::Display for CallgraphView<'a> {
@@ -6304,21 +6381,23 @@ impl<'a> fmt::Display for CallgraphView<'a> {
 }
 
 impl Callgraph {
-    pub fn from_exprs(contract_context: &ContractContext, exprs: &[SymbolicExpression]) -> Result<Callgraph, Error> {
+    pub fn from_contracts(contracts: &HashMap<QualifiedContractIdentifier, SymContract>, target_contract: &QualifiedContractIdentifier) -> Result<Callgraph, Error> {
         let mut callgraph = Self::empty();
-        callgraph.load_defs(contract_context, exprs)?;
+        callgraph.load_defs(contracts, target_contract)?;
         Ok(callgraph)
     }
-
+    
     fn empty() -> Self {
         Self {
-            reachable: HashMap::new()
+            reachable: HashMap::new(),
         }
     }
 
-    fn load_defs(&mut self, contract_context: &ContractContext, bodies: &[SymbolicExpression]) -> Result<(), Error> {
-        let mut frontier : HashMap<CallableName, &[SymbolicExpression]> = HashMap::new();
-        for body in bodies.iter() {
+    fn walk_functions<F>(exprs: &[SymbolicExpression], mut walk: F) -> Result<(), Error>
+    where
+        F: FnMut(&ClarityName, &[SymbolicExpression]) -> Result<(), Error>
+    {
+        for body in exprs.iter() {
             if let SymbolicExpressionType::List(lv) = &body.expr
                 && let Some(first) = lv.first()
                 && let Some(function_base_name) = first.match_atom()
@@ -6342,17 +6421,44 @@ impl Callgraph {
                     return Err(Error::Bug(format!("No function body for {def_name}")));
                 };
 
-                let node = CallgraphNode::new();
-                let fq_name = CallableName(contract_context.contract_identifier.clone(), def_name.clone());
-                self.reachable.insert(fq_name.clone(), node);
-
-                debug!("top-level function {}", &fq_name);
-                frontier.insert(fq_name, func_body);
+                walk(def_name, func_body)?;
             }
         }
+        Ok(())
+    }
+
+    fn load_defs(&mut self, contracts: &HashMap<QualifiedContractIdentifier, SymContract>, target_contract: &QualifiedContractIdentifier) -> Result<(), Error> {
+        let Some(sym_contract) = contracts.get(target_contract) else {
+            return Err(Error::NotFound(format!("Missing contract {target_contract}")));
+        };
+        
+        let mut frontier : HashMap<FullName, Vec<SymbolicExpression>> = HashMap::new();
+        let mut reachable : HashMap<FullName, CallgraphNode> = HashMap::new();
+
+        Self::walk_functions(&sym_contract.symbols, |def_name, func_body| {
+            let node = CallgraphNode::new();
+            let fq_name = FullName(target_contract.clone(), def_name.clone());
+            reachable.insert(fq_name.clone(), node);
+
+            debug!("top-level function: {fq_name}");
+            frontier.insert(fq_name, func_body.to_vec());
+            Ok(())
+        })?;
+
+        reachable.retain(|fq_name, _| !self.reachable.contains_key(fq_name));
+        if reachable.is_empty() {
+            return Ok(());
+        }
+
+        frontier.retain(|fq_name, _| !self.reachable.contains_key(fq_name));
+        if frontier.is_empty() {
+            return Ok(())
+        }
+
+        self.reachable.extend(reachable.into_iter());
 
         for (name, func_body) in frontier.into_iter() {
-            self.build(contract_context, &name, func_body)?;
+            self.build(contracts, target_contract, &name, &func_body)?;
         }
         let mut is_pure = HashMap::new();
         for name in self.reachable.keys() {
@@ -6371,7 +6477,7 @@ impl Callgraph {
         Ok(())
     }
 
-    fn build(&mut self, contract_context: &ContractContext, func_name: &CallableName, body_list: &[SymbolicExpression]) -> Result<(), Error> {
+    fn build(&mut self, contracts: &HashMap<QualifiedContractIdentifier, SymContract>, target_contract: &QualifiedContractIdentifier, func_name: &FullName, body_list: &[SymbolicExpression]) -> Result<(), Error> {
         for body in body_list.iter() {
             debug!("build: {func_name}: visit {}", &body.expr);
             let Some(lv) = body.match_list() else {
@@ -6383,7 +6489,38 @@ impl Callgraph {
             if let Some(function_base_name) = first.match_atom() {
                 match function_base_name.as_str() {
                     "contract-call?" => {
-                        todo!()
+                        let target_contract_id = if let Some(Value::Principal(PrincipalData::Contract(target_contract_id))) = lv.get(1).ok_or_else(|| Error::NotFound("No contract ID".into()))?.match_literal_value() {
+                            // direct contract call
+                            target_contract_id
+                        }
+                        /*
+                        else if let Some(trait_name) = lv.get(1).ok_or_else(|| Error::NotFound("No contract ID".into()))?.match_atom() {
+                            // call to a trait reference.
+                            // look it up
+                            todo!()
+                            let Some(sym_contract) = contracts.get(target_contract) else {
+                                return Err(Error::NotFound(format!("No such contract {target_contract}")));
+                            };
+                            for trait_ref in sym_contract.
+                        }
+                        */
+                        else {
+                            return Err(Error::NotFound(format!("contract ID is not a literal value or an atom: {:?}", &lv.get(1))));
+                        };
+
+                        let Some(target_func_name) = lv.get(2).ok_or_else(|| Error::NotFound("No function name".into()))?.match_atom() else {
+                            return Err(Error::NotFound(format!("contract-call function name not found: {:?}", &lv.get(2))));
+                        };
+
+                        self.load_defs(contracts, target_contract_id)?;
+
+                        let fq_name = FullName(target_contract_id.clone(), target_func_name.clone());
+                        let Some(node) = self.reachable.get_mut(&func_name) else {
+                            return Err(Error::Bug(format!("Unexplored function {function_base_name}")));
+                        };
+
+                        debug!("function {func_name} calls {fq_name}");
+                        node.callable.push(CallgraphFunction::new(fq_name, body.span.start_line));
                     },
                     "map-insert"
                     | "map-set"
@@ -6399,7 +6536,9 @@ impl Callgraph {
                         };
                         
                         debug!("function {} mutates map {}", &func_name, map_name);
-                        node.add_writable_map(map_name.clone());
+                        
+                        let map_full_name = FullName(target_contract.clone(), map_name.clone());
+                        node.add_writable_map(map_full_name.clone());
                     },
                     "map-get?" => {
                         let Some(node) = self.reachable.get_mut(func_name) else {
@@ -6413,7 +6552,9 @@ impl Callgraph {
                         };
                         
                         debug!("function {} accesses map {}", &func_name, map_name);
-                        node.add_readable_map(map_name.clone());
+                        
+                        let map_full_name = FullName(target_contract.clone(), map_name.clone());
+                        node.add_readable_map(map_full_name.clone());
                     }
                     "fold"
                     | "filter"
@@ -6424,7 +6565,7 @@ impl Callgraph {
                         let Some(called_func_name) = lv.get(1).ok_or_else(|| Error::Bug(format!("{function_base_name} missing function")))?.match_atom() else {
                             return Err(Error::Bug(format!("{function_base_name} missing function (not atom)")));
                         };
-                        let fq_name = CallableName(func_name.contract_id().clone(), called_func_name.clone());
+                        let fq_name = FullName(func_name.contract_id().clone(), called_func_name.clone());
                         debug!("function {func_name} calls {fq_name}");
                         node.callable.push(CallgraphFunction::new(fq_name, body.span.start_line));
                     }
@@ -6440,7 +6581,9 @@ impl Callgraph {
                         };
                         
                         debug!("function {} mutates var {}", &func_name, var_name);
-                        node.add_writable_var(var_name.clone());
+                        
+                        let var_full_name = FullName(target_contract.clone(), var_name.clone());
+                        node.add_writable_var(var_full_name);
                     },
                     "var-get" => {
                         let Some(node) = self.reachable.get_mut(func_name) else {
@@ -6454,11 +6597,17 @@ impl Callgraph {
                         };
                         
                         debug!("function {} accesses var {}", &func_name, var_name);
-                        node.add_readable_var(var_name.clone());
+
+                        let var_full_name = FullName(target_contract.clone(), var_name.clone());
+                        node.add_readable_var(var_full_name);
                     },
                     _ => {
-                        if contract_context.functions.get(function_base_name).is_some() {
-                            let fq_name = CallableName(func_name.contract_id().clone(), function_base_name.clone());
+                        let Some(sym_contract) = contracts.get(target_contract) else {
+                            return Err(Error::NotFound(format!("No such contract {target_contract}")));
+                        };
+
+                        if sym_contract.contract_context.functions.get(function_base_name).is_some() {
+                            let fq_name = FullName(func_name.contract_id().clone(), function_base_name.clone());
                             let Some(node) = self.reachable.get_mut(&func_name) else {
                                 return Err(Error::Bug(format!("Unexplored function {function_base_name}")));
                             };
@@ -6466,14 +6615,14 @@ impl Callgraph {
                             node.callable.push(CallgraphFunction::new(fq_name, body.span.start_line));
                         }
                         for ili in lv.iter() {
-                            self.build(contract_context, func_name, &[ili.clone()])?;
+                            self.build(contracts, target_contract, func_name, &[ili.clone()])?;
                         }
                     }
                 }
             }
             else {
                 for ili in lv.iter() {
-                    self.build(contract_context, func_name, &[ili.clone()])?;
+                    self.build(contracts, target_contract, func_name, &[ili.clone()])?;
                 }
             }
         }
@@ -6482,7 +6631,7 @@ impl Callgraph {
 
     /// Compute the set of reachable functions from a given function.
     /// Returns None if the function is not known
-    pub fn reachable_from(&self, func_name: &CallableName) -> Result<Vec<CallableName>, Error> {
+    pub fn reachable_from(&self, func_name: &FullName) -> Result<Vec<FullName>, Error> {
         let mut reachable = vec![];
         let mut reachable_set = HashSet::new();
         let mut frontier = VecDeque::new();
@@ -6513,12 +6662,12 @@ impl Callgraph {
     }
 
     /// Get a callgraph node
-    pub fn get_node(&self, func_name: &CallableName) -> Option<&CallgraphNode> {
+    pub fn get_node(&self, func_name: &FullName) -> Option<&CallgraphNode> {
         self.reachable.get(func_name)
     }
 
     /// Get all functions defined in a given contract
-    pub fn get_contract_functions(&self, contract_id: &QualifiedContractIdentifier) -> Vec<CallableName> {
+    pub fn get_contract_functions(&self, contract_id: &QualifiedContractIdentifier) -> Vec<FullName> {
         self.reachable
             .keys()
             .filter_map(|k| if k.contract_id() == contract_id {
@@ -6531,7 +6680,7 @@ impl Callgraph {
     }
     
     /// Determine what map accesses a function could potentially cause
-    pub fn reachable_map_accesses_from(&self, func_name: &CallableName) -> Result<Vec<ClarityName>, Error> {
+    pub fn reachable_map_accesses_from(&self, func_name: &FullName) -> Result<Vec<FullName>, Error> {
         let mut reachable_funcs = self.reachable_from(func_name)?;
         reachable_funcs.push(func_name.clone());
         let mut reachable_maps = HashSet::new();
@@ -6547,7 +6696,7 @@ impl Callgraph {
     }
 
     /// Determine what map mutations a function could potentially cause
-    pub fn reachable_map_mutations_from(&self, func_name: &CallableName) -> Result<Vec<ClarityName>, Error> {
+    pub fn reachable_map_mutations_from(&self, func_name: &FullName) -> Result<Vec<FullName>, Error> {
         let mut reachable_funcs = self.reachable_from(func_name)?;
         reachable_funcs.push(func_name.clone());
         let mut reachable_maps = HashSet::new();
@@ -6563,7 +6712,7 @@ impl Callgraph {
     }
     
     /// Determine what var accesses a function could potentially cause
-    pub fn reachable_var_accesses_from(&self, func_name: &CallableName) -> Result<Vec<ClarityName>, Error> {
+    pub fn reachable_var_accesses_from(&self, func_name: &FullName) -> Result<Vec<FullName>, Error> {
         let mut reachable_funcs = self.reachable_from(func_name)?;
         reachable_funcs.push(func_name.clone());
         let mut reachable_vars = HashSet::new();
@@ -6579,7 +6728,7 @@ impl Callgraph {
     }
     
     /// Determine what var mutations a function could potentially cause
-    pub fn reachable_var_mutations_from(&self, func_name: &CallableName) -> Result<Vec<ClarityName>, Error> {
+    pub fn reachable_var_mutations_from(&self, func_name: &FullName) -> Result<Vec<FullName>, Error> {
         let mut reachable_funcs = self.reachable_from(func_name)?;
         reachable_funcs.push(func_name.clone());
         let mut reachable_vars = HashSet::new();
@@ -6595,7 +6744,7 @@ impl Callgraph {
     }
 
     /// Is a given function read-only? As in, it can _never_ mutate state?
-    fn check_pure(&self, func_name: &CallableName) -> Result<bool, Error> {
+    fn check_pure(&self, func_name: &FullName) -> Result<bool, Error> {
         Ok(self.reachable_map_accesses_from(func_name)?.len() == 0
            && self.reachable_map_mutations_from(func_name)?.len() == 0
            && self.reachable_var_accesses_from(func_name)?.len() == 0
@@ -6603,12 +6752,12 @@ impl Callgraph {
     }
 
     /// Report whether or not a given function is pure
-    pub fn is_pure(&self, func_name: &CallableName) -> Result<bool, Error> {
+    pub fn is_pure(&self, func_name: &FullName) -> Result<bool, Error> {
         let node = self.get_node(func_name).ok_or_else(|| Error::NotFound(format!("{func_name}")))?;
         Ok(node.is_pure)
     }
 
-    pub fn view<'a>(&'a self, func_name: &CallableName) -> Option<CallgraphView<'a>> {
+    pub fn view<'a>(&'a self, func_name: &FullName) -> Option<CallgraphView<'a>> {
         if self.reachable.get(func_name).is_none() {
             return None;
         }
@@ -6620,21 +6769,36 @@ impl Callgraph {
     }
 }
 
+/// Symbolic contract state
+#[derive(Debug)]
+pub struct SymContract {
+    id: QualifiedContractIdentifier,
+    typemap: TypeMap,
+    symbols: Vec<SymbolicExpression>,
+    contract_context: ContractContext,
+}
+
 /// Symbolic execution engine
 #[derive(Debug)]
 pub struct Symbex {
+    /// in-RAM contract store
     datastore: BackingStore,
-    contract_context: ContractContext,
-    symbols: Vec<SymbolicExpression>,
-    typemap: TypeMap,
-    tx_sender: Option<SymOp>,
-    tx_sponsor: Option<SymOp>,
-    contract_caller: Option<SymOp>,
+    /// contracts loaded, and their typemaps, symbols, and contexts
+    contracts: HashMap<QualifiedContractIdentifier, SymContract>,
+    /// table of reachable functions, maps, and vars
     pub callgraph: Callgraph,
+    /// first tx-sender
+    tx_sender: Option<SymOp>,
+    /// first tx-sponsor
+    tx_sponsor: Option<SymOp>,
+    /// first contract-caller (when evaluating a specific function)
+    contract_caller: Option<SymOp>,
+    /// contract to be analyzed
+    pub target_contract: QualifiedContractIdentifier,
     /// option to skip evaluating all function calls
     explore_function_calls: bool,
     /// option to skip evaluating specific function calls
-    skip_function_calls: HashSet<ClarityName>,
+    skip_function_calls: HashSet<FullName>,
     /// option to skip function calls that do not do I/O and instead treat them as symbols
     skip_pure_calls: bool,
     /// option to skip function calls that do I/O that is causally independent of the
@@ -6642,10 +6806,25 @@ pub struct Symbex {
     skip_causally_independent_calls: bool,
     /// cache of evaluated function calls, with all function arguments unbound.
     /// Maps the SymbolicExpression ID to the set of halting continuations
-    evaluated_functions: HashMap<CallableName, Vec<Continuation>>
+    evaluated_functions: HashMap<FullName, Vec<Continuation>>
 }
 
 impl Symbex {
+    /// Get a ref to a contract's typemap.
+    pub fn typemap(&self, contract_id: &QualifiedContractIdentifier) -> Result<&TypeMap, Error> {
+        self.contracts.get(contract_id).map(|sc| &sc.typemap).ok_or_else(|| Error::NotFound(format!("No such contract {contract_id}")))
+    }
+
+    /// Get a ref to a contract's context
+    pub fn contract_context(&self, contract_id: &QualifiedContractIdentifier) -> Result<&ContractContext, Error> {
+        self.contracts.get(contract_id).map(|sc| &sc.contract_context).ok_or_else(|| Error::NotFound(format!("No such contract {contract_id}")))
+    }
+
+    /// Get a ref to a contract's symbols
+    pub fn symbols(&self, contract_id: &QualifiedContractIdentifier) -> Result<&[SymbolicExpression], Error> {
+        self.contracts.get(contract_id).map(|sc| sc.symbols.as_slice()).ok_or_else(|| Error::NotFound(format!("No such contract {contract_id}")))
+    }
+
     fn sequence_maxlen(ts: &TypeSignature) -> Result<usize, Error> {
         // type signature must be a sequence
         match ts {
@@ -6720,6 +6899,7 @@ impl Symbex {
                 // this has to be the same continuation, insofar as it must have the same final
                 // formula, same effects, and same caller
                 if c.final_formula != cont.final_formula
+                    || c.pre_map_state != cont.pre_map_state
                     || c.map_state != cont.map_state
                     || c.map_tombstones != cont.map_tombstones
                     || c.post_vars != cont.post_vars
@@ -6865,7 +7045,7 @@ impl Symbex {
     where
         C: Fn(SymOp, SymOp, SymOp) -> SymOp
     {
-        let parent_func = continuation.current_function.clone().unwrap_or("".to_string());
+        let parent_func = continuation.function_path.clone().unwrap_or("".to_string());
         let parent_rc = Rc::new(continuation);
         let function_name = format!("{parent_func}/{function_name}");
 
@@ -6924,6 +7104,163 @@ impl Symbex {
         Ok(ret)
     }
 
+    /// Call a function within a contract
+    fn eval_contract_function(&self, continuation: Continuation, function_base_name: &ClarityName, lv: &[SymbolicExpression], start_line: u32) -> Result<Result<Vec<Continuation>, Continuation>, Error> {
+        let cur_contract = continuation.get_current_contract_id();
+        let parent_func = continuation.function_path.clone().unwrap_or("".to_string());
+        let function_name = format!("{parent_func}.{}", &function_base_name);
+        let fq_name = FullName(cur_contract.clone(), function_base_name.clone());
+
+        if let Some(func) = self.contract_context(&cur_contract)?.functions.get(function_base_name) {
+            // can we skip this, or shorten our consideration?
+            let is_pure = self.callgraph.is_pure(&fq_name)?;
+            let is_root = continuation.caller.is_none();
+
+            let is_causally_independent = continuation.is_causally_independent(&fq_name, &self.callgraph)?;
+            if !self.explore_function_calls
+                || self.skip_function_calls.contains(&fq_name)
+                || (!is_root && is_pure && self.skip_pure_calls)
+                || (!is_root && is_causally_independent && self.skip_causally_independent_calls)
+            {
+                if !is_root && is_pure && self.skip_pure_calls {
+                    info!("Will not evaluate function {fq_name} from continuation {}, since it is pure", continuation.id);
+                }
+                if !is_root && is_causally_independent && self.skip_causally_independent_calls {
+                    info!("Will not evaluate function {fq_name} from continuation {}, since it is causally independent", continuation.id);
+                }
+
+                // skip this; treat this function call as a symbol
+                let parent_rc = Rc::new(continuation);
+                let skip_cont = Continuation::from_parent(parent_rc, format!("{function_name}/skipped"), start_line);
+                let mut skip_conts = vec![vec![(skip_cont, vec![])]];
+                for (i, arg) in lv.get(1..).unwrap_or(&[]).iter().enumerate() {
+                    let mut next_skip_conts = vec![];
+                    for skip_cont_set in skip_conts.into_iter() {
+                        let mut next_skip_cont_set = vec![];
+                        for (skip_cont, args_so_far) in skip_cont_set.into_iter() {
+                            if skip_cont.halted() {
+                                let mut args = args_so_far.clone();
+                                args.push(Box::new(skip_cont.final_formula.clone()));
+                                next_skip_cont_set.push(vec![(skip_cont, args)]);
+                                continue;
+                            }
+                            let next_conts = self.eval(Continuation::from_parent(Rc::new(skip_cont), format!("{function_name}/skipped/arg[{i}]"), arg.span.start_line), arg)?;
+                            let next_conts_and_args : Vec<_> = next_conts
+                                .into_iter()
+                                .map(|cont| {
+                                    let mut args = args_so_far.clone();
+                                    args.push(Box::new(cont.final_formula.clone()));
+                                    (cont, args)
+                                })
+                                .collect();
+
+                            next_skip_cont_set.push(next_conts_and_args);
+                        }
+                        next_skip_conts.extend(next_skip_cont_set.into_iter());
+                    }
+                    skip_conts = next_skip_conts;
+                }
+                let mut final_conts = vec![];
+                for skip_cont_set in skip_conts.into_iter() {
+                    for (skip_cont, args) in skip_cont_set.into_iter() {
+                        let mut final_cont = Continuation::from_parent(Rc::new(skip_cont), format!("{function_name}/skipped/return"), start_line);
+                        final_cont.add_reachable_storage_accesses(&fq_name, &self.callgraph)?;
+                        final_cont.final_formula = SymOp::FunctionCall(fq_name.clone(), args);
+                        final_conts.push(final_cont);
+                    }
+                }
+                return Ok(Ok(Self::reduce_continuations(final_conts)));
+            }
+            else if let Some(conts) = self.evaluated_functions.get(&fq_name) {
+                // going to evaluate a pre-evaluated function.
+                // bind each bound formula in this continuation to the simplified
+                // final formula and simplified final predicate.
+                let is_root = continuation.caller.is_none();
+                let mut evaled_conts = vec![vec![(continuation, vec![])]];
+                let mut final_conts = vec![];
+                for (i, arg) in lv.get(1..).unwrap_or(&[]).iter().enumerate() {
+                    let mut next_evaled_conts = vec![];
+                    for evaled_cont_set in evaled_conts.into_iter() {
+                        let mut next_evaled_cont_set = vec![];
+                        for (evaled_cont, args_so_far) in evaled_cont_set.into_iter() {
+                            if evaled_cont.halted() {
+                                final_conts.push(evaled_cont);
+                                continue;
+                            }
+                            let next_conts = self.eval(Continuation::from_parent(Rc::new(evaled_cont), format!("{function_name}/evaled/arg[{i}]"), arg.span.start_line), arg)?;
+                            let next_conts_and_args : Vec<_> = next_conts
+                                .into_iter()
+                                .map(|cont| {
+                                    let mut args = args_so_far.clone();
+                                    args.push(Box::new(cont.final_formula.clone()));
+                                    (cont, args)
+                                })
+                                .collect();
+
+                            next_evaled_cont_set.push(next_conts_and_args);
+                        }
+                        next_evaled_conts.extend(next_evaled_cont_set.into_iter());
+                    }
+                    evaled_conts = next_evaled_conts;
+                }
+                for evaled_cont_set in evaled_conts.into_iter() {
+                    for (evaled_cont, args) in evaled_cont_set.into_iter() {
+                        if evaled_cont.halted() {
+                            final_conts.push(evaled_cont);
+                            continue;
+                        }
+                        if args.len() != func.arguments.len() {
+                            return Err(Error::Bug(format!("Computed arguments ({}) does not match function type signature ({})", args.len(), func.arguments.len())));
+                        }
+
+                        let mut binding_cont = Continuation::from_parent(Rc::new(evaled_cont), format!("{function_name}/evaled/bind"), start_line);
+                        // NOTE: no need to unbind these symbols later, since the
+                        // continuation produced by Continuation::from_evaluated()
+                        // will not have any bound formulae (its final formula,
+                        // predicate, and state will instead have their free
+                        // variables bound to symops in the binding continuation)
+                        for (arg_name, arg_symop) in func.arguments.iter().zip(args.iter()) {
+                            binding_cont.bind_symop(arg_name, (*arg_symop.clone()).simplify()?);
+                        }
+
+                        let binding_cont_id = binding_cont.id;
+                        let binding_cont_rc = Rc::new(binding_cont);
+                        let mut pushed = 0;
+                        for cont in conts.iter() {
+                            let eval_cont = Continuation::from_evaluated(cont, format!("{function_name}/evaled"), binding_cont_rc.clone())?;
+                            if !is_root && self.skip_causally_independent_calls && binding_cont_rc.is_read_independent(&eval_cont)? && cont.is_read_only_so_far() {
+                                info!("Will not evaluate function {fq_name} free continuation {}, since it is causally read-independent of binding continuation {}", cont.id, binding_cont_rc.id);
+                                continue;
+                            }
+
+                            let return_cont = Continuation::from_callee(Rc::new(eval_cont), format!("{function_name}/evaled/return"), func.body.span.start_line);
+                            final_conts.push(return_cont);
+                            pushed += 1;
+                        }
+                        if pushed == 0 {
+                            // all continuations are read-independent of the
+                            // binding continuation, so we can skip
+                            info!("All continuations of {fq_name} are read-independent of continuation {}", binding_cont_id);
+                            let mut final_cont = Continuation::from_parent(binding_cont_rc, format!("{function_name}/eval-skipped/return"), start_line);
+                            final_cont.add_reachable_storage_accesses(&fq_name, &self.callgraph)?;
+                            final_cont.final_formula = SymOp::FunctionCall(fq_name.clone(), args);
+                            final_conts.push(final_cont);
+                        }
+                    }
+                }
+
+                return Ok(Ok(Self::reduce_continuations(final_conts)));
+            }
+            else {
+                return self.apply_user_function(continuation, function_base_name, lv.get(1..).unwrap_or(&[]))
+                    .map(|conts| Ok(conts));
+            }
+        }
+        else {
+            return Ok(Err(continuation));
+        }
+    }
+
     pub fn eval(&self, mut continuation: Continuation, body: &SymbolicExpression) -> Result<Vec<Continuation>, Error> {
         if continuation.halted() {
             return Ok(vec![continuation]);
@@ -6934,169 +7271,30 @@ impl Symbex {
             // this is unreachable anyway
             return Ok(vec![]);
         }
-        info!("Evaluating continuation {}\n   function name: {}\n            body: {}\n       predicate: {}\n", continuation.id, &continuation.current_function.as_ref().map(|s| s.as_str()).unwrap_or(""), &body.expr, &pred);
+        info!("Evaluating continuation {}\n   function name: {}\n            body: {}\n       predicate: {}\n", continuation.id, &continuation.function_path.as_ref().map(|s| s.as_str()).unwrap_or(""), &body.expr, &pred);
         if continuation.id <= last_cont_id() {
             return Err(Error::Bug(format!("Tried to evaluate a continuation twice: {}", continuation.id)));
         }
         set_last_cont_id(continuation.id);
+        let cur_contract = continuation.get_current_contract_id();
 
         let continuations = match &body.expr {
             SymbolicExpressionType::LiteralValue(v) => {
-                let parent_func = continuation.current_function.clone().unwrap_or("".to_string());
+                let parent_func = continuation.function_path.clone().unwrap_or("".to_string());
                 let function_name = format!("{parent_func}.{}", &v);
-                continuation.current_function = Some(function_name);
+                continuation.function_path = Some(function_name);
                 continuation.final_formula = SymOp::Constant(v.clone());
                 vec![continuation]
             }
             SymbolicExpressionType::List(lv) => {
-                if let Some(first) = lv.first() {
-                    if let Some(function_base_name) = first.match_atom() {
-                        let parent_func = continuation.current_function.clone().unwrap_or("".to_string());
-                        let function_name = format!("{parent_func}.{}", &function_base_name);
-                        let fq_name = CallableName(continuation.get_current_contract_id(), function_base_name.clone());
-                        if let Some(func) = self.contract_context.functions.get(function_base_name) {
-                            // can we skip this, or shorten our consideration?
-                            let is_pure = self.callgraph.is_pure(&fq_name)?;
-                            let is_causally_independent = continuation.is_causally_independent(&fq_name, &self.callgraph)?;
-                            if !self.explore_function_calls
-                                || self.skip_function_calls.contains(function_base_name)
-                                || (is_pure && self.skip_pure_calls)
-                                || (is_causally_independent && self.skip_causally_independent_calls)
-                            {
-                                if is_pure && self.skip_pure_calls {
-                                    info!("Will not evaluate function {fq_name} from continuation {}, since it is pure", continuation.id);
-                                }
-                                if is_causally_independent && self.skip_causally_independent_calls {
-                                    info!("Will not evaluate function {fq_name} from continuation {}, since it is causally independent", continuation.id);
-                                }
-
-                                // skip this; treat this function call as a symbol
-                                let parent_rc = Rc::new(continuation);
-                                let skip_cont = Continuation::from_parent(parent_rc, format!("{function_name}/skipped"), body.span.start_line);
-                                let mut skip_conts = vec![vec![(skip_cont, vec![])]];
-                                for (i, arg) in lv.get(1..).unwrap_or(&[]).iter().enumerate() {
-                                    let mut next_skip_conts = vec![];
-                                    for skip_cont_set in skip_conts.into_iter() {
-                                        let mut next_skip_cont_set = vec![];
-                                        for (skip_cont, args_so_far) in skip_cont_set.into_iter() {
-                                            if skip_cont.halted() {
-                                                let mut args = args_so_far.clone();
-                                                args.push(Box::new(skip_cont.final_formula.clone()));
-                                                next_skip_cont_set.push(vec![(skip_cont, args)]);
-                                                continue;
-                                            }
-                                            let next_conts = self.eval(Continuation::from_parent(Rc::new(skip_cont), format!("{function_name}/skipped/arg[{i}]"), arg.span.start_line), arg)?;
-                                            let next_conts_and_args : Vec<_> = next_conts
-                                                .into_iter()
-                                                .map(|cont| {
-                                                    let mut args = args_so_far.clone();
-                                                    args.push(Box::new(cont.final_formula.clone()));
-                                                    (cont, args)
-                                                })
-                                                .collect();
-
-                                            next_skip_cont_set.push(next_conts_and_args);
-                                        }
-                                        next_skip_conts.extend(next_skip_cont_set.into_iter());
-                                    }
-                                    skip_conts = next_skip_conts;
-                                }
-                                let mut final_conts = vec![];
-                                for skip_cont_set in skip_conts.into_iter() {
-                                    for (skip_cont, args) in skip_cont_set.into_iter() {
-                                        let mut final_cont = Continuation::from_parent(Rc::new(skip_cont), format!("{function_name}/skipped/return"), body.span.start_line);
-                                        final_cont.add_reachable_storage_accesses(&fq_name, &self.callgraph)?;
-                                        final_cont.final_formula = SymOp::FunctionCall(function_base_name.clone(), args);
-                                        final_conts.push(final_cont);
-                                    }
-                                }
-                                return Ok(Self::reduce_continuations(final_conts));
-                            }
-                            else if let Some(conts) = self.evaluated_functions.get(&fq_name) {
-                                // going to evaluate a pre-evaluated function.
-                                // bind each bound formula in this continuation to the simplified
-                                // final formula and simplified final predicate.
-                                let mut evaled_conts = vec![vec![(continuation, vec![])]];
-                                let mut final_conts = vec![];
-                                for (i, arg) in lv.get(1..).unwrap_or(&[]).iter().enumerate() {
-                                    let mut next_evaled_conts = vec![];
-                                    for evaled_cont_set in evaled_conts.into_iter() {
-                                        let mut next_evaled_cont_set = vec![];
-                                        for (evaled_cont, args_so_far) in evaled_cont_set.into_iter() {
-                                            if evaled_cont.halted() {
-                                                final_conts.push(evaled_cont);
-                                                continue;
-                                            }
-                                            let next_conts = self.eval(Continuation::from_parent(Rc::new(evaled_cont), format!("{function_name}/evaled/arg[{i}]"), arg.span.start_line), arg)?;
-                                            let next_conts_and_args : Vec<_> = next_conts
-                                                .into_iter()
-                                                .map(|cont| {
-                                                    let mut args = args_so_far.clone();
-                                                    args.push(Box::new(cont.final_formula.clone()));
-                                                    (cont, args)
-                                                })
-                                                .collect();
-
-                                            next_evaled_cont_set.push(next_conts_and_args);
-                                        }
-                                        next_evaled_conts.extend(next_evaled_cont_set.into_iter());
-                                    }
-                                    evaled_conts = next_evaled_conts;
-                                }
-                                for evaled_cont_set in evaled_conts.into_iter() {
-                                    for (evaled_cont, args) in evaled_cont_set.into_iter() {
-                                        if evaled_cont.halted() {
-                                            final_conts.push(evaled_cont);
-                                            continue;
-                                        }
-                                        if args.len() != func.arguments.len() {
-                                            return Err(Error::Bug(format!("Computed arguments ({}) does not match function type signature ({})", args.len(), func.arguments.len())));
-                                        }
-
-                                        let mut binding_cont = Continuation::from_parent(Rc::new(evaled_cont), format!("{function_name}/evaled/bind"), body.span.start_line);
-                                        // NOTE: no need to unbind these symbols later, since the
-                                        // continuation produced by Continuation::from_evaluated()
-                                        // will not have any bound formulae (its final formula,
-                                        // predicate, and state will instead have their free
-                                        // variables bound to symops in the binding continuation)
-                                        for (arg_name, arg_symop) in func.arguments.iter().zip(args.iter()) {
-                                            binding_cont.bind_symop(arg_name, (*arg_symop.clone()).simplify()?);
-                                        }
-
-                                        let binding_cont_id = binding_cont.id;
-                                        let binding_cont_rc = Rc::new(binding_cont);
-                                        let mut pushed = 0;
-                                        for cont in conts.iter() {
-                                            let eval_cont = Continuation::from_evaluated(cont, format!("{function_name}/evaled"), binding_cont_rc.clone())?;
-                                            if self.skip_causally_independent_calls && binding_cont_rc.is_read_independent(&eval_cont)? && cont.is_read_only_so_far() {
-                                                info!("Will not evaluate function {fq_name} continuation {}, since it is causally read-independent of continuation {}", cont.id, binding_cont_rc.id);
-                                                continue;
-                                            }
-
-                                            let return_cont = Continuation::from_callee(Rc::new(eval_cont), format!("{function_name}/evaled/return"), func.body.span.start_line);
-                                            final_conts.push(return_cont);
-                                            pushed += 1;
-                                        }
-                                        if pushed == 0 {
-                                            // all continuations are read-independent of the
-                                            // binding continuation, so we can skip
-                                            info!("All continuations of {fq_name} are read-independent of continuation {}", binding_cont_id);
-                                            let mut final_cont = Continuation::from_parent(binding_cont_rc, format!("{function_name}/eval-skipped/return"), body.span.start_line);
-                                            final_cont.add_reachable_storage_accesses(&fq_name, &self.callgraph)?;
-                                            final_cont.final_formula = SymOp::FunctionCall(function_base_name.clone(), args);
-                                            final_conts.push(final_cont);
-                                        }
-                                    }
-                                }
-
-                                return Ok(Self::reduce_continuations(final_conts));
-                            }
-                            else {
-                                self.apply_user_function(continuation, function_base_name, lv.get(1..).unwrap_or(&[]))?
-                            }
-                        }
-                        else {
+                if let Some(first) = lv.first() && let Some(function_base_name) = first.match_atom() {
+                    let conts_res = self.eval_contract_function(continuation, function_base_name, lv, body.span.start_line)?;
+                    let conts = match conts_res {
+                        Ok(conts) => conts,
+                        Err(mut continuation) => {
                             // native function application
+                            let parent_func = continuation.function_path.clone().unwrap_or("".to_string());
+                            let function_name = format!("{parent_func}.{}", &function_base_name);
                             match function_base_name.as_str() {
                                 "+" => {
                                     self.eval_foldable_native(
@@ -7287,7 +7485,7 @@ impl Symbex {
 
                                     let mut seq_len = usize::MAX;
                                     for s in sequences {
-                                        let sz = if let Some(ts) = self.typemap.get_type_expected(s) {
+                                        let sz = if let Some(ts) = self.typemap(&cur_contract)?.get_type_expected(s) {
                                             Self::sequence_maxlen(ts)?
                                         }
                                         else {
@@ -7452,7 +7650,7 @@ impl Symbex {
                                             
                                                 // evaluate `func` from each continuation, using this
                                                 // particular set of elements as function arguments.
-                                                if let Some(func) = self.contract_context.functions.get(func_name) {
+                                                if let Some(func) = self.contract_context(&cur_contract)?.functions.get(func_name) {
                                                     // user-defined function
                                                     if func.arguments.len() != elems_i.len() {
                                                         return Err(Error::Bug(format!("Function takes {} arguments but computed {} arguments", func.arguments.len(), elems_i.len())));
@@ -7585,7 +7783,7 @@ impl Symbex {
                                     let sequence = lv.get(2).ok_or_else(|| Error::Bug("Missing sequence".into()))?;
                                     let initial_value = lv.get(3).ok_or_else(|| Error::Bug("Missing initial value".into()))?;
                                     
-                                    let seq_maxlen = if let Some(ts) = self.typemap.get_type_expected(sequence) {
+                                    let seq_maxlen = if let Some(ts) = self.typemap(&cur_contract)?.get_type_expected(sequence) {
                                         Self::sequence_maxlen(ts)?
                                     }
                                     else {
@@ -7644,7 +7842,7 @@ impl Symbex {
                                                         ret.push(cont);
                                                         continue;
                                                     }
-                                                    if let Some(func) = self.contract_context.functions.get(func_name) {
+                                                    if let Some(func) = self.contract_context(&cur_contract)?.functions.get(func_name) {
                                                         // user-defined function
                                                         if func.arguments.len() != 2 {
                                                             return Err(Error::Bug(format!("Function `{func_name}` takes {} arguments but expected 2 arguments", func.arguments.len())));
@@ -7746,7 +7944,7 @@ impl Symbex {
 
                                     // if y is greater than or equal to the maximum length of x,
                                     // then this will always succeed
-                                    let sz = if let Some(ts) = self.typemap.get_type_expected(&list_sym) {
+                                    let sz = if let Some(ts) = self.typemap(&cur_contract)?.get_type_expected(&list_sym) {
                                         Self::sequence_maxlen(ts)?
                                     }
                                     else {
@@ -7951,8 +8149,10 @@ impl Symbex {
 
                                     let formula = formula.clone();
 
+                                    let var_full_name = FullName(continuation.get_current_contract_id(), var_name.clone());
+
                                     continuation.read_data_var(var_name.clone(), formula.clone(), body.span.start_line);
-                                    continuation.final_formula = SymOp::LoadedDataVariable(var_name.clone(), Box::new(formula.clone()));
+                                    continuation.final_formula = SymOp::LoadedDataVariable(var_full_name, Box::new(formula.clone()));
                                     vec![continuation]
                                 },
                                 "var-set" => {
@@ -8004,15 +8204,20 @@ impl Symbex {
                                             Some(value_op) => Some(Box::new(value_op.clone())),
                                             None => None
                                         };
+
+                                        let full_map_name = FullName(cont.get_current_contract_id(), map_name.clone());
                                         if value.is_none() {
-                                            if cont.is_map_deleted(map_name, &key_formula) {
+                                            if cont.is_map_deleted(&full_map_name, &key_formula) {
                                                 // this value was definitely deleted
                                                 cont.final_formula = SymOp::Constant(Value::none());
                                             }
                                             else {
-                                                cont.read_map_entry(map_name.clone(), key_formula.clone(), value.clone().map(|op| *op), body.span.start_line); 
-                                                cont.final_formula = SymOp::LoadedMapEntry(map_name.clone(), Box::new(key_formula), value);
+                                                cont.read_map_entry(map_name.clone(), key_formula.clone(), None, body.span.start_line); 
+                                                cont.final_formula = SymOp::LoadedMapEntry(full_map_name.clone(), Box::new(key_formula), None);
                                             }
+                                        }
+                                        else {
+                                            cont.final_formula = SymOp::LoadedMapEntry(full_map_name.clone(), Box::new(key_formula), value);
                                         }
                                     }
 
@@ -8099,7 +8304,8 @@ impl Symbex {
                                             let parent_pred = val_cont.predicate.clone().simplify()?;
                                             let parent = Rc::new(val_cont);
 
-                                            let entry = SymOp::LoadedMapEntry(map_name.clone(), Box::new(key_formula.clone()), None);
+                                            let full_map_name = FullName(parent.get_current_contract_id(), map_name.clone());
+                                            let entry = SymOp::LoadedMapEntry(full_map_name, Box::new(key_formula.clone()), None);
 
                                             let mut cont_present = Continuation::from_parent(parent.clone(), format!("{function_name}/present"), body.span.start_line);
                                             cont_present.predicate = parent_pred.clone()
@@ -8141,8 +8347,9 @@ impl Symbex {
                                         if res {
                                             // this was definitely present, so only one
                                             // continuation is necessary
-                                            cont.final_formula = SymOp::True();
-                                            final_conts.push(cont);
+                                            let mut cont_present = Continuation::from_parent(Rc::new(cont), format!("{function_name}/present"), body.span.start_line);
+                                            cont_present.final_formula = SymOp::True();
+                                            final_conts.push(cont_present);
                                             continue;
                                         }
 
@@ -8150,7 +8357,8 @@ impl Symbex {
                                         let parent_pred = cont.predicate.clone().simplify()?;
                                         let parent = Rc::new(cont);
 
-                                        let entry = SymOp::LoadedMapEntry(map_name.clone(), Box::new(key_formula.clone().simplify()?), None);
+                                        let full_map_name = FullName(parent.get_current_contract_id(), map_name.clone());
+                                        let entry = SymOp::LoadedMapEntry(full_map_name, Box::new(key_formula.clone().simplify()?), None);
 
                                         let mut cont_present = Continuation::from_parent(parent.clone(), format!("{function_name}/present"), body.span.start_line);
                                         cont_present.predicate = parent_pred.clone()
@@ -8345,10 +8553,30 @@ impl Symbex {
                                     )?
                                 }
                                 "print" => {
-                                    todo!()
+                                    let expr = lv.get(1).ok_or_else(|| Error::Bug("Missing argument to `print`".into()))?;
+                                    let conts = self.eval(Continuation::from_parent(Rc::new(continuation), function_name.to_string(), expr.span.start_line), expr)?;
+                                    conts
                                 }
                                 "contract-call?" => {
-                                    todo!()
+                                    let Some(Value::Principal(contract_principal)) = lv.get(1).ok_or_else(|| Error::Bug("No contract ID".into()))?.match_literal_value() else {
+                                        return Err(Error::Bug(format!("contract ID is not a literal value: {:?}", &lv.get(1))));
+                                    };
+                                    let Some(target_func_name) = lv.get(2).ok_or_else(|| Error::Bug("No function name".into()))?.match_atom() else {
+                                        return Err(Error::Bug(format!("contract-call function name not found: {:?}", &lv.get(2))));
+                                    };
+                                    let target_func_name_and_args = lv.get(2..).ok_or_else(|| Error::Bug("No function args".into()))?;
+
+                                    let fname = format!("{function_name}/contract-call?");
+                                    let mut cc_cont = Continuation::from_parent(Rc::new(continuation), fname.clone(), body.span.start_line);
+                                    cc_cont.contract_caller = Some(SymOp::Constant(Value::Principal(cc_cont.get_current_contract())));
+                                    cc_cont.current_contract = Some(contract_principal.clone());
+
+                                    match self.eval_contract_function(cc_cont, target_func_name, target_func_name_and_args, body.span.start_line)? {
+                                        Ok(conts) => conts,
+                                        Err(_) => {
+                                            return Err(Error::Bug(format!("contract-call? to unknown user-defined function {target_func_name} in {contract_principal}")));
+                                        }
+                                    }
                                 }
                                 "as-contract" => {
                                     return Err(Error::Bug("`as-contract` is deprecated and not supported by this tool".into()));
@@ -8551,7 +8779,7 @@ impl Symbex {
 
                                             // case 1: `(is-ok x)` is true or `(is-some x)` is true
                                             let mut ok_cont = Continuation::from_parent(parent_rc.clone(), format!("{function_name}/cond-true"), cond_sym.span.start_line);
-                                            ok_cont.predicate = match self.typemap.get_type_expected(&cond_sym) {
+                                            ok_cont.predicate = match self.typemap(&cur_contract)?.get_type_expected(&cond_sym) {
                                                 Some(TypeSignature::OptionalType(..)) => {
                                                     cond_predicate.clone().and(Predicate::IsSome(cond_formula.clone()))
                                                 }
@@ -8570,7 +8798,7 @@ impl Symbex {
 
                                             let mut err_cont = Continuation::from_parent(parent_rc.clone(), format!("{function_name}/cond-false"), err_sym.span.start_line);
                                             // case 2: (is-ok x) (or (is-some x)) is false
-                                            err_cont.predicate = match self.typemap.get_type_expected(&cond_sym) {
+                                            err_cont.predicate = match self.typemap(&cur_contract)?.get_type_expected(&cond_sym) {
                                                 Some(TypeSignature::OptionalType(..)) => {
                                                     cond_predicate.and(Predicate::IsNone(cond_formula.clone()))
                                                 }
@@ -8680,7 +8908,7 @@ impl Symbex {
 
                                         // case 1: `(is-ok x)` is true or `(is-some x)` is true
                                         let mut ok_cont = Continuation::from_parent(parent_rc.clone(), format!("{function_name}/unwrap-success"), cond_sym.span.start_line);
-                                        ok_cont.predicate = match self.typemap.get_type_expected(&cond_sym) {
+                                        ok_cont.predicate = match self.typemap(&cur_contract)?.get_type_expected(&cond_sym) {
                                             Some(TypeSignature::OptionalType(..)) => {
                                                 cond_predicate.clone().and(Predicate::IsSome(cond_formula.clone()))
                                             }
@@ -8699,7 +8927,7 @@ impl Symbex {
                                         // case 2: (is-ok x) (or (is-some x)) is false. This
                                         // panics
                                         let mut panic_cont = Continuation::from_parent(parent_rc.clone(), format!("{function_name}/unwrap-failure"), cond_sym.span.start_line);
-                                        panic_cont.predicate = match self.typemap.get_type_expected(&cond_sym) {
+                                        panic_cont.predicate = match self.typemap(&cur_contract)?.get_type_expected(&cond_sym) {
                                             Some(TypeSignature::OptionalType(..)) => {
                                                 cond_predicate.and(Predicate::IsNone(cond_formula.clone()))
                                             }
@@ -8913,7 +9141,7 @@ impl Symbex {
                                         // case 1: `(is-ok x)` is true or `(is-some x)` is true
                                         let mut ok_cont = Continuation::from_parent(parent_rc.clone(), format!("{function_name}/try-success"), exp_sym.span.start_line);
 
-                                        ok_cont.predicate = match self.typemap.get_type_expected(&exp_sym) {
+                                        ok_cont.predicate = match self.typemap(&cur_contract)?.get_type_expected(&exp_sym) {
                                             Some(TypeSignature::OptionalType(..)) => {
                                                 cond_predicate.clone().and(Predicate::IsSome(cond_formula.clone()))
                                             }
@@ -8931,7 +9159,7 @@ impl Symbex {
 
                                         // case 2: (is-ok x) (or (is-some x)) is false
                                         let mut fail_cont = Continuation::from_parent(parent_rc.clone(), format!("{function_name}/try-failure"), exp_sym.span.start_line);
-                                        let (fail_formula, fail_predicate) = match self.typemap.get_type_expected(&exp_sym) {
+                                        let (fail_formula, fail_predicate) = match self.typemap(&cur_contract)?.get_type_expected(&exp_sym) {
                                             Some(TypeSignature::OptionalType(..)) => {
                                                 (
                                                     SymOp::none(),
@@ -9001,7 +9229,7 @@ impl Symbex {
                                         return Err(Error::Bug("map function is not an atom".into()));
                                     };
                                     let sequence = lv.get(2).ok_or_else(|| Error::Bug("Missing sequence".into()))?;
-                                    let Some(seq_ts) = self.typemap.get_type_expected(sequence).cloned() else {
+                                    let Some(seq_ts) = self.typemap(&cur_contract)?.get_type_expected(sequence).cloned() else {
                                         return Err(Error::Bug(format!("No type information for sequence {sequence:?}")));
                                     };
 
@@ -9071,7 +9299,7 @@ impl Symbex {
                                                         ret.push(cont);
                                                         continue;
                                                     }
-                                                    if let Some(func) = self.contract_context.functions.get(func_name) {
+                                                    if let Some(func) = self.contract_context(&cur_contract)?.functions.get(func_name) {
                                                         // user-defined function
                                                         if func.arguments.len() != 1 {
                                                             return Err(Error::Bug(format!("Function `{func_name}` takes {} arguments but expected 1 argument", func.arguments.len())));
@@ -9200,6 +9428,9 @@ impl Symbex {
                                 | "define-private"
                                 | "define-read-only"
                                 | "define-public"
+                                | "define-trait"
+                                | "impl-trait"
+                                | "use-trait"
                                 | "define-map"
                                 | "define-data-var" => {
                                     // already handled
@@ -9227,10 +9458,8 @@ impl Symbex {
                                 }
                             }
                         }
-                    }
-                    else {
-                        unreachable!()
-                    }
+                    };
+                    conts
                 }
                 else {
                     unreachable!()
@@ -9241,7 +9470,7 @@ impl Symbex {
                 unreachable!()
             },
             SymbolicExpressionType::Atom(cn) => {
-                let parent_func = continuation.current_function.clone().unwrap_or("".to_string());
+                let parent_func = continuation.function_path.clone().unwrap_or("".to_string());
                 let function_name = format!("{parent_func}.{}", &cn.as_str());
                 let mut cont = Continuation::from_parent(Rc::new(continuation), function_name, body.span.start_line);
                 match cn.as_str() {
@@ -9331,20 +9560,20 @@ impl Symbex {
         let continuations = Self::reduce_continuations(continuations);
 
         for continuation in continuations.iter() {
-            debug!("eval continuation {}: {} pred={}, formula={}", continuation.id, &continuation.current_function.clone().unwrap_or("".to_string()), &continuation.predicate.clone().simplify().unwrap(), &continuation.final_formula.clone().simplify().unwrap());
+            debug!("eval continuation {}: {} pred={}, formula={}", continuation.id, &continuation.function_path.clone().unwrap_or("".to_string()), &continuation.predicate.clone().simplify().unwrap(), &continuation.final_formula.clone().simplify().unwrap());
         }
         Ok(continuations)
     }
 
     fn apply_user_function(&self, continuation: Continuation, function_name: &ClarityName, function_arg_values: &[SymbolicExpression]) -> Result<Vec<Continuation>, Error> {
-        let Some(func) = self.contract_context.functions.get(function_name) else {
-            return Err(Error::NotFound(format!("No such function '{function_name}'")));
+        let Some(func) = self.contract_context(&continuation.get_current_contract_id())?.functions.get(function_name) else {
+            return Err(Error::NotFound(format!("No such function '{function_name}' in {} (id {})", &continuation.get_current_contract_id(), continuation.id)));
         };
         if function_arg_values.len() != func.arguments.len() {
             return Err(Error::Bug("Function argument values != function arguments or function_arguments != function argument types".into()));
         }
 
-        let parent_function_name = continuation.current_function.clone().unwrap_or("".to_string());
+        let parent_function_name = continuation.function_path.clone().unwrap_or("".to_string());
         let fq_function = format!("{}.{}", &parent_function_name, function_name);
 
         // build up (final-continuation, list-of-argument-symops)
@@ -9405,7 +9634,7 @@ impl Symbex {
     }
 
     fn eval_if(&self, continuation: Continuation, predicate_symexp: SymbolicExpression, if_true_symexp: SymbolicExpression, if_false_symexp: SymbolicExpression) -> Result<Vec<Continuation>, Error> {
-        let parent_func = continuation.current_function.clone().unwrap_or("".to_string());
+        let parent_func = continuation.function_path.clone().unwrap_or("".to_string());
         let continuation_rc = Rc::new(continuation);
         let predicate_conts = self.eval(Continuation::from_parent(continuation_rc.clone(), format!("{}/if", &parent_func), predicate_symexp.span.start_line), &predicate_symexp)?;
         let mut branch_conts = vec![];
@@ -9483,7 +9712,7 @@ impl Symbex {
             bind_names_and_bodies.push((binding_name, binding_body_symexp));
         }
 
-        let parent_func = continuation.current_function.clone().unwrap_or("".to_string());
+        let parent_func = continuation.function_path.clone().unwrap_or("".to_string());
         let function_name = format!("{parent_func}.let");
 
         let mut conts = vec![(continuation, vec![])];
@@ -9557,28 +9786,45 @@ impl Symbex {
     }
     
     pub fn from_contract_ex(contract_id: QualifiedContractIdentifier, code: &str, contract_sponsor: Option<StandardPrincipalData>) -> Result<Self, Error> {
+        Self::from_contracts(vec![(contract_id, code.to_string(), contract_sponsor)], 0)
+    }
+
+    pub fn from_contracts(contracts: Vec<(QualifiedContractIdentifier, String, Option<StandardPrincipalData>)>, target_contract_idx: usize) -> Result<Self, Error> {
         let mut datastore = BackingStore::new();
-        let ast = ast::parse_ast(&contract_id, code)?;
-        let mut analysis = ast::make_contract_analysis_from_ast(&mut datastore, &contract_id, &ast)?;
-        let contract_context = ast::make_contract_context_from_ast(
-            &mut datastore,
-            &contract_id,
-            code,
-            &ast,
-            contract_sponsor.clone().map(|s| PrincipalData::Standard(s))
-        )?;
-     
-        let Some(typemap) = analysis.type_map.take() else {
-            return Err(Error::Bug("No typemap computed".into()));
-        };
-        let callgraph = Callgraph::from_exprs(&contract_context, &ast.expressions)?;
+        let mut contract_state = HashMap::new();
+        let target_contract = contracts.get(target_contract_idx).map(|(contract_id, _, _)| contract_id.clone()).ok_or_else(|| Error::NotFound("bad target contract index".into()))?;
+
+        for (contract_id, code, contract_sponsor) in contracts.into_iter() {
+            info!("Instantiate contract {}", &contract_id);
+            let ast = ast::parse_ast(&contract_id, &code)?;
+            let mut analysis = ast::make_contract_analysis_from_ast(&mut datastore, &contract_id, &ast)?;
+            let contract_context = ast::make_contract_context_from_ast(
+                &mut datastore,
+                &contract_id,
+                &code,
+                &ast,
+                contract_sponsor.clone().map(|s| PrincipalData::Standard(s))
+            )?;
+         
+            let Some(typemap) = analysis.type_map.take() else {
+                return Err(Error::Bug("No typemap computed".into()));
+            };
+            let sym_contract = SymContract {
+                id: contract_id.clone(),
+                typemap,
+                symbols: ast.expressions,
+                contract_context
+            };
+            contract_state.insert(contract_id, sym_contract);
+        }
+
+        let callgraph = Callgraph::from_contracts(&contract_state, &target_contract)?;
 
         let symbex = Symbex {
             datastore,
-            contract_context,
-            symbols: ast.expressions,
             callgraph,
-            typemap,
+            contracts: contract_state,
+            target_contract,
             tx_sender: None,
             contract_caller: None,
             tx_sponsor: None,
@@ -9615,7 +9861,7 @@ impl Symbex {
         self
     }
 
-    pub fn with_skipped_function_call(mut self, func_name: ClarityName) -> Self {
+    pub fn with_skipped_function_call(mut self, func_name: FullName) -> Self {
         debug!("skip_function_call {func_name}");
         self.skip_function_calls.insert(func_name);
         self
@@ -9632,21 +9878,21 @@ impl Symbex {
         debug!("skip_causally_independent_calls = {}", self.skip_causally_independent_calls);
         self
     }
-    
+   
     pub fn eval_all(&mut self) -> Result<Vec<Continuation>, Error> {
-        let current_contract = PrincipalData::Contract(self.contract_context.contract_identifier.clone());
+        let current_contract = PrincipalData::Contract(self.contract_context(&self.target_contract)?.contract_identifier.clone());
 
         let mut root_continuation = Continuation::root(self, current_contract);
         
-        for (const_name, const_value) in self.contract_context.variables.iter() {
+        for (const_name, const_value) in self.contract_context(&self.target_contract)?.variables.iter() {
             root_continuation.bind_constant(const_name, const_value);
         }
 
-        for (var_name, var_metadata) in self.contract_context.meta_data_var.iter() {
+        for (var_name, var_metadata) in self.contract_context(&self.target_contract)?.meta_data_var.iter() {
             root_continuation.set_pre_data_var(var_name, SymOp::Variable(Sym::from_name_and_type_signature(var_name, &var_metadata.value_type)));
         }
 
-        let contract_funcs = self.callgraph.get_contract_functions(&self.contract_context.contract_identifier);
+        let contract_funcs = self.callgraph.get_contract_functions(&self.contract_context(&self.target_contract)?.contract_identifier);
         for contract_func in contract_funcs.into_iter() {
             if self.evaluated_functions.contains_key(&contract_func) {
                 continue;
@@ -9661,6 +9907,7 @@ impl Symbex {
 
             for cont in conts.iter() {
                 info!("Computed continuation for function '{contract_func}'\n{cont}");
+                info!("Trace:\n{}", cont.clone().trace());
             }
             self.evaluated_functions.insert(contract_func, conts);
         }
@@ -9668,7 +9915,7 @@ impl Symbex {
         info!("Evaluating top-level symbols");
 
         let mut conts = vec![root_continuation];
-        for sym in self.symbols.iter() {
+        for sym in self.symbols(&self.target_contract)?.iter() {
             let mut next = vec![];
             for cont in conts.into_iter() {
                 let cont_rc = Rc::new(cont);
@@ -9684,14 +9931,13 @@ impl Symbex {
   
     /// Symbolically evaluate a user function.
     /// Each argument will be bound to a SymOp::Variable of the appropriate type.
-    /// TODO: contract ID
     pub fn eval_user_function(&mut self, function_name: &str) -> Result<Vec<Continuation>, Error> {
-        if self.contract_context.functions.get(function_name).is_none() {
-            return Err(Error::NotFound(format!("No such function '{function_name}'")));
+        if self.contract_context(&self.target_contract)?.functions.get(function_name).is_none() {
+            return Err(Error::NotFound(format!("No such function '{function_name}' in target contract {}", &self.target_contract)));
         };
 
-        let fq_name = CallableName(
-            self.contract_context.contract_identifier.clone(),
+        let fq_name = FullName(
+            self.contract_context(&self.target_contract)?.contract_identifier.clone(),
             ClarityName::try_from(function_name).map_err(|_| Error::Bug("Invalid function name".into()))?
         );
 
@@ -9701,9 +9947,8 @@ impl Symbex {
                 continue;
             }
             
-            info!("Evaluating reachable function '{reachable_func}'");
-            // TODO: contract ID
-            let conts : Vec<_> = self.inner_eval_user_function(reachable_func.name().as_str())?
+            info!("Evaluating reachable function '{reachable_func}' in {}", &self.target_contract);
+            let conts : Vec<_> = self.inner_eval_user_function(&reachable_func)?
                 .into_iter()
                 .filter(|c| !c.panicking)
                 .map(|c| c.rollup())
@@ -9711,36 +9956,37 @@ impl Symbex {
 
             for cont in conts.iter() {
                 info!("Computed continuation for function '{reachable_func}'\n{cont}");
+                info!("Trace:\n{}", cont.clone().trace());
             }
 
             self.evaluated_functions.insert(reachable_func, conts);
         }
 
         info!("Evaluating function '{function_name}'");
-        self.inner_eval_user_function(function_name)
+        self.inner_eval_user_function(&fq_name)
     }
 
-    fn inner_eval_user_function(&mut self, function_name: &str) -> Result<Vec<Continuation>, Error> {
-        if self.contract_context.functions.get(function_name).is_none() {
-            return Err(Error::NotFound(format!("No such function '{function_name}'")));
-        };
-        let Some(func) = self.contract_context.functions.get(function_name) else {
+    fn inner_eval_user_function(&mut self, fq_function_name: &FullName) -> Result<Vec<Continuation>, Error> {
+        let contract_id = fq_function_name.contract_id();
+        let function_name = fq_function_name.name().as_str();
+
+        let Some(func) = self.contract_context(contract_id)?.functions.get(function_name) else {
             return Err(Error::NotFound(format!("No such function '{function_name}'")));
         };
         if func.arguments.len() != func.arg_types.len() {
             return Err(Error::Bug("Function argument names length != function argument types length".into()));
         }
-        let fq_name = CallableName(self.contract_context.contract_identifier.clone(), ClarityName::try_from(function_name).map_err(|_| Error::Bug("Invalid function name".into()))?);
+        let fq_name = FullName(self.contract_context(&contract_id)?.contract_identifier.clone(), ClarityName::try_from(function_name).map_err(|_| Error::Bug("Invalid function name".into()))?);
 
         // set up root context
-        let current_contract = PrincipalData::Contract(self.contract_context.contract_identifier.clone());
+        let current_contract = PrincipalData::Contract(contract_id.clone());
         let mut root_continuation = Continuation::root(self, current_contract);
         
-        for (const_name, const_value) in self.contract_context.variables.iter() {
+        for (const_name, const_value) in self.contract_context(contract_id)?.variables.iter() {
             root_continuation.bind_constant(const_name, const_value);
         }
 
-        for (var_name, var_metadata) in self.contract_context.meta_data_var.iter() {
+        for (var_name, var_metadata) in self.contract_context(contract_id)?.meta_data_var.iter() {
             root_continuation.set_pre_data_var(var_name, SymOp::Variable(Sym::from_name_and_type_signature(var_name, &var_metadata.value_type)));
         }
 
@@ -9774,10 +10020,6 @@ impl Symbex {
             .collect();
 
         Ok(Self::reduce_continuations(conts))
-    }
-
-    pub fn callgraph(&self) -> &Callgraph {
-        &self.callgraph
     }
 }
 

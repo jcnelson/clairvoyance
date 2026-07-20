@@ -32,7 +32,7 @@ use clarity::vm::contracts::Contract;
 
 use clarity::vm::ClarityVersion;
 use clarity::vm::ast::errors::ParseError;
-use crate::sym::CallableName;
+use crate::sym::FullName;
 
 pub const DEFAULT_STACKS_EPOCH : StacksEpochId = StacksEpochId::Epoch40;
 pub const DEFAULT_CLARITY_VERSION: ClarityVersion = ClarityVersion::Clarity6;
@@ -115,7 +115,7 @@ pub enum Error {
     /// Type converstion
     Conversion(String),
     /// Re-entrancy detected
-    Reentrancy(CallableName),
+    Reentrancy(FullName),
     /// Something happend that shouldn't have
     Bug(String),
     /// Invalid input

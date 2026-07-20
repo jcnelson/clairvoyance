@@ -69,7 +69,7 @@ pub fn make_contract_analysis_from_ast(
         contract_id,
         &ast.expressions,
         &mut analysis_db,
-        false,
+        true,
         cost_track,
         DEFAULT_STACKS_EPOCH,
         DEFAULT_CLARITY_VERSION,
