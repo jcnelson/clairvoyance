@@ -18,6 +18,7 @@ use crate::sym::Symbex;
 use crate::sym::command::{Command, CommandContext};
 use crate::core::BackingStore;
 use crate::core::Error;
+use crate::core::ast;
 use crate::tests::default_contract_id;
 
 use clarity_types::types::QualifiedContractIdentifier;
@@ -119,7 +120,7 @@ fn test_extract_command_programs() {
 
 #[test]
 fn test_eval_program() {
-    let tests = vec![
+    let tests : Vec<(&str, Result<Vec<Command>, &str>)> = vec![
         (
             r#"(test "hello world!")"#,
             Ok(vec![Command::Test("\"hello world!\"".to_string())]),
@@ -148,15 +149,15 @@ fn test_eval_program() {
         ),
         (
             r#"
-                (invariant
-                    (ok (map-entry 'SP8H248H248H248H248H248H248H248H24ARTQ82.contract.m (modulus uint)))
-                    (is-eq (len (items (list 5 uint))) u0))
+                (halt
+                    (result (ok (map-entry 'SP8H248H248H248H248H248H248H248H24ARTQ82.contract.m (modulus uint))))
+                    (condition (is-eq (len (items (list 5 uint))) u0)))
             "#,
             Ok(vec![
-                Command::Invariant(
+                Halt::new(
                    *ok(fq_map_get(&QualifiedContractIdentifier::parse("SP8H248H248H248H248H248H248H248H24ARTQ82.contract").unwrap(), "m", vu("modulus"))),
                    eq(llen(vl("items", TS::UIntType, 5)), cu(0)).try_as_predicate().unwrap()
-                )
+                ).into()
             ])
         ),
         (
@@ -189,164 +190,164 @@ fn test_eval_program() {
 }
 
 #[test]
-fn test_eval_invariant() {
+fn test_symop_from_symbolic_expression() {
     let contract_id = QualifiedContractIdentifier::parse("SP8H248H248H248H248H248H248H248H24ARTQ82.foo").unwrap();
 
-    let tests : Vec<(&str, Result<Vec<Command>, Error>)> = vec![
+    let tests : Vec<(&str, Result<SymOp, Error>)> = vec![
         (
-            "(invariant true true)",
-            Ok(vec![Command::Invariant(*t(), *pt())]),
+            "true",
+            Ok(*t()),
         ),
         (
-            "(invariant u0 true)",
-            Ok(vec![Command::Invariant(*cu(0), *pt())]),
+            "u0",
+            Ok(*cu(0)),
         ),
         (
-            "(invariant 0 true)",
-            Ok(vec![Command::Invariant(*ci(0), *pt())]),
+            "0",
+            Ok(*ci(0)),
         ),
         (
-            "(invariant (list u5) true)",
-            Ok(vec![Command::Invariant(*lcons(vec![cu(5)]), *pt())]),
+            "(list u5)",
+            Ok(*lcons(vec![cu(5)])),
         ),
         (
-            "(invariant (tuple (x u3)) true)",
-            Ok(vec![Command::Invariant(*tcons(vec![("x", cu(3))]), *pt())]),
+            "(tuple (x u3))",
+            Ok(*tcons(vec![("x", cu(3))])),
         ),
         (
-            "(invariant { y: u4 } true)",
-            Ok(vec![Command::Invariant(*tcons(vec![("y", cu(4))]), *pt())]),
+            "{ y: u4 }",
+            Ok(*tcons(vec![("y", cu(4))])),
         ),
         (
-            "(invariant 'SP8H248H248H248H248H248H248H248H24ARTQ82 true)",
-            Ok(vec![Command::Invariant(*cp(PrincipalData::parse("SP8H248H248H248H248H248H248H248H24ARTQ82").unwrap()), *pt())]),
+            "'SP8H248H248H248H248H248H248H248H24ARTQ82",
+            Ok(*cp(PrincipalData::parse("SP8H248H248H248H248H248H248H248H24ARTQ82").unwrap())),
         ),
         (
-            "(invariant 'SP8H248H248H248H248H248H248H248H24ARTQ82.foo true)",
-            Ok(vec![Command::Invariant(*cp(PrincipalData::parse("SP8H248H248H248H248H248H248H248H24ARTQ82.foo").unwrap()), *pt())]),
+            "'SP8H248H248H248H248H248H248H248H24ARTQ82.foo",
+            Ok(*cp(PrincipalData::parse("SP8H248H248H248H248H248H248H248H24ARTQ82.foo").unwrap())),
         ),
         (
-            "(invariant (ok true) true)",
-            Ok(vec![Command::Invariant(*ok(cb(true)), *pt())]),
+            "(ok true)",
+            Ok(*ok(cb(true))),
         ),
         (
-            "(invariant (err false) true)",
-            Ok(vec![Command::Invariant(*err(cb(false)), *pt())]),
+            "(err false)",
+            Ok(*err(cb(false))),
         ),
         (
-            "(invariant (some true) true)",
-            Ok(vec![Command::Invariant(*some(cb(true)), *pt())]),
+            "(some true)",
+            Ok(*some(cb(true))),
         ),
         (
-            "(invariant 0x112233 true)",
-            Ok(vec![Command::Invariant(*csb(vec![0x11, 0x22, 0x33]), *pt())]),
+            "0x112233",
+            Ok(*csb(vec![0x11, 0x22, 0x33])),
         ),
         (
-            "(invariant \"hello world\" true)",
-            Ok(vec![Command::Invariant(*cssa("hello world"), *pt())]),
+            "\"hello world\"",
+            Ok(*cssa("hello world")),
         ),
         (
-            "(invariant u\"hello world\" true)",
-            Ok(vec![Command::Invariant(*cssu("hello world"), *pt())]),
+            "u\"hello world\"",
+            Ok(*cssu("hello world")),
         ),
         (
-            "(invariant (x uint) true)",
-            Ok(vec![Command::Invariant(*vu("x"), *pt())]),
+            "(x uint)",
+            Ok(*vu("x")),
         ),
         (
-            "(invariant (x int) true)",
-            Ok(vec![Command::Invariant(*vi("x"), *pt())]),
+            "(x int)",
+            Ok(*vi("x")),
         ),
         (
-            "(invariant (x bool) true)",
-            Ok(vec![Command::Invariant(*vb("x"), *pt())]),
+            "(x bool)",
+            Ok(*vb("x")),
         ),
         (
-            "(invariant (x (optional uint)) true)",
-            Ok(vec![Command::Invariant(*vo("x", TS::UIntType), *pt())]),
+            "(x (optional uint))",
+            Ok(*vo("x", TS::UIntType)),
         ),
         (
-            "(invariant (loaded-var 'SP8H248H248H248H248H248H248H248H24ARTQ82.foo.x (x uint)) true)",
-            Ok(vec![Command::Invariant(*fqlv(&contract_id, "x", vu("x")), *pt())]),
+            "(loaded-var 'SP8H248H248H248H248H248H248H248H24ARTQ82.foo.x (x uint))",
+            Ok(*fqlv(&contract_id, "x", vu("x"))),
         ),
         (
-            "(invariant (loaded-var-const 'SP8H248H248H248H248H248H248H248H24ARTQ82.foo.x u1) true)",
-            Ok(vec![Command::Invariant(*fqlv(&contract_id, "x", cu(1)), *pt())]),
+            "(loaded-var-const 'SP8H248H248H248H248H248H248H248H24ARTQ82.foo.x u1)",
+            Ok(*fqlv(&contract_id, "x", cu(1))),
         ),
         (
-            "(invariant (loaded-var-type 'SP8H248H248H248H248H248H248H248H24ARTQ82.foo.x uint) true)",
-            Ok(vec![Command::Invariant(*fqlv(&contract_id, "x", vu("x")), *pt())]),
+            "(loaded-var-type 'SP8H248H248H248H248H248H248H248H24ARTQ82.foo.x uint)",
+            Ok(*fqlv(&contract_id, "x", vu("x"))),
         ),
         (
-            "(invariant (loaded-var-sym 'SP8H248H248H248H248H248H248H248H24ARTQ82.foo.x (x uint)) true)",
-            Ok(vec![Command::Invariant(*fqlv(&contract_id, "x", vu("x")), *pt())]),
+            "(loaded-var-sym 'SP8H248H248H248H248H248H248H248H24ARTQ82.foo.x (x uint))",
+            Ok(*fqlv(&contract_id, "x", vu("x"))),
         ),
         (
-            "(invariant (+ (x uint) (y uint) (z uint)) true)",
-            Ok(vec![Command::Invariant(*add(vec![vu("x"), vu("y"), vu("z")]), *pt())]),
+            "(+ (x uint) (y uint) (z uint))",
+            Ok(*add(vec![vu("x"), vu("y"), vu("z")])),
         ),
         (
-            "(invariant (- (x uint) (y uint) (z uint)) true)",
-            Ok(vec![Command::Invariant(*sub(vec![vu("x"), vu("y"), vu("z")]), *pt())]),
+            "(- (x uint) (y uint) (z uint))",
+            Ok(*sub(vec![vu("x"), vu("y"), vu("z")])),
         ),
         (
-            "(invariant (* (x uint) (y uint) (z uint)) true)",
-            Ok(vec![Command::Invariant(*mul(vec![vu("x"), vu("y"), vu("z")]), *pt())]),
+            "(* (x uint) (y uint) (z uint))",
+            Ok(*mul(vec![vu("x"), vu("y"), vu("z")])),
         ),
         (
-            "(invariant (/ (x uint) (y uint) (z uint)) true)",
-            Ok(vec![Command::Invariant(*div(vec![vu("x"), vu("y"), vu("z")]), *pt())]),
+            "(/ (x uint) (y uint) (z uint))",
+            Ok(*div(vec![vu("x"), vu("y"), vu("z")])),
         ),
         (
-            "(invariant (mod (x uint) (y uint)) true)",
-            Ok(vec![Command::Invariant(*rem(vu("x"), vu("y")), *pt())]),
+            "(mod (x uint) (y uint))",
+            Ok(*rem(vu("x"), vu("y"))),
         ),
         (
-            "(invariant (and (x bool) (y bool) (z bool)) true)",
-            Ok(vec![Command::Invariant(*and(vec![vb("x"), vb("y"), vb("z")]), *pt())]),
+            "(and (x bool) (y bool) (z bool))",
+            Ok(*and(vec![vb("x"), vb("y"), vb("z")])),
         ),
         (
-            "(invariant (or (x bool) (y bool) (z bool)) true)",
-            Ok(vec![Command::Invariant(*or(vec![vb("x"), vb("y"), vb("z")]), *pt())]),
+            "(or (x bool) (y bool) (z bool))",
+            Ok(*or(vec![vb("x"), vb("y"), vb("z")])),
         ),
         (
-            "(invariant (map-entry 'SP8H248H248H248H248H248H248H248H24ARTQ82.foo.m (x uint)) true)",
-            Ok(vec![Command::Invariant(*fq_map_get(&contract_id, "m", vu("x")), *pt())])
+            "(map-entry 'SP8H248H248H248H248H248H248H248H24ARTQ82.foo.m (x uint))",
+            Ok(*fq_map_get(&contract_id, "m", vu("x"))),
         ),
         (
-            "(invariant (map-entry 'SP8H248H248H248H248H248H248H248H24ARTQ82.foo.m (x uint) (y bool)) true)",
-            Ok(vec![Command::Invariant(*fqlm(&contract_id, "m", vu("x"), vb("y")), *pt())])
+            "(map-entry 'SP8H248H248H248H248H248H248H248H24ARTQ82.foo.m (x uint) (y bool))",
+            Ok(*fqlm(&contract_id, "m", vu("x"), vb("y"))),
         ),
         (
-            "(invariant (map-entry-const 'SP8H248H248H248H248H248H248H248H24ARTQ82.foo.m (x uint) true) true)",
-            Ok(vec![Command::Invariant(*fqlm(&contract_id, "m", vu("x"), cb(true)), *pt())])
+            "(map-entry-const 'SP8H248H248H248H248H248H248H248H24ARTQ82.foo.m (x uint) true)",
+            Ok(*fqlm(&contract_id, "m", vu("x"), cb(true))),
         ),
         (
-            "(invariant (map-entry-type 'SP8H248H248H248H248H248H248H248H24ARTQ82.foo.m (x uint) (y bool) bool) true)",
-            Ok(vec![Command::Invariant(*fqlm(&contract_id, "m", vu("x"), vb("y")), *pt())])
+            "(map-entry-type 'SP8H248H248H248H248H248H248H248H24ARTQ82.foo.m (x uint) (y bool) bool)",
+            Ok(*fqlm(&contract_id, "m", vu("x"), vb("y"))),
         ),
         (
-            "(invariant (map-entry-sym 'SP8H248H248H248H248H248H248H248H24ARTQ82.foo.m (x uint)) true)",
-            Ok(vec![Command::Invariant(*fq_map_get(&contract_id, "m", vu("x")), *pt())])
+            "(map-entry-sym 'SP8H248H248H248H248H248H248H248H24ARTQ82.foo.m (x uint))",
+            Ok(*fq_map_get(&contract_id, "m", vu("x"))),
         ),
         (
-            "(invariant (map-entry-sym 'SP8H248H248H248H248H248H248H248H24ARTQ82.foo.m (x uint) (y bool)) true)",
-            Ok(vec![Command::Invariant(*fqlm(&contract_id, "m", vu("x"), vb("y")), *pt())])
+            "(map-entry-sym 'SP8H248H248H248H248H248H248H248H24ARTQ82.foo.m (x uint) (y bool))",
+            Ok(*fqlm(&contract_id, "m", vu("x"), vb("y"))),
         ),
     ];
 
-    let mut ctx = CommandContext::new();
-    for (prog, expected_events) in tests.into_iter() {
-        match ctx.eval_program(&prog, 0) {
-            Ok(events) => {
-                let Ok(expected_events) = expected_events else {
-                    panic!("Evaluating program `{prog}` was supposed to fail (got Ok event `{events:?}`)");
+    for (prog, expected_symop_res) in tests.into_iter() {
+        let ast = ast::parse_ast(&contract_id, prog).unwrap();
+        match SymOp::try_from(&ast.expressions[0]) {
+            Ok(symop) => {
+                let Ok(expected_symop) = expected_symop_res else {
+                    panic!("Evaluating program `{prog}` was supposed to fail (got `{expected_symop_res:?}`)");
                 };
-                assert_eq!(events, expected_events, "Failed to run program {prog}");
+                assert_eq!(symop, expected_symop, "Failed to run program {prog}");
             }
             Err(Error::Program(program_error)) => {
                 let msg = &program_error.cause;
-                let Err(Error::Program(expected_program_error)) = expected_events else {
+                let Err(Error::Program(expected_program_error)) = expected_symop_res else {
                     panic!("Evaluating program `{prog}` was not supposed to fail (got msg `{msg}`)");
                 };
                 let expected_msg = &expected_program_error.cause;
@@ -360,7 +361,7 @@ fn test_eval_invariant() {
 } 
 
 #[test]
-fn test_command_invariants_pass_halt() {
+fn test_command_halt_pass() {
     let contract_id = default_contract_id();
     let mut symbex = Symbex::from_contract(contract_id.clone(), r#"
         (define-map m uint uint)
@@ -413,7 +414,7 @@ fn test_command_invariants_pass_halt() {
 }
 
 #[test]
-fn test_command_invariants_syntax_error() {
+fn test_command_halt_syntax_error() {
     let contract_id = default_contract_id();
     let mut symbex = Symbex::from_contract(contract_id.clone(), r#"
         (define-map m uint uint)
@@ -421,14 +422,14 @@ fn test_command_invariants_syntax_error() {
         ;; (@clairvoyance
         ;;      (halt
         ;;          (result (ok false))
-        ;;          (invariant
+        ;;          (condition
         ;;              (and
         ;;                  (is-eq (mod (x uint) u2) u0)
         ;;                  (is-some (map-entry 'SP8H248H248H248H248H248H248H248H24ARTQ82.contract.m (x uint))))))
         ;;
         ;;      (halt
         ;;          (result (ok true))
-        ;;          (invariant
+        ;;          (condition
         ;;              (and
         ;;                  (is-eq (mod (x uint) u2) u0)
         ;;                  (is-none (map-entry 'SP8H248H248H248H248H248H248H248H24ARTQ82.contract.m (x uint)))))
@@ -439,7 +440,7 @@ fn test_command_invariants_syntax_error() {
         ;;
         ;;      (halt
         ;;          (result (err u0))
-        ;;          (invariant
+        ;;          (condition
         ;;              ;; oops
         ;;              (not (is-eq (mod (x uint)) u2)))))
         ;;
@@ -473,21 +474,21 @@ fn test_command_invariants_syntax_error() {
 }
 
 #[test]
-fn test_command_invariants_unchecked_continuation() {
+fn test_command_halt_unchecked_continuation() {
     let contract_id = default_contract_id();
     let mut symbex = Symbex::from_contract(contract_id.clone(), r#"
         (define-map m uint uint)
 
         ;; (@clairvoyance
-        ;;      (invariant
-        ;;          (ok false)
-        ;;          (and
+        ;;      (halt
+        ;;          (result (ok false))
+        ;;          (condition (and
         ;;              (is-eq (mod (x uint) u2) u0)
-        ;;              (is-some (map-entry 'SP8H248H248H248H248H248H248H248H24ARTQ82.contract.m (x uint)))))
+        ;;              (is-some (map-entry 'SP8H248H248H248H248H248H248H248H24ARTQ82.contract.m (x uint))))))
         ;;
-        ;;      (invariant
-        ;;          (err u0)
-        ;;          (not (is-eq (mod (x uint) u2) u0))))
+        ;;      (halt
+        ;;          (result (err u0))
+        ;;          (condition (not (is-eq (mod (x uint) u2) u0)))))
         (define-public (set-if-odd (x uint))
             (if (is-eq (mod x u2) u0)
                 (ok (map-insert m x x))
@@ -510,7 +511,6 @@ fn test_command_invariants_unchecked_continuation() {
             info!("proof failure:\n{proof_failure}\n");
             assert_eq!(proof_failure.unchecked_continuations.len(), 1);
             assert_eq!(proof_failure.unmatched_halting_conditions.len(), 0);
-            assert_eq!(proof_failure.halting_conditions_failed.len(), 0);
         }
         Err(e) => {
             error!("Unexpected error: {e:?}");
@@ -520,37 +520,37 @@ fn test_command_invariants_unchecked_continuation() {
 }
 
 #[test]
-fn test_command_invariants_unmatched_invariant() {
+fn test_command_halt_unmatched_halt() {
     let contract_id = default_contract_id();
     let mut symbex = Symbex::from_contract(contract_id.clone(), r#"
         (define-map m uint uint)
 
         ;; (@clairvoyance
-        ;;      (invariant
-        ;;          (ok false)
-        ;;          (and
+        ;;      (halt
+        ;;          (result (ok false))
+        ;;          (condition (and
         ;;              (is-eq (mod (x uint) u2) u0)
-        ;;              (is-some (map-entry 'SP8H248H248H248H248H248H248H248H24ARTQ82.contract.m (x uint)))))
+        ;;              (is-some (map-entry 'SP8H248H248H248H248H248H248H248H24ARTQ82.contract.m (x uint))))))
         ;;
-        ;;      (invariant
-        ;;          (ok true)
-        ;;          (and
-        ;;              (is-eq (mod (x uint) u2) u0)
-        ;;              (is-none (map-entry 'SP8H248H248H248H248H248H248H248H24ARTQ82.contract.m (x uint)))))
+        ;;      (halt
+        ;;          (result (ok true))
+        ;;          (condition
+        ;;              (and
+        ;;                  (is-eq (mod (x uint) u2) u0)
+        ;;                  (is-none (map-entry 'SP8H248H248H248H248H248H248H248H24ARTQ82.contract.m (x uint)))))
+        ;;          (map-write
+        ;;              'SP8H248H248H248H248H248H248H248H24ARTQ82.contract.m
+        ;;              (x uint)
+        ;;              (x uint)))
         ;;
-        ;;      (map-write
-        ;;          (ok true)
-        ;;          'SP8H248H248H248H248H248H248H248H24ARTQ82.contract.m
-        ;;          (x uint)
-        ;;          (x uint))
+        ;;      ;; oops
+        ;;      (halt
+        ;;          (result (err u1))
+        ;;          (condition (is-eq (x uint) u3)))
         ;;
-        ;;      (invariant
-        ;;          (err u1)
-        ;;          (is-eq (x uint) u3))
-        ;;
-        ;;      (invariant
-        ;;          (err u0)
-        ;;          (not (is-eq (mod (x uint) u2) u0))))
+        ;;      (halt
+        ;;          (result (err u0))
+        ;;          (condition (not (is-eq (mod (x uint) u2) u0)))))
         (define-public (set-if-odd (x uint))
             (if (is-eq (mod x u2) u0)
                 (ok (map-insert m x x))
@@ -573,72 +573,6 @@ fn test_command_invariants_unmatched_invariant() {
             info!("proof failure:\n{proof_failure}\n");
             assert_eq!(proof_failure.unchecked_continuations.len(), 0);
             assert_eq!(proof_failure.unmatched_halting_conditions.len(), 1);
-            assert_eq!(proof_failure.halting_conditions_failed.len(), 0);
-        }
-        Err(e) => {
-            error!("Unexpected error: {e:?}");
-            panic!();
-        }
-    }
-}
-
-#[test]
-fn test_command_invariants_unproven_invariant() {
-    let contract_id = default_contract_id();
-    let mut symbex = Symbex::from_contract(contract_id.clone(), r#"
-        (define-map m uint uint)
-
-        ;; (@clairvoyance
-        ;;      (invariant
-        ;;          (ok false)
-        ;;          (and
-        ;;              (is-eq (mod (x uint) u2) u0)
-        ;;              (is-some (map-entry 'SP8H248H248H248H248H248H248H248H24ARTQ82.contract.m (x uint)))))
-        ;;
-        ;;      (invariant
-        ;;          (ok true)
-        ;;          (and
-        ;;              (is-eq (mod (x uint) u2) u0)
-        ;;              (is-none (map-entry 'SP8H248H248H248H248H248H248H248H24ARTQ82.contract.m (x uint)))))
-        ;;
-        ;;      (invariant
-        ;;          (ok true)
-        ;;          (and
-        ;;              (is-eq (x uint) u4)
-        ;;              (is-none (map-entry 'SP8H248H248H248H248H248H248H248H24ARTQ82.contract.m (x uint)))))
-        ;;
-        ;;      (map-write
-        ;;          (ok true)
-        ;;          'SP8H248H248H248H248H248H248H248H24ARTQ82.contract.m
-        ;;          (x uint)
-        ;;          (x uint))
-        ;;
-        ;;      (invariant
-        ;;          (err u0)
-        ;;          (not (is-eq (mod (x uint) u2) u0))))
-        (define-public (set-if-odd (x uint))
-            (if (is-eq (mod x u2) u0)
-                (ok (map-insert m x x))
-                (err u0)))
-        "#,
-    )
-    .unwrap()
-    .init()
-    .unwrap();
-
-    match symbex.eval_user_function("set-if-odd") {
-        Ok(termination_states) => {
-            for t in termination_states.iter() {
-                info!("{}", t.trace());
-                info!("termination state: ==================================\n{}\n", &t.clone().rollup());
-            }
-            panic!("Did not encounter expected clairvoyance proof failure error");
-        }
-        Err(Error::ProofFailure(proof_failure)) => {
-            info!("proof failure:\n{proof_failure}\n");
-            assert_eq!(proof_failure.unchecked_continuations.len(), 0);
-            assert_eq!(proof_failure.unmatched_halting_conditions.len(), 0);
-            assert_eq!(proof_failure.halting_conditions_failed.len(), 1);
         }
         Err(e) => {
             error!("Unexpected error: {e:?}");
@@ -658,27 +592,26 @@ fn test_command_define_formula() {
         ;;      (define-symbol x-is-odd (not (x-is-even bool)))
         ;;      (define-symbol map-get-x (map-entry 'SP8H248H248H248H248H248H248H248H24ARTQ82.contract.m (x uint)))
         ;;
-        ;;      (invariant
-        ;;          (ok false)
-        ;;          (and
+        ;;      (halt
+        ;;          (result (ok false))
+        ;;          (condition (and
         ;;              (x-is-even bool)
-        ;;              (is-some (map-get-x (optional uint)))))
+        ;;              (is-some (map-get-x (optional uint))))))
         ;;
-        ;;      (invariant
-        ;;          (ok true)
-        ;;          (and
-        ;;              (x-is-even bool)
-        ;;              (is-none (map-get-x (optional uint)))))
+        ;;      (halt
+        ;;          (result (ok true))
+        ;;          (condition
+        ;;              (and
+        ;;                  (x-is-even bool)
+        ;;                  (is-none (map-get-x (optional uint)))))
+        ;;          (map-write
+        ;;              'SP8H248H248H248H248H248H248H248H24ARTQ82.contract.m
+        ;;              (x uint)
+        ;;              (x uint)))
         ;;
-        ;;      (map-write
-        ;;          (ok true)
-        ;;          'SP8H248H248H248H248H248H248H248H24ARTQ82.contract.m
-        ;;          (x uint)
-        ;;          (x uint))
-        ;;
-        ;;      (invariant
-        ;;          (err u0)
-        ;;          (x-is-odd bool)))
+        ;;      (halt
+        ;;          (result (err u0))
+        ;;          (condition (x-is-odd bool))))
         ;;
         (define-public (set-if-odd (x uint))
             (if (is-eq (mod x u2) u0)

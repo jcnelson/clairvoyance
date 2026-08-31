@@ -8206,7 +8206,7 @@ impl Symbex {
         if commands.len() > 0 {
             info!("Commands on {body}:");
             for cmd in commands.iter() {
-                info!("   {cmd}");
+                info!("\n{cmd}");
             }
             info!("End of commands");
         }
@@ -8220,10 +8220,6 @@ impl Symbex {
                 Command::Test(..)
                 | Command::DefineSymbol(..) => {
                     continue;
-                }
-                Command::Invariant(formula, predicate) => {
-                    let halt = Halt::from_invariant(formula, predicate);
-                    halts.push(halt);
                 }
                 Command::Halt(halt) => {
                     halts.push(halt);

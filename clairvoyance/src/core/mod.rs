@@ -98,8 +98,6 @@ impl BackingStore {
 
 #[derive(Debug, PartialEq)]
 pub struct ProofFailures {
-    /// halting conditions that could not be concluded from a given continuation's predicate
-    pub halting_conditions_failed: Vec<(Continuation, Predicate)>,
     /// continuations not checked by the list of halting states
     pub unchecked_continuations: Vec<Continuation>,
     /// extraneous halting conditions that could not be matched to a continuation
@@ -157,7 +155,6 @@ pub struct ProofFailures {
 impl ProofFailures {
     pub fn new() -> Self {
         Self {
-            halting_conditions_failed: vec![],
             unchecked_continuations: vec![],
             unmatched_halting_conditions: vec![],
             incorrect_var_writes: vec![],
@@ -181,8 +178,7 @@ impl ProofFailures {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.halting_conditions_failed.len() == 0
-        && self.unchecked_continuations.len() == 0
+        self.unchecked_continuations.len() == 0
         && self.unmatched_halting_conditions.len() == 0
         && self.incorrect_var_writes.len() == 0
         && self.missing_var_writes.len() == 0
@@ -203,11 +199,6 @@ impl ProofFailures {
         && self.unmatched_reachable_map_writes.len() == 0
     }
 
-    pub fn halting_condition_failed(&mut self, cont: Continuation, pred: Predicate) {
-        warn!("Halting condition {pred} does NOT hold on continuation for {} ({})", &cont.final_formula, cont.get_function_path());
-        self.halting_conditions_failed.push((cont, pred));
-    }
-
     pub fn unchecked_continuation(&mut self, cont: Continuation) {
         warn!("Continuation not checked by given halting conditions:");
         warn!("      Path: {}", &cont.get_function_path());
@@ -215,9 +206,9 @@ impl ProofFailures {
         self.unchecked_continuations.push(cont);
     }
 
-    pub fn unmatched_halting_condition(&mut self, pred: Predicate) {
-        warn!("Halting condition {pred} did not match any continuation");
-        self.unmatched_halting_conditions.push(pred);
+    pub fn unmatched_halting_condition(&mut self, cond: Predicate) {
+        warn!("Halting condition '{cond}' did not match any continuation");
+        self.unmatched_halting_conditions.push(cond);
     }
 
     pub fn incorrect_var_write(&mut self, cont: Continuation, var_name: FullName, computed_var_value: SymOp, given_var_value: SymOp) {
@@ -476,14 +467,15 @@ impl ProofFailures {
         for h in halts.iter() {
             let mut found_cont = None;
             for (i, cont) in conts.iter().enumerate() {
-                let matches = if let Some(cond) = h.condition.as_ref() {
+                let logic_matches = if let Some(cond) = h.condition.as_ref() {
                     let implication = cont.predicate.clone().not().or(*cond.clone()).simplify()?;
-                    cont.final_formula.clone().simplify()? == h.formula.clone().simplify()? && implication == Predicate::True
+                    implication == Predicate::True
                 }
                 else {
-                    cont.final_formula.clone().simplify()? == h.formula.clone().simplify()? && cont.predicate.clone().simplify()? == h.predicate.clone().simplify()?
+                    cont.predicate.clone().simplify()? == h.predicate.clone().simplify()?
                 };
-                if matches {
+                let formula_matches = cont.final_formula.clone().simplify()? == h.formula.clone().simplify()?;
+                if logic_matches && formula_matches {
                     // check nature of the halt -- did it panic? did it early-return?
                     if cont.early_return != h.early_return {
                         failures.early_return_mismatch = true;
@@ -570,19 +562,24 @@ impl ProofFailures {
                     found_cont = Some(i);
                     break;
                 }
-                else if cont.predicate.clone().simplify()? == *h.predicate {
+                else if logic_matches && !formula_matches {
                     debug!("Predicate {} matches, but not final formula:\n   Computed: {:?}\n      Given: {:?}\n",
                            &h.predicate.clone().to_pretty_string(1), cont.final_formula.clone().simplify()?, &h.formula);
                 }
-                else {
+                else if !logic_matches && formula_matches {
                     debug!("Final formula {} matches, but not predicate:\n   Computed: {}\n      Given: {}\n",
                            &h.formula, cont.predicate.clone().simplify()?.to_pretty_string(1), &h.predicate.clone().to_pretty_string(1));
                 }
             }
 
             let Some(i) = found_cont.take() else {
-                // this halting condition does match any continuation 
-                failures.unmatched_halting_condition(*h.predicate.clone());
+                // this halting condition does match any continuation
+                if let Some(cond) = h.condition.as_ref() {
+                    failures.unmatched_halting_condition(*cond.clone());
+                }
+                else {
+                    failures.unmatched_halting_condition(*h.predicate.clone());
+                }
                 continue;
             };
             conts.remove(i);
@@ -601,14 +598,6 @@ impl ProofFailures {
 
 impl fmt::Display for ProofFailures {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        if self.halting_conditions_failed.len() > 0 {
-            for (cont, pred) in self.halting_conditions_failed.iter() {
-                write!(f, "Unproven halting condition:\n{}", pred.clone().as_symop().to_pretty_string(1))?;
-                write!(f, "Continuation formula:\n{}", cont.final_formula.to_pretty_string(1))?;
-                write!(f, "Continuation predicate:\n{}", cont.predicate.clone().as_symop().to_pretty_string(1))?;
-            }
-            write!(f, "\n\n")?;
-        }
         if self.unchecked_continuations.len() > 0 {
             for cont in self.unchecked_continuations.iter() {
                 write!(f, "Unchecked continuation:\n{cont}\n")?;

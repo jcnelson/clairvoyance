@@ -86,7 +86,7 @@ pub struct Halt {
 }
 
 impl Halt {
-    pub fn from_invariant(formula: SymOp, predicate: Predicate) -> Self {
+    pub fn new(formula: SymOp, predicate: Predicate) -> Self {
         Self {
             formula: Box::new(formula),
             predicate: Box::new(predicate),
@@ -107,6 +107,7 @@ impl Halt {
     pub fn from_symbolic_expressions(ctx: &CommandContext, exprs: &[SymbolicExpression]) -> Result<Self, Error> {
         let mut formula = None;
         let mut condition = None;
+        let mut predicate = None;
         let mut vars = HashMap::new();
         let mut map_state : HashMap<FullName, HashMap<SymOp, SymOp>> = HashMap::new();
         let mut map_tombstones : HashMap<FullName, HashSet<SymOp>> = HashMap::new();
@@ -137,14 +138,24 @@ impl Halt {
                     formula = Some(Box::new(symop));
                 }
                 "condition" => {
-                    if condition.is_some() {
-                        return Err(Error::new_program_error(format!("List expression #{i} is a duplicate directive `{directive}`: {expr}")));
+                    if predicate.is_some() || condition.is_some() {
+                        return Err(Error::new_program_error(format!("List expression #{i} is a duplicate directive `{directive}`, or `predicate` is already defined: {expr}")));
                     }
                     if lv.len() != 2 {
                         return Err(Error::new_program_error(format!("List expression #{i} (directive `{directive}`) expects 1 argument: {expr}")));
                     }
                     let inv = ctx.parse_symop(&lv[1])?.try_as_predicate()?;
                     condition = Some(Box::new(inv));
+                }
+                "predicate" => {
+                    if predicate.is_some() || condition.is_some() {
+                        return Err(Error::new_program_error(format!("List expression #{i} is a duplicate directive `{directive}`, or `condition` is already defined: {expr}")));
+                    }
+                    if lv.len() != 2 {
+                        return Err(Error::new_program_error(format!("List expression #{i} (directive `{directive}`) expects 1 argument: {expr}")));
+                    }
+                    let inv = ctx.parse_symop(&lv[1])?.try_as_predicate()?;
+                    predicate = Some(Box::new(inv));
                 }
                 "var-write" => {
                     if lv.len() != 3 {
@@ -241,14 +252,25 @@ impl Halt {
         let Some(formula) = formula.take() else {
             return Err(Error::new_program_error(format!("No `result` directive given")));
         };
-        let Some(cond) = condition.take() else {
-            return Err(Error::new_program_error(format!("No `condition` directive given")));
+        let (cond, pred) = match (condition.take(), predicate.take()) {
+            (None, None) => {
+                return Err(Error::new_program_error(format!("No `condition` or `predicate` directive given")));
+            }
+            (Some(..), Some(..)) => {
+                return Err(Error::new_program_error(format!("Both `condition` and `predicate` directives given. Use only one or the other.")));
+            },
+            (Some(cond), None) => {
+                (Some(cond), Box::new(Predicate::True))
+            }
+            (None, Some(pred)) => {
+                (None, pred)
+            }
         };
 
         let halt = Self {
             formula,
-            predicate: Box::new(Predicate::True),
-            condition: Some(cond),
+            predicate: pred,
+            condition: cond,
             vars,
             map_state,
             map_tombstones,
@@ -268,7 +290,7 @@ impl Halt {
 impl fmt::Display for Halt {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         write!(f, "(halt\n")?;
-        write!(f, "  (formula {})\n", self.formula)?;
+        write!(f, "  (result {})\n", self.formula)?;
         if let Some(cond) = self.condition.as_ref() {
             write!(f, "  (condition {cond})\n")?;
         }
@@ -310,7 +332,13 @@ pub enum Command {
     Test(String),
     DefineSymbol(ClarityName, SymOp),
     Halt(Halt),
-    Invariant(SymOp, Predicate),
+}
+
+
+impl From<Halt> for Command {
+    fn from(h: Halt) -> Command {
+        Command::Halt(h)
+    }
 }
 
 impl fmt::Display for Command {
@@ -319,7 +347,6 @@ impl fmt::Display for Command {
             Self::Test(msg) => write!(f, "(test \"{msg}\")"),
             Self::DefineSymbol(name, op) => write!(f, "(define-symbol {name} {op})"),
             Self::Halt(halt) => write!(f, "{halt}"),
-            Self::Invariant(formula, pred) => write!(f, "(invariant {formula} {pred})"),
         }
     }
 }
@@ -389,14 +416,6 @@ impl CommandContext {
             }
             "halt" => {
                 Ok(Command::Halt(Halt::from_symbolic_expressions(self, exprs)?))
-            }
-            "invariant" => {
-                if exprs.len() != 2 {
-                    return Err(Error::new_program_error(format!("`{command_name}` expects 2 arguments, got {}", exprs.len())));
-                }
-                let final_formula = self.parse_symop(&exprs[0])?;
-                let conclusion = self.parse_symop(&exprs[1])?;
-                Ok(Command::Invariant(final_formula, conclusion.try_as_predicate()?))
             }
             _ => {
                 Err(Error::NotFound(format!("Unrecognized command '{command_name}'")))
