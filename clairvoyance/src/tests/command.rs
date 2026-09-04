@@ -13,6 +13,8 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use std::fs;
+
 use crate::sym::Symbex;
 
 use crate::sym::command::{Command, CommandContext};
@@ -168,7 +170,7 @@ fn test_eval_program() {
 
     let mut ctx = CommandContext::new();
     for (prog, expected_events) in tests.into_iter() {
-        match ctx.eval_program(&prog, 0) {
+        match ctx.eval_program(&prog, 0, None) {
             Ok(events) => {
                 let Ok(expected_events) = expected_events else {
                     panic!("Evaluating program `{prog}` was supposed to fail (got Ok event `{events:?}`)");
@@ -635,3 +637,90 @@ fn test_command_define_formula() {
         info!("termination state: ==================================\n{}\n", &t.clone().rollup());
     }
 }
+
+#[test]
+fn test_command_trait_contract_call() {
+    let test_dir = "/tmp/clairvoyance-test/test_command_trait_contract_call/";
+    let library_path = format!("{test_dir}/library.clar");
+    let library_trait_path = format!("{test_dir}/library-trait.clar");
+
+    if fs::metadata(&test_dir).is_ok() {
+        fs::remove_dir_all(&test_dir).unwrap();
+    }
+    fs::create_dir_all(&test_dir).unwrap();
+    fs::write(&library_trait_path, r#"
+        (define-trait calc
+            (
+                (add (uint uint) (response uint uint))
+            )
+        )
+    "#).unwrap();
+    fs::write(&library_path, r#"
+        (impl-trait .library-trait.calc)
+
+        (define-public (add (x uint) (y uint))
+            (ok (+ x y)))
+    "#).unwrap();
+
+    let mut symbex = Symbex::from_contract_comments(&format!("
+    ;; (@clairvoyance
+    ;;
+    ;;      (contract-id 'SP8H248H248H248H248H248H248H248H24ARTQ82.client)
+    ;;
+    ;;      (dependency
+    ;;          'SP8H248H248H248H248H248H248H248H24ARTQ82.library-trait
+    ;;          \"{library_trait_path}\")
+    ;;
+    ;;      (dependency
+    ;;          'SP8H248H248H248H248H248H248H248H24ARTQ82.library
+    ;;          \"{library_path}\")
+    ;; )
+    
+    (use-trait calc-trait .library-trait.calc)
+
+    (define-constant OP_ADD u0)
+
+    (define-constant ERR_NO_SUCH_OP u2000)
+
+    ;; (@clairvoyance
+    ;;
+    ;;      (concretize-trait
+    ;;          calc
+    ;;          'SP8H248H248H248H248H248H248H248H24ARTQ82.library)
+    ;;
+    ;;      (halt
+    ;;          (result (ok (+ (a uint) (b uint))))
+    ;;          (condition (is-eq (op uint) u0)))
+    ;;
+    ;;      (halt
+    ;;          (result (err u2000))
+    ;;          (condition (not (is-eq (op uint) u0))))
+    ;; )
+    (define-public (compute (calc <calc-trait>) (op uint) (a uint) (b uint))
+        (if (is-eq op OP_ADD)
+            (contract-call? calc add a b)
+            (err ERR_NO_SUCH_OP)))
+    ", vec![]))
+    .unwrap()
+    .skip_causally_independent(false)
+    .skip_pure(false) 
+    .init()
+    .unwrap();
+
+    let termination_states = symbex.eval_user_function("compute").unwrap();
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+
+    assert_halts(termination_states, vec![
+        Halt::new_test()
+            .pred(peq(vu("op"), cu(0)))
+            .formula(ok(add2(vu("a"), vu("b")))),
+        
+        Halt::new_test()
+            .pred(pnot(peq(vu("op"), cu(0))))
+            .formula(cerr(valu(2000)))
+    ]);
+}
+

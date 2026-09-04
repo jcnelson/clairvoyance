@@ -23,10 +23,11 @@ use clarity_types::Value;
 use clarity_types::ClarityName;
 use clarity_types::representations::{SymbolicExpression, SymbolicExpressionType};
 use clarity_types::types::TupleData;
-use clarity_types::types::SequenceData;
+use clarity_types::types::{SequenceData, CharType};
 use clarity_types::types::QualifiedContractIdentifier;
 use clarity_types::types::StandardPrincipalData;
 use clarity_types::types::PrincipalData;
+use clarity_types::types::TraitIdentifier;
 
 use clarity::vm::ContractContext;
 use clarity::vm::contexts::GlobalContext;
@@ -46,8 +47,10 @@ use crate::sym::FullName;
 use crate::sym::Continuation;
 use crate::sym::GetContractSymOps;
 
-use stacks_common::consts::CHAIN_ID_MAINNET;
 use crate::core::{DEFAULT_STACKS_EPOCH, DEFAULT_CLARITY_VERSION, ProofFailures};
+
+use stacks_common::consts::CHAIN_ID_MAINNET;
+use stacks_common::address::C32_ADDRESS_VERSION_MAINNET_SINGLESIG;
 
 const COMMANDS_INTERPRETER: &'static str = include_str!("./command.clar");
 
@@ -285,6 +288,17 @@ impl Halt {
 
         Ok(halt)
     }
+
+    pub fn to_comment_block(&self) -> String {
+        let halt = format!("{}", self);
+        let mut halt_strs = halt.split("\n");
+        let mut halt_with_comments = vec![];
+        while let Some(halt_str) = halt_strs.next() {
+            halt_with_comments.push(format!(";;     {halt_str}"));
+        }
+        let halts = halt_with_comments.join("\n");
+        halts
+    }
 }
 
 impl fmt::Display for Halt {
@@ -310,16 +324,16 @@ impl fmt::Display for Halt {
                 write!(f, "  (map-delete\n    {map_name}\n    {key})\n")?;
             }
         }
-        for name in self.reachable_var_reads.iter() {
-            write!(f, "  (reachable-var-read {name})\n")?;
-        }
         for name in self.reachable_var_writes.iter() {
+            if self.vars.contains_key(name) {
+                continue;
+            }
             write!(f, "  (reachable-var-write {name})\n")?;
         }
-        for name in self.reachable_map_reads.iter() {
-            write!(f, "  (reachable-map-read {name})\n")?;
-        }
         for name in self.reachable_map_writes.iter() {
+            if self.map_state.contains_key(name) || self.map_tombstones.contains_key(name) {
+                continue;
+            }
             write!(f, "  (reachable-map-write {name})\n")?;
         }
         write!(f, ")")?;
@@ -327,11 +341,75 @@ impl fmt::Display for Halt {
     }
 }
 
+impl From<Continuation> for Halt {
+    fn from(cont: Continuation) -> Self {
+        Self {
+            formula: Box::new(cont.final_formula),
+            predicate: Box::new(cont.predicate),
+            condition: None,
+            vars: cont.var_state,
+            map_state: cont.map_state,
+            map_tombstones: cont.map_tombstones,
+            reachable_var_reads: cont.reachable_var_reads,
+            reachable_var_writes: cont.reachable_var_writes,
+            reachable_map_reads: cont.reachable_map_reads,
+            reachable_map_writes: cont.reachable_map_writes,
+            early_return: cont.early_return,
+            panicking: cont.panicking,
+            analyze_write_reachability: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
+    /// No-op
     Test(String),
+    /// Define a symbol with the given name.  It will be substituted into subsequent formulae
+    /// as-is (a "dumb" macro)
     DefineSymbol(ClarityName, SymOp),
+    /// Specify a halting state that must be met by a resulting continuation
     Halt(Halt),
+    /// Specify a trait concretization for a function definition
+    /// (trait-name, trait-impl-contract-id)
+    ConcretizeTrait(ClarityName, QualifiedContractIdentifier),
+    /// Skip a function call, and treat it as a symbol.
+    /// * if attached to a function definition, then a name must be given
+    /// * if attached to the callsite, then no name needs to be given.
+    SkipFunctionCall(Option<ClarityName>),
+    /// Skip a contract-call, and treat it as a symbol.
+    /// * if attached to a function definition, then a fullname must be given
+    /// * if attached to the callsite, then no name needs to be given
+    SkipContractCall(Option<FullName>),
+    /// Stop exploring from this continuation and exit 
+    StopExploring,
+    /// Drop early-return continuations
+    DropEarlyReturns,
+    /// Force the result of all continuations produced to have this symop
+    SetResult(SymOp),
+    /// Explore each continuation, even if they all have the same result
+    /// Sets `combine_continuations` to false
+    /// Sets `skip_pure` to false
+    /// Sets `skip_causally_independent_calls` to false
+    ExploreAll,
+    /// Load and instantiate a dependent smart contract
+    Dependency(QualifiedContractIdentifier, String, Option<StandardPrincipalData>),
+    /// The contract's deployed ID
+    ContractId(QualifiedContractIdentifier),
+    /// This contract's sponsor
+    ContractSponsor(StandardPrincipalData),
+    /// Default trait impelmentation 
+    DefaultTraitImpl(TraitIdentifier, QualifiedContractIdentifier),
+    /// Log some debug output
+    PrintLn(SymOp),
+    /// Print out the current continuation for the given symbolic expression
+    PrintContinuation,
+    /// Print out all computed continuations for this symbolic expression
+    PrintProducedContinuations,
+    /// Pause execution at the given symblic expression
+    Pause(SymbolicExpression),
+    /// Ensure that a given invariant holds in all continuations
+    Invariant(SymOp),
 }
 
 
@@ -347,6 +425,43 @@ impl fmt::Display for Command {
             Self::Test(msg) => write!(f, "(test \"{msg}\")"),
             Self::DefineSymbol(name, op) => write!(f, "(define-symbol {name} {op})"),
             Self::Halt(halt) => write!(f, "{halt}"),
+            Self::ConcretizeTrait(var_name, contract) => write!(f, "(concretize-trait {var_name} '{contract})"),
+            Self::SkipFunctionCall(name_opt) => {
+                if let Some(name) = name_opt.as_ref() {
+                    write!(f, "(skip-function-call {name})")
+                }
+                else {
+                    write!(f, "(skip-function-call)")
+                }
+            }
+            Self::SkipContractCall(name_opt) => {
+                if let Some(name) = name_opt.as_ref() {
+                    write!(f, "(skip-contract-call {name})")
+                }
+                else {
+                    write!(f, "(skip-contract-call)")
+                }
+            }
+            Self::StopExploring => write!(f, "(stop)"),
+            Self::DropEarlyReturns => write!(f, "(drop-early-returns)"),
+            Self::SetResult(op) => write!(f, "(set-result {op})"),
+            Self::ExploreAll => write!(f, "(explore-all)"),
+            Self::Dependency(contract_id, path, sponsor_opt) => {
+                if let Some(sponsor) = sponsor_opt.as_ref() {
+                    write!(f, "(dependency {contract_id} u\"{path}\" '{sponsor})")
+                }
+                else {
+                    write!(f, "(dependency {contract_id} u\"{path}\")")
+                }
+            }
+            Self::ContractId(contract_id) => write!(f, "(contract-id '{contract_id})"),
+            Self::ContractSponsor(sponsor) => write!(f, "(contract-sponsor '{sponsor})"),
+            Self::DefaultTraitImpl(trait_id, contract_id) => write!(f, "(defailt-trait-impl {trait_id} '{contract_id})"),
+            Self::PrintLn(symop) => write!(f, "(println {symop})"),
+            Self::PrintContinuation => write!(f, "(print-continuation)"),
+            Self::PrintProducedContinuations => write!(f, "(print-produced-continuations)"),
+            Self::Pause(..) => write!(f, "(pause)"),
+            Self::Invariant(op) => write!(f, "(invariant {op})"),
         }
     }
 }
@@ -375,14 +490,40 @@ impl CommandContext {
         Ok(symop)
     }
 
-    /// `(test SYMOP)`
-    ///     tests decoding any symbolic operation
-    /// `(invariant FORMULA CONCLUSION)`
-    ///     matches a continuation's final formula (FINAL_FORMULA) and determines if its predicate implies the
-    ///     CONCLUSION.
-    /// `(define-formula NAME FORMULA)`
-    ///     defines a name for a symbolic operation, which can be used in subsequent directives
-    pub fn try_interpret(&mut self, command_name: &str, exprs: &[SymbolicExpression]) -> Result<Command, Error> {
+    fn decode_to_string(string_data: &CharType) -> Result<String, Error> {
+        let s = match string_data {
+            CharType::ASCII(ascii_data) => {
+                let s = String::from_utf8_lossy(&ascii_data.data).to_string();
+                s
+            }
+            CharType::UTF8(utf8_data) => {
+                let mut s = String::new();
+                for c_bytes in utf8_data.data.iter() {
+                    let mut u32_bytes = [0u8; 4];
+                    if c_bytes.len() >= 1 {
+                        u32_bytes[0] = c_bytes[0];
+                    }
+                    if c_bytes.len() >= 2 {
+                        u32_bytes[1] = c_bytes[1];
+                    }
+                    if c_bytes.len() >= 3 {
+                        u32_bytes[2] = c_bytes[2];
+                    }
+                    if c_bytes.len() == 4 {
+                        u32_bytes[3] = c_bytes[3];
+                    }
+
+                    let cu32 = u32::from_be_bytes(u32_bytes);
+                    let chr = char::from_u32(cu32).ok_or_else(|| Error::new_program_error(format!("Invalid UTF-8 path: {:?}", utf8_data.data)))?;
+                    s.push(chr);
+                }
+                s
+            }
+        };
+        Ok(s)
+    }
+
+    pub fn try_interpret(&mut self, command_name: &str, exprs: &[SymbolicExpression], body: Option<&SymbolicExpression>) -> Result<Command, Error> {
         match command_name {
             "test" => {
                 if exprs.len() != 1 {
@@ -416,6 +557,159 @@ impl CommandContext {
             }
             "halt" => {
                 Ok(Command::Halt(Halt::from_symbolic_expressions(self, exprs)?))
+            }
+            "concretize-trait" => {
+                if exprs.len() != 2 {
+                    return Err(Error::new_program_error(format!("`{command_name}` expects 3 arguments, got {}", exprs.len())));
+                }
+                let Some(var_name) = exprs[0].match_atom() else {
+                    return Err(Error::new_program_error(format!("`{command_name}` expects an atom (a function argument name) for its first argument, got {}", &exprs[0])));
+                };
+                let Some(Value::Principal(PrincipalData::Contract(contract_id))) = exprs[1].match_literal_value() else {
+                    return Err(Error::new_program_error(format!("`{command_name}` expects an principal literal (the concretized trait address) for its second argument, got {}", &exprs[1])));
+                };
+                Ok(Command::ConcretizeTrait(var_name.clone(), contract_id.clone()))
+            },
+            "skip-function-call" => {
+                let name_opt = if exprs.len() == 1 {
+                    let Some(name) = exprs[0].match_atom() else {
+                        return Err(Error::new_program_error(format!("`{command_name}` expects an atom (a function name) for its first argument, got {}", &exprs[0])));
+                    };
+                    Some(name)
+                }
+                else if exprs.len() > 1 {
+                    return Err(Error::new_program_error(format!("`{command_name}` expects only 1 argument, got {}", exprs.len())));
+                }
+                else {
+                    None
+                };
+                Ok(Command::SkipFunctionCall(name_opt.cloned()))
+            }
+            "skip-contract-call" => {
+                let name_opt = if exprs.len() == 1 {
+                    let name = SymOp::match_fullname(&exprs[0])?;
+                    Some(name)
+                }
+                else if exprs.len() > 1 {
+                    return Err(Error::new_program_error(format!("`{command_name}` expects only 1 argument, got {}", exprs.len())));
+                }
+                else {
+                    None
+                };
+                Ok(Command::SkipContractCall(name_opt))
+            }
+            "stop" => {
+                if exprs.len() > 0 {
+                    return Err(Error::new_program_error(format!("`{command_name}` takes 0 arguments, got {}", exprs.len())));
+                }
+                Ok(Command::StopExploring)
+            },
+            "drop-early-returns" => {
+                if exprs.len() > 0 {
+                    return Err(Error::new_program_error(format!("`{command_name}` takes 0 arguments, got {}", exprs.len())));
+                }
+                Ok(Command::DropEarlyReturns)
+            }
+            "set-result" => {
+                if exprs.len() != 2 {
+                    return Err(Error::new_program_error(format!("`{command_name}` takes 1 argument, got {}", exprs.len())));
+                }
+                let result = self.parse_symop(&exprs[0])?;
+                Ok(Command::SetResult(result))
+            }
+            "explore-all" => {
+                if exprs.len() > 0 {
+                    return Err(Error::new_program_error(format!("`{command_name}` takes 0 arguments, got {}", exprs.len())));
+                }
+                Ok(Command::ExploreAll)
+            }
+            "dependency" => {
+                if exprs.len() < 2 || exprs.len() > 3 {
+                    return Err(Error::new_program_error(format!("`{command_name}` takes 2-3 arguments, got {}", exprs.len())));
+                }
+                let Some(Value::Principal(PrincipalData::Contract(contract_id))) = exprs[0].match_literal_value() else {
+                    return Err(Error::new_program_error(format!("`{command_name}` expects a contract principal literal (the concretized trait address) for its first argument, got {}", &exprs[0])));
+                };
+                let Some(Value::Sequence(SequenceData::String(string_data))) = exprs[1].match_literal_value() else {
+                    return Err(Error::new_program_error(format!("`{command_name}` expects a string literal (the path to the concretized trait source code) for its second argument, got {}", &exprs[1])));
+                };
+                let sponsor_opt = if exprs.len() == 3 {
+                    let Some(Value::Principal(PrincipalData::Standard(sponsor))) = exprs[2].match_literal_value() else {
+                        return Err(Error::new_program_error(format!("`{command_name}` expects a standard principal literal (the concretized trait address) for its third argument, got {}", &exprs[2])));
+                    };
+                    Some(sponsor.clone())
+                }
+                else {
+                    None
+                };
+
+                let code = Self::decode_to_string(string_data)?;
+                Ok(Command::Dependency(contract_id.clone(), code, sponsor_opt))
+            }
+            "contract-id" => {
+                if exprs.len() != 1 {
+                    return Err(Error::new_program_error(format!("`{command_name}` takes 1 argument, got {}", exprs.len())));
+                }
+                let Some(Value::Principal(PrincipalData::Contract(contract_id))) = exprs[0].match_literal_value() else {
+                    return Err(Error::new_program_error(format!("`{command_name}` expects a contract principal literal (the deployed contract ID) for its first argument, got {}", &exprs[0])));
+                };
+                Ok(Command::ContractId(contract_id.clone()))
+            }
+            "contract-sponsor" => {
+                if exprs.len() != 1 {
+                    return Err(Error::new_program_error(format!("`{command_name}` takes 1 argument, got {}", exprs.len())));
+                }
+                let Some(Value::Principal(PrincipalData::Standard(sponsor))) = exprs[0].match_literal_value() else {
+                    return Err(Error::new_program_error(format!("`{command_name}` expects a standard principal literal (the concretized trait address) for its first argument, got {}", &exprs[0])));
+                };
+                Ok(Command::ContractSponsor(sponsor.clone()))
+            }
+            "default-trait-impl" => {
+                if exprs.len() != 2 {
+                    return Err(Error::new_program_error(format!("`{command_name}` takes 2 argument, got {}", exprs.len())));
+                }
+                let Some(trait_id) = exprs[0].match_field() else {
+                    return Err(Error::new_program_error(format!("`{command_name}` expects a trait ID for its first argument, got {}", &exprs[0])));
+                };
+                let Some(Value::Principal(PrincipalData::Contract(contract_id))) = exprs[1].match_literal_value() else {
+                    return Err(Error::new_program_error(format!("`{command_name}` expects a contract principal literal (the default implementation address) for its second argument, got {}", &exprs[1])));
+                };
+                Ok(Command::DefaultTraitImpl(trait_id.clone(), contract_id.clone()))
+            }
+            "println" => {
+                if exprs.len() != 1 {
+                    return Err(Error::new_program_error(format!("`{command_name}` takes 1 argument, got {}", exprs.len())));
+                }
+                let expr = SymOp::try_from(&exprs[0])?;
+                Ok(Command::PrintLn(expr))
+            }
+            "print-continuation" => {
+                if exprs.len() != 0 {
+                    return Err(Error::new_program_error(format!("`{command_name}` takes no arguments, got {}", exprs.len())));
+                }
+                Ok(Command::PrintContinuation)
+            }
+            "print-produced-continuations" => {
+                if exprs.len() != 0 {
+                    return Err(Error::new_program_error(format!("`{command_name}` takes no arguments, got {}", exprs.len())));
+                }
+                Ok(Command::PrintProducedContinuations)
+            }
+            "pause" => {
+                if exprs.len() != 0 {
+                    return Err(Error::new_program_error(format!("`{command_name}` takes no arguments, got {}", exprs.len())));
+                }
+                let Some(body) = body else {
+                    return Err(Error::new_program_error(format!("`{command_name}` requires a symbolic expression")));
+                };
+                Ok(Command::Pause(body.clone()))
+            }
+            "invariant" => {
+                if exprs.len() != 1 {
+                    return Err(Error::new_program_error(format!("`{command_name}` takes 1 argument, got {}", exprs.len())));
+                }
+                let symop = self.parse_symop(&exprs[0])?;
+                Ok(Command::Invariant(symop))
             }
             _ => {
                 Err(Error::NotFound(format!("Unrecognized command '{command_name}'")))
@@ -568,7 +862,7 @@ impl GetContractSymOps for InterpreterGetContractSymOps {
 
 impl SymOp {
     fn inner_try_from(symexp: &SymbolicExpression) -> Result<Self, Error> {
-        debug!("Decode: `{symexp}`");
+        trace!("Decode: `{symexp}`");
         if let Some(value) = symexp.match_literal_value() {
             // constant
             return Ok(Self::Constant(value.clone()));
@@ -1153,7 +1447,7 @@ impl CommandContext {
 
         let mut last_c = None;
        
-        debug!("decode `{command_buff}`");
+        trace!("decode `{command_buff}`");
         for c in command_buff.chars() {
             match c {
                 '(' => {
@@ -1322,7 +1616,7 @@ impl CommandContext {
                     }
                 }
             }
-            debug!("c = {c}, last_c = {last_c:?}, nesting = {nesting}, state = {state:?}");
+            trace!("c = {c}, last_c = {last_c:?}, nesting = {nesting}, state = {state:?}");
             last_c = Some(c);
         }
 
@@ -1335,7 +1629,7 @@ impl CommandContext {
         programs
     }
 
-    pub fn eval_program(&mut self, prog: &str, source_start_line: u32) -> Result<Vec<Command>, Error> {
+    pub fn eval_program(&mut self, prog: &str, source_start_line: u32, origin_symexp: Option<&SymbolicExpression>) -> Result<Vec<Command>, Error> {
         let contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::transient(), "clairvoyance".try_into()?);
         let mut ast = ast::parse_ast(&contract_id, prog)?;
 
@@ -1377,7 +1671,7 @@ impl CommandContext {
             };
 
             let symexps = lv.get(1..).unwrap_or(&[]);
-            let command = self.try_interpret(directive_name.as_str(), symexps)?;
+            let command = self.try_interpret(directive_name.as_str(), symexps, origin_symexp)?;
             commands.push(command);
         }
         Ok(commands)
@@ -1403,14 +1697,14 @@ impl CommandContext {
        
         let comment_buff = comments.join("\n");
         if comment_buff.len() > 0 {
-            info!("Got comments on {symexp}:\n{comment_buff}");
+            debug!("Got comments on {symexp}:\n{comment_buff}");
         }
 
         let programs = Self::extract_command_programs(&comment_buff);
         
         let mut commands = vec![];
         for program in programs.iter() {
-            let com = self.eval_program(program, start_line)?;
+            let com = self.eval_program(program, start_line, Some(symexp))?;
             commands.extend(com.into_iter());
         }
         Ok(commands)

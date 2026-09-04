@@ -12,8 +12,12 @@
 // 
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
+// (at your option) any later version.
+
+use std::path::Path;
 
 use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::collections::HashSet;
 
 use clarity_types::types::{PrincipalData, StandardPrincipalData, QualifiedContractIdentifier, TraitIdentifier};
@@ -23,8 +27,17 @@ use crate::sym::Symbex;
 use crate::sym::Continuation;
 use crate::sym::Callgraph;
 use crate::sym::FullName;
+use crate::sym::command::Halt;
 use crate::core::Error;
 use crate::cli;
+use crate::cli::{
+    load_contract_id,
+    load_tx_sender,
+    load_tx_sponsor,
+    load_contract_caller,
+    load_contract_tx_sponsor
+};
+use stacks_common::address::C32_ADDRESS_VERSION_MAINNET_SINGLESIG;
 
 fn exec_user_function(
     contract_id: QualifiedContractIdentifier,
@@ -86,7 +99,7 @@ fn exec_user_function(
             .with_skipped_function_call(name);
     }
 
-    debug!("Symbolic execution begins on function '{user_function}'");
+    trace!("Symbolic execution begins on function '{user_function}'");
     symbex.eval_user_function(user_function)
 }
 
@@ -154,7 +167,7 @@ fn load_deps(remaining_args: &mut Vec<String>) -> Result<Vec<(QualifiedContractI
                 let src = match cli::load_from_file_or_stdin(src_file) {
                     Ok(s) => match str::from_utf8(&s) {
                         Ok(src) => {
-                            debug!("Loaded {}-byte source code from {}", src.len(), &src_file);
+                            trace!("Loaded {}-byte source code from {}", src.len(), &src_file);
                             src.to_string()
                         }
                         Err(_) => {
@@ -174,7 +187,7 @@ fn load_deps(remaining_args: &mut Vec<String>) -> Result<Vec<(QualifiedContractI
                 return Err((1, e_str));
             }
         };
-        debug!("Dependency: {contract_id}");
+        trace!("Dependency: {contract_id}");
         deps.push((contract_id, src));
     }
     Ok(deps)
@@ -308,56 +321,6 @@ fn load_drop_early_returns(remaining_args: &mut Vec<String>) -> Result<HashSet<F
     Ok(drop_early_returns)
 }
 
-/// Load a standard principal from CLI args
-fn load_standard_principal(remaining_args: &mut Vec<String>, arg_names: &[&str]) -> Result<Option<StandardPrincipalData>, (i32, String)> {
-    let Some(principal) = load_principal(remaining_args, arg_names)? else {
-        return Ok(None);
-    };
-
-    if let PrincipalData::Standard(data) = principal {
-        Ok(Some(data))
-    }
-    else {
-        Err((1, format!("Failed to parse principal {principal} as standard principal")))
-    }
-}
-
-/// Load a contract principal from CLI args
-fn load_principal(remaining_args: &mut Vec<String>, arg_names: &[&str]) -> Result<Option<PrincipalData>, (i32, String)> {
-    let principal_res = cli::consume_arg(remaining_args, arg_names, true);
-    let principal = match principal_res {
-        Ok(Some(principal_s)) => {
-            let Ok(principal) = PrincipalData::parse(&principal_s) else {
-                return Err((1, format!("Failed to parse principal `{principal_s}`")));
-            };
-            Some(principal)
-        }
-        Ok(None) => {
-            None
-        }
-        Err(e_str) => {
-            return Err((1, e_str));
-        }
-    };
-    debug!("Loaded {principal:?} from arguments {arg_names:?}");
-    Ok(principal)
-}
-
-fn load_tx_sender(remaining_args: &mut Vec<String>) -> Result<Option<StandardPrincipalData>, (i32, String)> {
-    load_standard_principal(remaining_args, &["--tx-sender"])
-}
-
-fn load_tx_sponsor(remaining_args: &mut Vec<String>) -> Result<Option<StandardPrincipalData>, (i32, String)> {
-    load_standard_principal(remaining_args, &["--tx-sponsor"])
-}
-
-fn load_contract_caller(remaining_args: &mut Vec<String>) -> Result<Option<PrincipalData>, (i32, String)> {
-    load_principal(remaining_args, &["--contract-caller"])
-}
-
-fn load_contract_tx_sponsor(remaining_args: &mut Vec<String>) -> Result<Option<StandardPrincipalData>, (i32, String)> {
-    load_standard_principal(remaining_args, &["--contract-tx-sponsor"])
-}
 
 /// NOTE: This prints out continuations as they arrive.
 fn cli_eval_user_function(argv: &[String]) -> (i32, String) {
@@ -450,7 +413,7 @@ fn cli_eval_user_function(argv: &[String]) -> (i32, String) {
     let src = match cli::load_from_file_or_stdin(code_path_or_stdin) {
         Ok(s) => match str::from_utf8(&s) {
             Ok(src) => {
-                debug!("Loaded {}-byte source code from {}", src.len(), &code_path_or_stdin);
+                trace!("Loaded {}-byte source code from {}", src.len(), &code_path_or_stdin);
                 src.to_string()
             }
             Err(_) => {
@@ -512,7 +475,7 @@ fn cli_reachability_graph(argv: &[String]) -> (i32, String) {
     let src = match cli::load_from_file_or_stdin(code_path_or_stdin) {
         Ok(s) => match str::from_utf8(&s) {
             Ok(src) => {
-                debug!("Loaded {}-byte source code from {}", src.len(), &code_path_or_stdin);
+                trace!("Loaded {}-byte source code from {}", src.len(), &code_path_or_stdin);
                 src.to_string()
             }
             Err(_) => {

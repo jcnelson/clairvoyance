@@ -20,6 +20,7 @@ use std::collections::HashSet;
 use clarity_types::Value;
 use clarity_types::ClarityName;
 use clarity_types::types::TypeSignature;
+use clarity_types::representations::SymbolicExpression;
 use clarity_types::types::{PrincipalData, StandardPrincipalData, QualifiedContractIdentifier};
 use stacks_common::types::StacksEpochId;
 use clarity::vm::database::ClarityDatabase;
@@ -200,117 +201,117 @@ impl ProofFailures {
     }
 
     pub fn unchecked_continuation(&mut self, cont: Continuation) {
-        warn!("Continuation not checked by given halting conditions:");
-        warn!("      Path: {}", &cont.get_function_path());
-        warn!("   Formula: {}", &cont.final_formula);
+        debug!("Continuation not checked by given halting conditions:");
+        debug!("      Path: {}", &cont.get_function_path());
+        debug!("   Formula: {}", &cont.final_formula);
         self.unchecked_continuations.push(cont);
     }
 
     pub fn unmatched_halting_condition(&mut self, cond: Predicate) {
-        warn!("Halting condition '{cond}' did not match any continuation");
+        debug!("Halting condition '{cond}' did not match any continuation");
         self.unmatched_halting_conditions.push(cond);
     }
 
     pub fn incorrect_var_write(&mut self, cont: Continuation, var_name: FullName, computed_var_value: SymOp, given_var_value: SymOp) {
-        warn!("Incorrect var-set:");
-        warn!("      Path: {}", &cont.get_function_path());
-        warn!("   Formula: {}", &cont.final_formula);
-        warn!("  Variable: {var_name}");
-        warn!("  Expected: {computed_var_value}");
-        warn!("     Given: {given_var_value}");
+        debug!("Incorrect var-set:");
+        debug!("      Path: {}", &cont.get_function_path());
+        debug!("   Formula: {}", &cont.final_formula);
+        debug!("  Variable: {var_name}");
+        debug!("  Expected: {computed_var_value}");
+        debug!("     Given: {given_var_value}");
         self.incorrect_var_writes.push((cont, var_name, computed_var_value, given_var_value));
     }
 
     pub fn missing_var_write(&mut self, cont: Continuation, var_name: FullName) {
-        warn!("Missing var-set:");
-        warn!("      Path: {}", &cont.get_function_path());
-        warn!("   Formula: {}", &cont.final_formula);
-        warn!("  Variable: {var_name}");
+        debug!("Missing var-set:");
+        debug!("      Path: {}", &cont.get_function_path());
+        debug!("   Formula: {}", &cont.final_formula);
+        debug!("  Variable: {var_name}");
         self.missing_var_writes.push((cont, var_name));
     }
 
     pub fn unmatched_var_write(&mut self, var_name: FullName, value: SymOp) {
-        warn!("Unmatched given var-set:");
-        warn!("  Variable: {var_name}");
-        warn!("     Given: {value}");
+        debug!("Unmatched given var-set:");
+        debug!("  Variable: {var_name}");
+        debug!("     Given: {value}");
         self.unmatched_var_writes.push((var_name, value));
     }
 
     pub fn unchecked_var_write(&mut self, cont: Continuation, var_name: FullName, computed_var_value: SymOp) {
-        warn!("Unchecked var-set:");
-        warn!("      Path: {}", &cont.get_function_path());
-        warn!("   Formula: {}", &cont.final_formula);
-        warn!("  Variable: {var_name}");
-        warn!("  Expected: {computed_var_value}");
+        debug!("Unchecked var-set:");
+        debug!("      Path: {}", &cont.get_function_path());
+        debug!("   Formula: {}", &cont.final_formula);
+        debug!("  Variable: {var_name}");
+        debug!("  Expected: {computed_var_value}");
         self.unchecked_var_writes.push((cont, var_name, computed_var_value));
     }
     
     pub fn incorrect_map_write(&mut self, cont: Continuation, map_name: FullName, map_key: SymOp, computed_map_value: SymOp, given_map_value: SymOp) {
-        warn!("Incorrect map-insert or map-set:");
-        warn!("      Path: {}", &cont.get_function_path());
-        warn!("   Formula: {}", &cont.final_formula);
-        warn!("       Map: {map_name}");
-        warn!("       Key: {map_key}");
-        warn!("  Expected: {computed_map_value}");
-        warn!("     Given: {given_map_value}");
+        debug!("Incorrect map-insert or map-set:");
+        debug!("      Path: {}", &cont.get_function_path());
+        debug!("   Formula: {}", &cont.final_formula);
+        debug!("       Map: {map_name}");
+        debug!("       Key: {map_key}");
+        debug!("  Expected: {computed_map_value}");
+        debug!("     Given: {given_map_value}");
         self.incorrect_map_writes.push((cont, map_name, map_key, computed_map_value, given_map_value));
     }
     
     pub fn missing_map_write(&mut self, cont: Continuation, map_name: FullName, map_key: SymOp) {
-        warn!("Incorrect map-insert or map-set:");
-        warn!("      Path: {}", &cont.get_function_path());
-        warn!("   Formula: {}", &cont.final_formula);
-        warn!("       Map: {map_name}");
-        warn!("       Key: {map_key}");
+        debug!("Incorrect map-insert or map-set:");
+        debug!("      Path: {}", &cont.get_function_path());
+        debug!("   Formula: {}", &cont.final_formula);
+        debug!("       Map: {map_name}");
+        debug!("       Key: {map_key}");
         self.missing_map_writes.push((cont, map_name, map_key));
     }
 
     pub fn unmatched_map_write(&mut self, map_name: FullName, map_key: SymOp, value: SymOp) {
-        warn!("Unmatched given map-insert or map-set:");
-        warn!("       Map: {map_name}");
-        warn!("       Key: {map_key}");
-        warn!("     Given: {value}");
+        debug!("Unmatched given map-insert or map-set:");
+        debug!("       Map: {map_name}");
+        debug!("       Key: {map_key}");
+        debug!("     Given: {value}");
         self.unmatched_map_writes.push((map_name, map_key, value));
     }
 
     pub fn unchecked_map_write(&mut self, cont: Continuation, map_name: FullName, map_key: SymOp, computed_map_value: SymOp) {
-        warn!("Unchecked map-insert or map-set:");
-        warn!("      Path: {}", &cont.get_function_path());
-        warn!("   Formula: {}", &cont.final_formula);
-        warn!("       Map: {map_name}");
-        warn!("       Key: {map_key}");
-        warn!("  Expected: {computed_map_value}");
+        debug!("Unchecked map-insert or map-set:");
+        debug!("      Path: {}", &cont.get_function_path());
+        debug!("   Formula: {}", &cont.final_formula);
+        debug!("       Map: {map_name}");
+        debug!("       Key: {map_key}");
+        debug!("  Expected: {computed_map_value}");
         self.unchecked_map_writes.push((cont, map_name, map_key, computed_map_value));
     }
     
     pub fn missing_map_delete(&mut self, cont: Continuation, map_name: FullName, map_key: SymOp) {
-        warn!("Missing map-delete:");
-        warn!("      Path: {}", &cont.get_function_path());
-        warn!("   Formula: {}", &cont.final_formula);
-        warn!("       Map: {map_name}");
-        warn!(" Given key: {map_key}");
+        debug!("Missing map-delete:");
+        debug!("      Path: {}", &cont.get_function_path());
+        debug!("   Formula: {}", &cont.final_formula);
+        debug!("       Map: {map_name}");
+        debug!(" Given key: {map_key}");
         self.missing_map_deletes.push((cont, map_name, map_key));
     }
 
     pub fn unmatched_map_delete(&mut self, map_name: FullName, value: SymOp) {
-        warn!("Unmatched given map-delete:");
-        warn!("       Map: {map_name}");
-        warn!("     Given: {value}");
+        debug!("Unmatched given map-delete:");
+        debug!("       Map: {map_name}");
+        debug!("     Given: {value}");
         self.unmatched_map_deletes.push((map_name, value));
     }
 
     pub fn unchecked_map_delete(&mut self, cont: Continuation, map_name: FullName, computed_map_key: SymOp) {
-        warn!("Unchecked map-delete:");
-        warn!("      Path: {}", &cont.get_function_path());
-        warn!("   Formula: {}", &cont.final_formula);
-        warn!("       Map: {map_name}");
-        warn!("  Expected: {computed_map_key}");
+        debug!("Unchecked map-delete:");
+        debug!("      Path: {}", &cont.get_function_path());
+        debug!("   Formula: {}", &cont.final_formula);
+        debug!("       Map: {map_name}");
+        debug!("  Expected: {computed_map_key}");
         self.unchecked_map_deletes.push((cont, map_name, computed_map_key));
     }
 
 
     pub fn unchecked_reachable_var_write(&mut self, pred: Predicate, name: FullName) {
-        warn!("Unchecked reachable var write {name} in condition {pred}");
+        debug!("Unchecked reachable var write {name} in condition {pred}");
         if let Some(names) = self.unchecked_reachable_var_writes.get_mut(&pred) {
             names.insert(name);
         }
@@ -322,7 +323,7 @@ impl ProofFailures {
     }
     
     pub fn unmatched_reachable_var_write(&mut self, pred: Predicate, name: FullName) {
-        warn!("Unmatched reachable var write {name} in condition {pred}");
+        debug!("Unmatched reachable var write {name} in condition {pred}");
         if let Some(names) = self.unmatched_reachable_var_writes.get_mut(&pred) {
             names.insert(name);
         }
@@ -334,7 +335,7 @@ impl ProofFailures {
     }
     
     pub fn unchecked_reachable_map_write(&mut self, pred: Predicate, name: FullName) {
-        warn!("Unchecked reachable map write {name} in condition {pred}");
+        debug!("Unchecked reachable map write {name} in condition {pred}");
         if let Some(names) = self.unchecked_reachable_map_writes.get_mut(&pred) {
             names.insert(name);
         }
@@ -346,7 +347,7 @@ impl ProofFailures {
     }
     
     pub fn unmatched_reachable_map_write(&mut self, pred: Predicate, name: FullName) {
-        warn!("Unmatched reachable map write {name} in condition {pred}");
+        debug!("Unmatched reachable map write {name} in condition {pred}");
         if let Some(names) = self.unmatched_reachable_map_writes.get_mut(&pred) {
             names.insert(name);
         }
@@ -385,81 +386,81 @@ impl ProofFailures {
             .collect();
         conts = rolled_up_conts;
 
-        debug!("Expected halting states:");
+        trace!("Expected halting states:");
         for h in halts.iter() {
-            debug!("   Condition:\n{}", &h.predicate.clone().simplify()?.as_symop().to_pretty_string(5));
-            debug!("   Formula:   {}", &h.formula.clone().simplify()?);
+            trace!("   Condition:\n{}", &h.predicate.clone().simplify()?.as_symop().to_pretty_string(5));
+            trace!("   Formula:   {}", &h.formula.clone().simplify()?);
             let mut var_names : Vec<_> = h.vars.keys().collect();
             var_names.sort();
             for var_name in var_names {
                 let var_val = h.vars.get(&var_name).expect("infallible");
-                debug!("   Var:       {}", var_val.clone().simplify()?);
+                trace!("   Var:       {}", var_val.clone().simplify()?);
             }
             for (map_name, map) in h.map_state.iter() {
-                debug!("   Map state: {map_name}");
+                trace!("   Map state: {map_name}");
                 for (key, value) in map.iter() {
-                    debug!("      key:   {key}");
-                    debug!("      value: {value}");
+                    trace!("      key:   {key}");
+                    trace!("      value: {value}");
                 }
             }
             for (map_name, map) in h.map_tombstones.iter() {
-                debug!("   Map deletes: {map_name}");
+                trace!("   Map deletes: {map_name}");
                 for key in map.iter() {
-                    debug!("      key:   {key}");
+                    trace!("      key:   {key}");
                 }
             }
             for var_name in h.reachable_var_reads.iter() {
-                debug!("   Reachable var read: {var_name}");
+                trace!("   Reachable var read: {var_name}");
             }
             for map_name in h.reachable_map_reads.iter() {
-                debug!("   Reachable map read: {map_name}");
+                trace!("   Reachable map read: {map_name}");
             }
             for var_name in h.reachable_var_writes.iter() {
-                debug!("   Reachable var write: {var_name}");
+                trace!("   Reachable var write: {var_name}");
             }
             for map_name in h.reachable_map_writes.iter() {
-                debug!("   Reachable map write: {map_name}");
+                trace!("   Reachable map write: {map_name}");
             }
         }
 
-        debug!("Computed halting states:");
+        trace!("Computed halting states:");
         for c in conts.iter() {
-            debug!("   ID:        {}", c.id);
-            debug!("   Path:      {}", &c.get_function_path());
-            debug!("   Condition:\n{}", &c.predicate.clone().simplify()?.as_symop().to_pretty_string(5));
-            debug!("   Formula:   {}", &c.final_formula.clone().simplify()?);
+            trace!("   ID:        {}", c.id);
+            trace!("   Path:      {}", &c.get_function_path());
+            trace!("   Condition:\n{}", &c.predicate.clone().simplify()?.as_symop().to_pretty_string(5));
+            trace!("   Formula:   {}", &c.final_formula.clone().simplify()?);
             let mut keys : Vec<_> = c.var_state.keys().collect();
             keys.sort();
             for k in keys.iter() {
                 let v = c.var_state.get(k).expect("unreachable");
-                debug!("   Var:       {v}");
+                trace!("   Var:       {v}");
             }
             for (map_name, map) in c.map_state.iter() {
-                debug!("   Map state: {map_name}");
+                trace!("   Map state: {map_name}");
                 for (key, value) in map.iter() {
                     let key = key.clone().simplify()?;
                     let value = value.clone().simplify()?;
-                    debug!("      key:   {key}");
-                    debug!("      value: {value}");
+                    trace!("      key:   {key}");
+                    trace!("      value: {value}");
                 }
                 for (map_name, map) in c.map_tombstones.iter() {
-                    debug!("   Map deletes: {map_name}");
+                    trace!("   Map deletes: {map_name}");
                     for key in map.iter() {
-                        debug!("      key:   {key}");
+                        trace!("      key:   {key}");
                     }
                 }
             }
             for var_name in c.reachable_var_reads.iter() {
-                debug!("   Reachable var read: {var_name}");
+                trace!("   Reachable var read: {var_name}");
             }
             for map_name in c.reachable_map_reads.iter() {
-                debug!("   Reachable map read: {map_name}");
+                trace!("   Reachable map read: {map_name}");
             }
             for var_name in c.reachable_var_writes.iter() {
-                debug!("   Reachable var write: {var_name}");
+                trace!("   Reachable var write: {var_name}");
             }
             for map_name in c.reachable_map_writes.iter() {
-                debug!("   Reachable map write: {map_name}");
+                trace!("   Reachable map write: {map_name}");
             }
         }
 
@@ -563,11 +564,11 @@ impl ProofFailures {
                     break;
                 }
                 else if logic_matches && !formula_matches {
-                    debug!("Predicate {} matches, but not final formula:\n   Computed: {:?}\n      Given: {:?}\n",
+                    trace!("Predicate {} matches, but not final formula:\n   Computed: {:?}\n      Given: {:?}\n",
                            &h.predicate.clone().to_pretty_string(1), cont.final_formula.clone().simplify()?, &h.formula);
                 }
                 else if !logic_matches && formula_matches {
-                    debug!("Final formula {} matches, but not predicate:\n   Computed: {}\n      Given: {}\n",
+                    trace!("Final formula {} matches, but not predicate:\n   Computed: {}\n      Given: {}\n",
                            &h.formula, cont.predicate.clone().simplify()?.to_pretty_string(1), &h.predicate.clone().to_pretty_string(1));
                 }
             }
@@ -600,15 +601,17 @@ impl fmt::Display for ProofFailures {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         if self.unchecked_continuations.len() > 0 {
             for cont in self.unchecked_continuations.iter() {
-                write!(f, "Unchecked continuation:\n{cont}\n")?;
+                write!(f, "Unchecked halting state:\n{cont}\n")?;
+                let halts = Halt::from(cont.clone()).to_comment_block();
+                write!(f, "Unchecked halting description:\n{halts}\n")?;
             }
-            write!(f, "\n\n")?;
+            write!(f, "\n")?;
         }
         if self.unmatched_halting_conditions.len() > 0 {
             for pred in self.unmatched_halting_conditions.iter() {
                 write!(f, "Unmatched halting condition:\n{}", pred.clone().as_symop().to_pretty_string(1))?;
             }
-            write!(f, "\n\n")?;
+            write!(f, "\n")?;
         }
         if self.incorrect_var_writes.len() > 0 {
             for (cont, var_name, computed_var_value, given_var_value) in self.incorrect_var_writes.iter() {
@@ -813,7 +816,11 @@ pub enum Error {
     /// Clairvoyance program failed to parse
     Program(ProgramError),
     /// Clairvoyance program failed to run
-    ProofFailure(ProofFailures)
+    ProofFailure(ProofFailures),
+    /// Directed to stop
+    Stopped,
+    /// Invariant failure
+    InvariantFailure(SymbolicExpression, SymOp, Vec<Continuation>)
 }
 
 impl Error {
@@ -854,6 +861,15 @@ impl fmt::Display for Error {
                 write!(f, "Clairvoyance encountered one or more errors while checking halting states:\n")?;
                 write!(f, "{failures}\n")
             },
+            Self::InvariantFailure(exp, inv, conts) => {
+                write!(f, "Clairvoyance encountered one or more errors while checking invariants against symbolic continuations:\n")?;
+                write!(f, "Current symbolic expression: {exp}\n")?;
+                write!(f, "Invariant: {inv}\n")?;
+                for cont in conts.iter() {
+                    write!(f, "Violating halting state:\n{}\n", Halt::from(cont.clone()).to_comment_block())?;
+                }
+                Ok(())
+            }
             x => {
                 write!(f, "{x:?}")
             }

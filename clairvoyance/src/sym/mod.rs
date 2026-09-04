@@ -15,7 +15,9 @@
 
 pub mod command;
 
+use std::fs;
 use std::fmt;
+use std::io;
 use std::rc::Rc;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -58,6 +60,7 @@ use clarity::vm::types::{
 use clarity_types::types::ListData;
 
 use stacks_common::consts::CHAIN_ID_MAINNET;
+use stacks_common::address::C32_ADDRESS_VERSION_MAINNET_SINGLESIG;
 use crate::core::BackingStore;
 use crate::core::Error;
 use crate::core::ast;
@@ -1669,8 +1672,8 @@ impl SymOp {
             }
         }
         
-        debug!("combine_terms: adds = {:?}", &new_adds);
-        debug!("combine_terms: subs = {:?}", &new_subs);
+        trace!("combine_terms: adds = {:?}", &new_adds);
+        trace!("combine_terms: subs = {:?}", &new_subs);
         
         if new_adds.len() == 0 && new_subs.len() == 0 {
             let adds_str = old_adds.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(" ");
@@ -1732,7 +1735,7 @@ impl SymOp {
         let mut adds = vec![];
         let mut subs = vec![];
         
-        debug!("flatten_subs original ops: {:?}", &ops);
+        trace!("flatten_subs original ops: {:?}", &ops);
         for (i, op) in ops.into_iter().enumerate() {
             match *op {
                 Self::Add(inner) => {
@@ -1773,11 +1776,11 @@ impl SymOp {
                 }
             }
         }
-        debug!("flatten_subs adds = {:?}", &adds);
-        debug!("flatten_subs subs = {:?}", &subs);
+        trace!("flatten_subs adds = {:?}", &adds);
+        trace!("flatten_subs subs = {:?}", &subs);
        
         let combined = Self::combine_terms(adds, subs)?;
-        debug!("combine_subs: combined = {:?}", &combined);
+        trace!("combine_subs: combined = {:?}", &combined);
 
         Ok(combined)
     }
@@ -1798,7 +1801,7 @@ impl SymOp {
         // (a + b - c - d - e + f + g + h)
         // (a + b + f + g + h) - (c + d + e)
         // (- (+ a b f g h) (+ c d e))
-        debug!("flatten_adds original ops: {:?}", &ops);
+        trace!("flatten_adds original ops: {:?}", &ops);
         let mut adds = vec![];
         let mut subs = vec![];
         for op in ops.into_iter() {
@@ -1828,11 +1831,11 @@ impl SymOp {
             }
         }
 
-        debug!("flatten_adds adds = {:?}", &adds);
-        debug!("flatten_adds subs = {:?}", &subs);
+        trace!("flatten_adds adds = {:?}", &adds);
+        trace!("flatten_adds subs = {:?}", &subs);
 
         let combined = Self::combine_terms(adds, subs)?;
-        debug!("combine_subs: combined = {:?}", &combined);
+        trace!("combine_subs: combined = {:?}", &combined);
 
         Ok(combined)
     }
@@ -1842,7 +1845,7 @@ impl SymOp {
         let sub = Self::Subtract(ops.clone());  // for debugging
         let flattened_op = Self::flatten_subtractions(ops)?;
 
-        debug!("{} becomes {}", &sub, &flattened_op);
+        trace!("{} becomes {}", &sub, &flattened_op);
         let Self::Subtract(mut ops) = flattened_op else {
             return Ok(flattened_op);
         };
@@ -2069,13 +2072,13 @@ impl SymOp {
             }
         }
         
-        debug!("flatten_multiply: adds = {}", &adds.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(", "));
-        debug!("flatten_multiply: subs = {}", &subs.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(", "));
+        trace!("flatten_multiply: adds = {}", &adds.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(", "));
+        trace!("flatten_multiply: subs = {}", &subs.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(", "));
 
         let mut accum_opt : Option<Box<SymOp>> = None;
         for op in adds.into_iter().chain(subs.into_iter()) {
             if let Some(accum) = accum_opt.take() {
-                debug!("flatten_multiply: accum = {}", &accum);
+                trace!("flatten_multiply: accum = {}", &accum);
 
                 let mut prod_adds = vec![];
                 let mut prod_subs = vec![];
@@ -2087,7 +2090,7 @@ impl SymOp {
                         let sign = accum_sign * op_sign;
                         let p = Self::Multiply(vec![accum_op.clone(), op]);
 
-                        debug!("flatten_multiply: prod = {}", &p);
+                        trace!("flatten_multiply: prod = {}", &p);
 
                         if sign > 0 {
                             prod_adds.push(Box::new(p));
@@ -2098,8 +2101,8 @@ impl SymOp {
                     }
                 }
         
-                debug!("flatten_multiply: prod_adds = {}", &prod_adds.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(", "));
-                debug!("flatten_multiply: prod_subs = {}", &prod_subs.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(", "));
+                trace!("flatten_multiply: prod_adds = {}", &prod_adds.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(", "));
+                trace!("flatten_multiply: prod_subs = {}", &prod_subs.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(", "));
 
                 let prod = if prod_subs.len() > 0 && prod_adds.len() > 0 {
                     Self::Subtract(vec![Box::new(SymOp::Add(prod_adds)), Box::new(SymOp::Add(prod_subs))])
@@ -2122,7 +2125,7 @@ impl SymOp {
                     return Err(Error::Bug("Unreachable -- no terms to multiply".into()));
                 };
 
-                debug!("flatten_multiply: prod = {}", &prod);
+                trace!("flatten_multiply: prod = {}", &prod);
                 accum_opt = Some(Box::new(prod));
             }
             else {
@@ -2520,13 +2523,13 @@ impl SymOp {
                     combined_eqs.insert(op_idx, vec![op.clone()]);
                 }
                 consumed.insert((op_idx, term_idx));
-                debug!("{} combined_eqs = {:?}", &_term_s, &combined_eqs);
+                trace!("{} combined_eqs = {:?}", &_term_s, &combined_eqs);
             }
             else {
                 // this term appears in more than one (is-eq ..), so put all of the other terms in
                 // each of its (is-eq ..) list into the same combined (is-eq ..) list, along with
                 // this one.
-                debug!("{} appears in terms {:?}", &_term_s, &op_idx_list);
+                trace!("{} appears in terms {:?}", &_term_s, &op_idx_list);
                 let mut combined_idx = None;
                 for (op_idx, term_idx) in op_idx_list.into_iter() {
                     if consumed.contains(&(op_idx, term_idx)) {
@@ -2552,12 +2555,12 @@ impl SymOp {
                         combined_idx = Some(op_idx);
                     }
 
-                    debug!("{} combined_eqs = {:?}", &_term_s, &combined_eqs);
+                    trace!("{} combined_eqs = {:?}", &_term_s, &combined_eqs);
                 }
             }
         }
 
-        debug!("combined_eqs = {:?}", &combined_eqs);
+        trace!("combined_eqs = {:?}", &combined_eqs);
         let combined_eqs : Vec<_> = combined_eqs
             .into_iter()
             .map(|(_, ops)| {
@@ -2576,12 +2579,12 @@ impl SymOp {
             .collect();
 
         let after_s : Vec<_> = combined_eqs.iter().map(|s| s.to_string()).collect();
-        debug!("and_flatten_equals: before:        {:?}", &before_s);
-        debug!("and_flatten_equals: combined_eqs:  {:?}", &after_s);
+        trace!("and_flatten_equals: before:        {:?}", &before_s);
+        trace!("and_flatten_equals: combined_eqs:  {:?}", &after_s);
         
         combined_terms.extend(combined_eqs.into_iter());
        
-        debug!("and_flatten_equals: combined_terms:  {:?}", &combined_terms);
+        trace!("and_flatten_equals: combined_terms:  {:?}", &combined_terms);
         Ok(combined_terms)
     }
 
@@ -2624,7 +2627,7 @@ impl SymOp {
             }
         }
 
-        debug!("and_eq_contradiction: not_terms = {:?}", &not_terms);
+        trace!("and_eq_contradiction: not_terms = {:?}", &not_terms);
 
         // map a (is-eq ..) operation in combined_terms to the set of (not (is-eq ..)) operations in combined_terms which
         // contain one of this operation's inner terms.
@@ -2661,10 +2664,10 @@ impl SymOp {
                                 // same (not (is-eq ..)) list (i.e. we have 
                                 // (and (is-eq a b ...) (not (is-eq a b ..)) ..)), so this is a
                                 // contradiction.
-                                debug!("and_eq_contradiction: contradiction detected");
-                                debug!("and_eq_contradiction: {i}: {}", combined_terms[i]);
+                                trace!("and_eq_contradiction: contradiction detected");
+                                trace!("and_eq_contradiction: {i}: {}", combined_terms[i]);
                                 for neg_op_idx in neg_set.clone().iter() {
-                                    debug!("and_eq_contradiction: {neg_op_idx}: {}", combined_terms[*neg_op_idx]);
+                                    trace!("and_eq_contradiction: {neg_op_idx}: {}", combined_terms[*neg_op_idx]);
                                 }
 
                                 return Ok(vec![Box::new(Self::Constant(Value::Bool(false)))]);
@@ -2699,7 +2702,7 @@ impl SymOp {
         //   T (x == k1)           F (x == k2)             F               F (iff k1 != k2)
         //   F (x != k1)           F (x == k2)             F               F
 
-        debug!("and_eqs_redundant: combined_terms = {:?}", &combined_terms);
+        trace!("and_eqs_redundant: combined_terms = {:?}", &combined_terms);
 
         // expand combined terms.  If we have (is-eq (a b c k1)), where k1 constant, split into
         // (and (is-eq a k1) (is-eq b k1) (is-eq c k1))
@@ -2800,11 +2803,11 @@ impl SymOp {
                 untouched.push(op);
             }
         }
-        debug!("and_eqs_redundant: expanded_eq = {:?}", &expanded_eq);
-        debug!("and_eqs_redundant: expanded_neq = {:?}", &expanded_neq);
+        trace!("and_eqs_redundant: expanded_eq = {:?}", &expanded_eq);
+        trace!("and_eqs_redundant: expanded_neq = {:?}", &expanded_neq);
 
-        debug!("and_eqs_redundant: term_eqs = {:?}", &term_eqs);
-        debug!("and_eqs_redundant: term_neqs = {:?}", &term_neqs);
+        trace!("and_eqs_redundant: term_eqs = {:?}", &term_eqs);
+        trace!("and_eqs_redundant: term_neqs = {:?}", &term_neqs);
 
         // for each (is-eq x k1), identify and drop each corresponding (not (is-eq x k2)) 
         // if k1 != k2.  If k1 == k2, then there is a contradiction and this should just return
@@ -2842,7 +2845,7 @@ impl SymOp {
                 }
 
                 // this not-equals is redundant
-                debug!("and_eqs_redundant: redundant term {neq} in {}", &combined_terms[expanded_neq[*neq].2]);
+                trace!("and_eqs_redundant: redundant term {neq} in {}", &combined_terms[expanded_neq[*neq].2]);
                 redundant_neqs.insert(*neq);
             }
         }
@@ -3120,28 +3123,28 @@ impl SymOp {
                     for neq in neqs.iter() {
                         // (and (x <= k) (not (is-eq x k))) implies x < k
                         if let Some(k) = self.leq.as_ref() && k == neq {
-                            debug!("(and (x <= k) (not (is-eq x k))) implies x < k");
+                            trace!("(and (x <= k) (not (is-eq x k))) implies x < k");
                             self.set_lesser(k.clone());
                             self.leq = None;
                             changed = true;
                         }
                         // (and (x >= k) (not (is-eq x k))) implies x > k
                         if let Some(k) = self.geq.as_ref() && k == neq {
-                            debug!("(and (x >= k) (not (is-eq x k))) implies x > k");
+                            trace!("(and (x >= k) (not (is-eq x k))) implies x > k");
                             self.set_greater(k.clone());
                             self.geq = None;
                             changed = true;
                         }
                         // (and (x < k) (not (is-eq x (- k 1)))) implies x < k - 1
                         if let Some(k1) = self.lesser.as_ref() && let Some(k2) = SymOp::value_minus_1(k1) {
-                            debug!("(and (x < k) (not (is-eq x (- k 1)))) implies x < k - 1");
+                            trace!("(and (x < k) (not (is-eq x (- k 1)))) implies x < k - 1");
                             self.set_lesser(k2);
                             neq_remove.insert(neq.clone());
                             changed = true;
                         }
                         // (and (x > k) (not (is-eq x (+ k 1))) implies x > k + 1
                         if let Some(k1) = self.greater.as_ref() && let Some(k2) = SymOp::value_plus_1(k1) {
-                            debug!("(and (x > k) (not (is-eq x (+ k 1))) implies x > k + 1");
+                            trace!("(and (x > k) (not (is-eq x (+ k 1))) implies x > k + 1");
                             self.set_greater(k2);
                             neq_remove.insert(neq.clone());
                             changed = true;
@@ -3161,22 +3164,22 @@ impl SymOp {
             fn eq_rewrite(&mut self) {
                 // (and (<= x k1) (is-eq x k2) (>= k1 k2)) implies (is-eq x k2)
                 if let Some(k1) = self.leq.as_ref() && let Some(k2) = self.eq.as_ref() && SymOp::value_geq(k1, k2).expect("unreachable -- eq_rewrite value_geq failed") {
-                    debug!("(and (<= x k1) (is-eq x k2) (<= k1 k2)) implies (is-eq x k2)");
+                    trace!("(and (<= x k1) (is-eq x k2) (<= k1 k2)) implies (is-eq x k2)");
                     self.leq = None;
                 }
                 // (and (>= x k1) (is-eq x k2) (<= k1 k2)) implies (is-eq x k2)
                 if let Some(k1) = self.geq.as_ref() && let Some(k2) = self.eq.as_ref() && SymOp::value_leq(k1, k2).expect("unreachable -- eq_rewrite value_leq failed") {
-                    debug!("(and (<= x k1) (is-eq x k2) (>= k1 k2)) implies (is-eq x k2)");
+                    trace!("(and (<= x k1) (is-eq x k2) (>= k1 k2)) implies (is-eq x k2)");
                     self.geq = None;
                 }
                 // (and (< x k1) (is-eq x k2) (k1 > k2)) implies (is-eq x k2)
                 if let Some(k1) = self.lesser.as_ref() && let Some(k2) = self.eq.as_ref() && SymOp::value_greater(k1, k2).expect("unreachable -- eq_rewrite value_greater failed") {
-                    debug!("(and (< x k1) (is-eq x k2) (k1 > k2)) implies (is-eq x k2)");
+                    trace!("(and (< x k1) (is-eq x k2) (k1 > k2)) implies (is-eq x k2)");
                     self.lesser = None;
                 }
                 // (and (> x k1) (is-eq x k2) (k1 < k2)) implies (is-eq x k2)
                 if let Some(k1) = self.greater.as_ref() && let Some(k2) = self.eq.as_ref() && SymOp::value_lesser(k1, k2).expect("unreachable -- eq_rewrite value_lesser failed") {
-                    debug!("(and (> x k1) (is-eq x k2) (k1 < k2)) implies (is-eq x k2)");
+                    trace!("(and (> x k1) (is-eq x k2) (k1 < k2)) implies (is-eq x k2)");
                     self.greater = None;
                 }
             }
@@ -3184,22 +3187,22 @@ impl SymOp {
             fn ineq_rewrite(&mut self) {
                 // (and (< x k1) (<= x k2) (k1 < k2)) implies (< x k1)
                 if let Some(k1) = self.lesser.as_ref() && let Some(k2) = self.leq.as_ref() && SymOp::value_lesser(k1, k2).expect("unreachable -- ineq_rewrite value_lesser failed") {
-                    debug!("(and (< x k1) (<= x k2) (k1 < k2)) implies (< x k1)");
+                    trace!("(and (< x k1) (<= x k2) (k1 < k2)) implies (< x k1)");
                     self.leq = None;
                 }
                 // (and (<= x k1) (< x k2) (k1 < k2)) implies (<= x k1)
                 if let Some(k1) = self.leq.as_ref() && let Some(k2) = self.lesser.as_ref() && SymOp::value_lesser(k1, k2).expect("unreachable -- ineq_rewrite value_lesser(2) failed") {
-                    debug!("(and (<= x k1) (< x k2) (k1 < k2)) implies (<= x k1)");
+                    trace!("(and (<= x k1) (< x k2) (k1 < k2)) implies (<= x k1)");
                     self.lesser = None;
                 }
                 // (and (> x k1) (>= x k2) (k1 > k2)) implies (> x k1)
                 if let Some(k1) = self.greater.as_ref() && let Some(k2) = self.geq.as_ref() && SymOp::value_greater(k1, k2).expect("unreachable -- ineq_rewrite value-greater failed") {
-                    debug!("(and (> x k1) (>= x k2) (k1 > k2)) implies (> x k1)");
+                    trace!("(and (> x k1) (>= x k2) (k1 > k2)) implies (> x k1)");
                     self.geq = None;
                 }
                 // (and (>= x k1) (> x k2) (k1 > k2)) implies (>= x k1)
                 if let Some(k1) = self.geq.as_ref() && let Some(k2) = self.greater.as_ref() && SymOp::value_greater(k1, k2).expect("unreachable -- ineq_rewrite value-greater(2) failed") {
-                    debug!("(and (>= x k1) (> x k2) (k1 > k2)) implies (>= x k1)");
+                    trace!("(and (>= x k1) (> x k2) (k1 > k2)) implies (>= x k1)");
                     self.greater = None;
                 }
             }
@@ -3207,87 +3210,87 @@ impl SymOp {
             fn check_possible(&mut self) {
                 // uint: (x < k) implies k > u0
                 if let Some(k) = self.lesser.as_ref() && let Value::UInt(v) = k {
-                    debug!("uint: (x < k) implies k > u0");
+                    trace!("uint: (x < k) implies k > u0");
                     self.possible = self.possible && *v > u128::MIN;
                 }
                 // uint: (x > k) implies k < u128::MAX
                 if let Some(k) = self.greater.as_ref() && let Value::UInt(v) = k {
-                    debug!("uint: (x > k) implies k < u128::MAX");
+                    trace!("uint: (x > k) implies k < u128::MAX");
                     self.possible = self.possible && *v < u128::MAX;
                 }
                 // int: (x < k) implies k > i128::MIN
                 if let Some(k) = self.lesser.as_ref() && let Value::Int(v) = k {
-                    debug!("int: (x < k) implies k > i128::MIN");
+                    trace!("int: (x < k) implies k > i128::MIN");
                     self.possible = self.possible && *v > i128::MIN;
                 }
                 // int: (x > k) implies k < i128::MAX
                 if let Some(k) = self.greater.as_ref() && let Value::Int(v) = k {
-                    debug!("int: (x > k) implies k < i128::MAX");
+                    trace!("int: (x > k) implies k < i128::MAX");
                     self.possible = self.possible && *v < i128::MAX;
                 }
                 // (and (< x k1) (> x k2)) implies k1 > k2 + 1
                 if let Some(k1) = self.lesser.as_ref() && let Some(k2) = self.greater.as_ref() {
-                    debug!("(and (< x k1) (> x k2)) implies k1 > k2 + 1");
+                    trace!("(and (< x k1) (> x k2)) implies k1 > k2 + 1");
                     self.possible = self.possible && SymOp::value_greater_plus_1(k1, k2).expect("unreachable -- check_possible value_greater_plus_1 failed");
                 }
                 // (and (x < k1) (>= x k2) implies k1 > k2
                 if let Some(k1) = self.lesser.as_ref() && let Some(k2) = self.geq.as_ref() {
-                    debug!("(and (x < k1) (>= x k2) implies k1 > k2");
+                    trace!("(and (x < k1) (>= x k2) implies k1 > k2");
                     self.possible = self.possible && SymOp::value_greater(k1, k2).expect("unreachable -- check_possible value_greater failed");
                 }
                 // (and (x <= k1) (> x k2) implies k1 > k2
                 if let Some(k1) = self.leq.as_ref() && let Some(k2) = self.greater.as_ref() {
-                    debug!("(and (x <= k1) (> x k2) implies k1 > k2");
+                    trace!("(and (x <= k1) (> x k2) implies k1 > k2");
                     self.possible = self.possible && SymOp::value_greater(k1, k2).expect("unreachable -- check_possible value_greater(2) failed");
                 }
                 // (and (x <= k1) (>= x k2) implies k1 >= k2
                 if let Some(k1) = self.leq.as_ref() && let Some(k2) = self.geq.as_ref() {
-                    debug!("(and (x <= k1) (>= x k2) implies k1 >= k2");
+                    trace!("(and (x <= k1) (>= x k2) implies k1 >= k2");
                     self.possible = self.possible && SymOp::value_geq(k1, k2).expect("unreachable -- check_possible value_geq failed");
                 }
                 // (and (< x k1) (is-eq x k2)) implies k1 > k2
                 if let Some(k1) = self.lesser.as_ref() && let Some(k2) = self.eq.as_ref() {
-                    debug!("(and (< x k1) (is-eq x k2)) implies k1 > k2");
+                    trace!("(and (< x k1) (is-eq x k2)) implies k1 > k2");
                     self.possible = self.possible && SymOp::value_greater(k1, k2).expect("unreachable -- check_possible value_greater(3) failed");
                 }
                 // (and (<= x k1) (is-eq x k2)) implies k1 >= k2
                 if let Some(k1) = self.leq.as_ref() && let Some(k2) = self.eq.as_ref() {
-                    debug!("(and (<= x k1) (is-eq x k2)) implies k1 >= k2");
+                    trace!("(and (<= x k1) (is-eq x k2)) implies k1 >= k2");
                     self.possible = self.possible && SymOp::value_geq(k1, k2).expect("unreachable -- check_possible value_geq(2) failed");
                 }
                 // (and (> x k1) (is-eq x k2)) implies k1 < k2
                 if let Some(k1) = self.greater.as_ref() && let Some(k2) = self.eq.as_ref() {
-                    debug!("(and (> x k1) (is-eq x k2)) implies k1 < k2");
+                    trace!("(and (> x k1) (is-eq x k2)) implies k1 < k2");
                     self.possible = self.possible && SymOp::value_lesser(k1, k2).expect("unreachable -- check_possible value_lesser failed");
                 }
                 // (and (>= x k1) (is-eq x k2)) implies k1 <= k2
                 if let Some(k1) = self.geq.as_ref() && let Some(k2) = self.eq.as_ref() {
-                    debug!("(and (>= x k1) (is-eq x k2)) implies k1 <= k2");
+                    trace!("(and (>= x k1) (is-eq x k2)) implies k1 <= k2");
                     self.possible = self.possible && SymOp::value_leq(k1, k2).expect("unreachable -- check_possible value_leq failed");
                 }
                 // (and (is-eq x k) (not (is-eq x k))) is impossible
                 if let Some(k) = self.eq.as_ref() && self.neq.contains(k) {
-                    debug!("(and (is-eq x k) (not (is-eq x k))) is impossible");
+                    trace!("(and (is-eq x k) (not (is-eq x k))) is impossible");
                     self.possible = false;
                 }
                 // (and (is-eq x k1) (x < k2)) implies k1 < k2
                 if let Some(k1) = self.eq.as_ref() && let Some(k2) = self.lesser.as_ref() {
-                    debug!("(and (is-eq x k1) (x < k2)) implies k1 < k2");
+                    trace!("(and (is-eq x k1) (x < k2)) implies k1 < k2");
                     self.possible = self.possible && SymOp::value_lesser(k1, k2).expect("unreachable -- check_possible value_lesser(2) failed");
                 }
                 // (and (is-eq x k1) (x > k2)) implies k1 > k2
                 if let Some(k1) = self.eq.as_ref() && let Some(k2) = self.greater.as_ref() {
-                    debug!("(and (is-eq x k1) (x > k2)) implies k1 > k2");
+                    trace!("(and (is-eq x k1) (x > k2)) implies k1 > k2");
                     self.possible = self.possible && SymOp::value_greater(k1, k2).expect("unreachable -- check_possible value_greater(4) failed");
                 }
                 // (and (is-eq x k1) (<= x k2)) implies k1 <= k2
                 if let Some(k1) = self.eq.as_ref() && let Some(k2) = self.leq.as_ref() {
-                    debug!("(and (is-eq x k1) (<= x k2)) implies k1 <= k2");
+                    trace!("(and (is-eq x k1) (<= x k2)) implies k1 <= k2");
                     self.possible = self.possible && SymOp::value_leq(k1, k2).expect("unreachable -- check_possibe value_leq(2) failed");
                 }
                 // (and (is-eq x k1) (>= x k2)) implies k1 >= k2
                 if let Some(k1) = self.eq.as_ref() && let Some(k2) = self.geq.as_ref() {
-                    debug!("(and (is-eq x k1) (>= x k2)) implies k1 >= k2");
+                    trace!("(and (is-eq x k1) (>= x k2)) implies k1 >= k2");
                     self.possible = self.possible && SymOp::value_geq(k1, k2).expect("unreachable -- check_possible value_geq(3) failed");
                 }
             }
@@ -3507,11 +3510,11 @@ impl SymOp {
 
             fn check_possible(&self) -> bool {
                 if self.is_okay && self.is_err {
-                    debug!("cons {} is both (ok ..) and (err ..)", &self.op);
+                    trace!("cons {} is both (ok ..) and (err ..)", &self.op);
                     return false;
                 }
                 if self.is_some && self.is_none {
-                    debug!("cons {} is both (some ..) and none", &self.op);
+                    trace!("cons {} is both (some ..) and none", &self.op);
                     return false;
                 }
                 true
@@ -3628,14 +3631,14 @@ impl SymOp {
             };
             let mut folded = (*first).clone();
             let Some(rest) = sets.get(1..) else {
-                debug!("Consider cons {:?}", &first);
+                trace!("Consider cons {:?}", &first);
                 if !first.check_possible() {
                     return Ok(SymOp::False());
                 }
                 continue;
             };
             for set in rest.iter() {
-                debug!("Consider cons {:?}", &set);
+                trace!("Consider cons {:?}", &set);
                 folded = folded.fold(set);
             }
             if !folded.check_possible() {
@@ -3702,8 +3705,8 @@ impl SymOp {
         let and_positive_sets : Vec<HashSet<String>> = and_positive.iter().map(|terms| terms.keys().map(|term_s| term_s.to_string()).collect::<HashSet<_>>()).collect();
         let and_negative_sets : Vec<HashSet<String>> = and_negative.iter().map(|terms| terms.keys().map(|term_s| term_s.to_string()).collect::<HashSet<_>>()).collect();
 
-        debug!("consensus_or: and_positive_sets = {and_positive_sets:?}");
-        debug!("consensus_or: and_negative_sets = {and_negative_sets:?}");
+        trace!("consensus_or: and_positive_sets = {and_positive_sets:?}");
+        trace!("consensus_or: and_negative_sets = {and_negative_sets:?}");
 
         // find terms X where both X and !X are present in different conjunctions
         let mut complements = vec![];
@@ -3744,7 +3747,7 @@ impl SymOp {
             consensus_terms.insert(yz_term.to_string());
         }
 
-        debug!("consensus_or: consensus_terms = {consensus_terms:?}");
+        trace!("consensus_or: consensus_terms = {consensus_terms:?}");
 
         let final_terms : Vec<_> = ops
             .into_iter()
@@ -3849,7 +3852,7 @@ impl SymOp {
 
     /// Fold and propagate constants in an And(..)
     fn simplify_and(ops: Vec<Box<SymOp>>) -> Result<SymOp, Error> {
-        debug!("simplify_and: ops = {ops:?}");
+        trace!("simplify_and: ops = {ops:?}");
         let mut consolidated_ops = vec![];
         for op in ops.into_iter() {
             if let Self::And(inner_ops) = *op {
@@ -3862,14 +3865,14 @@ impl SymOp {
                 consolidated_ops.push(Box::new(op.simplify()?));
             }
         }
-        debug!("simplify_and: consolidated_ops = {}", consolidated_ops.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
+        trace!("simplify_and: consolidated_ops = {}", consolidated_ops.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
       
         let consolidated_and = Self::distribute_and(consolidated_ops)?;
         let SymOp::And(consolidated_ops) = consolidated_and else {
             return Ok(consolidated_and);
         };
         
-        debug!("simplify_and: distribute_and: consolidated_ops = {}", consolidated_ops.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
+        trace!("simplify_and: distribute_and: consolidated_ops = {}", consolidated_ops.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
             
         // find contradictions with inequalities
         let consolidated_ops = match Self::and_inequality_constant_simplify(consolidated_ops)? {
@@ -3879,22 +3882,22 @@ impl SymOp {
             }
         };
         
-        debug!("simplify_and: and_inequality_constant_simplify: consolidated_ops = {}", consolidated_ops.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
+        trace!("simplify_and: and_inequality_constant_simplify: consolidated_ops = {}", consolidated_ops.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
 
         // flatten (is-eq) terms which have overlapping inner terms
         let consolidated_ops = Self::and_flatten_equals(consolidated_ops)?;
         
-        debug!("simplify_and: and_flatten_equals: consolidated_ops = {}", consolidated_ops.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
+        trace!("simplify_and: and_flatten_equals: consolidated_ops = {}", consolidated_ops.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
         
         // eliminate and-eq contradictions 
         let consolidated_ops = Self::and_equals_contradiction(consolidated_ops)?;
         
-        debug!("simplify_and: and_equals_contradiction: consolidated_ops = {}", consolidated_ops.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
+        trace!("simplify_and: and_equals_contradiction: consolidated_ops = {}", consolidated_ops.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
         
         // remove (and (is-eq x k1) (not (is-eq x k2))) redundancies (where k1 != k2)
         let consolidated_ops = Self::and_equals_redundant(consolidated_ops)?;
         
-        debug!("simplify_and: and_equals_redundant: consolidated_ops = {}", consolidated_ops.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
+        trace!("simplify_and: and_equals_redundant: consolidated_ops = {}", consolidated_ops.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
         
         // eliminate and-cons contradictions 
         let consolidated_ops = match Self::and_cons_contradiction(consolidated_ops)? {
@@ -3904,7 +3907,7 @@ impl SymOp {
             }
         };
         
-        debug!("simplify_and: and_cons_contradiction: consolidated_ops = {}", consolidated_ops.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
+        trace!("simplify_and: and_cons_contradiction: consolidated_ops = {}", consolidated_ops.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
 
         // and contradiction
         let consolidated_ops = match Self::contradiction_and(consolidated_ops)? {
@@ -3914,7 +3917,7 @@ impl SymOp {
             }
         };
 
-        debug!("simplify_and: contradiction_and: consolidated_ops = {}", consolidated_ops.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
+        trace!("simplify_and: contradiction_and: consolidated_ops = {}", consolidated_ops.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
         
         // and absorption
         let consolidated_ops = match Self::absorption_and(consolidated_ops)? {
@@ -3924,12 +3927,12 @@ impl SymOp {
             }
         };
 
-        debug!("simplify_and: aborption_and: consolidated_ops = {}", consolidated_ops.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
+        trace!("simplify_and: aborption_and: consolidated_ops = {}", consolidated_ops.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
 
         // remove pure duplicates and simplfiy
         let simplified = Self::dedup_readonly_booleans(consolidated_ops)?;
         
-        debug!("simplify_and: dedup_readonly_booleans: simplified = {simplified:?}");
+        trace!("simplify_and: dedup_readonly_booleans: simplified = {simplified:?}");
 
         // constant elimination
         let simplified = Self::simplify_assoc_variadic(
@@ -3943,7 +3946,7 @@ impl SymOp {
             return Ok(simplified);
         };
         
-        debug!("simplify_and: simplify_assoc_variadic: simplified = {simplified:?}");
+        trace!("simplify_and: simplify_assoc_variadic: simplified = {simplified:?}");
 
         // domination: False && X == False
         for op in simplified.iter() {
@@ -3955,7 +3958,7 @@ impl SymOp {
         // identity: True && X == X
         let mut simplified : Vec<_> = simplified.into_iter().filter(|s| if let Self::Constant(Value::Bool(true)) = **s { false } else { true }).collect();
         
-        debug!("simplify_and: domination: simplified = {simplified:?}");
+        trace!("simplify_and: domination: simplified = {simplified:?}");
 
         // if they were all true, then simplified would be empty
         if simplified.len() == 0 {
@@ -3963,12 +3966,12 @@ impl SymOp {
         }
         else if simplified.len() == 1 {
             // lift out
-            debug!("simplify_and: simplified = {simplified:?}");
+            trace!("simplify_and: simplified = {simplified:?}");
             let Some(inner) = simplified.pop() else { return Err(Error::Bug("unreachable -- simplify_and simplified.len() == 1 but pop failed".into())); };
             return Ok(*inner);
         }
 
-        debug!("simplify_and: simplified = {simplified:?}");
+        trace!("simplify_and: simplified = {simplified:?}");
         Ok(Self::And(simplified))
     }
 
@@ -4013,7 +4016,7 @@ impl SymOp {
     
     /// fold and propagate constants for an Or(..)
     fn simplify_or(ops: Vec<Box<SymOp>>) -> Result<SymOp, Error> {
-        debug!("simplify_or: ops = {}", ops.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(", "));
+        trace!("simplify_or: ops = {}", ops.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(", "));
         let mut consolidated_ops = vec![];
         for op in ops.into_iter() {
             if let Self::Or(inner_ops) = *op {
@@ -4027,13 +4030,13 @@ impl SymOp {
             }
         }
         
-        debug!("simplify_or: consolidated_ops = {}", consolidated_ops.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(", "));
+        trace!("simplify_or: consolidated_ops = {}", consolidated_ops.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(", "));
         
         // remove readonly duplicates and simplify
         // (i.e. if we have X || X, then replace with X)
         let consolidated_ops = Self::dedup_readonly_booleans(consolidated_ops)?;
         
-        debug!("simplify_or: dedup_readonly_booleans: consolidated_ops = {}", consolidated_ops.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(", "));
+        trace!("simplify_or: dedup_readonly_booleans: consolidated_ops = {}", consolidated_ops.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(", "));
 
         // constant elimination
         let consolidated_ops = Self::simplify_assoc_variadic(
@@ -4071,14 +4074,14 @@ impl SymOp {
             return Ok(*inner);
         }
         
-        debug!("simplify_or: and_equals_contradiction: consolidated_ops = {}", consolidated_ops.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(", "));
+        trace!("simplify_or: and_equals_contradiction: consolidated_ops = {}", consolidated_ops.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(", "));
         
         if Self::Constant(Value::Bool(false)) == Self::and_cons_contradiction(consolidated_ops.clone())? {
             // cons contradiction detected, which for (or ..) is a tautology
             return Ok(SymOp::Constant(Value::Bool(true)));
         }
         
-        debug!("simplify_or: and_cons_contradiction: consolidated_ops = {}", consolidated_ops.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(", "));
+        trace!("simplify_or: and_cons_contradiction: consolidated_ops = {}", consolidated_ops.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(", "));
 
         // absorption
         // X || (X && Y) ==> X
@@ -4087,7 +4090,7 @@ impl SymOp {
             return Ok(absorbed_or);
         };
         
-        debug!("simplify_or: absorption_or: consolidated_ops = {}", consolidated_ops.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(", "));
+        trace!("simplify_or: absorption_or: consolidated_ops = {}", consolidated_ops.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(", "));
 
         // consensus
         let consensus_or = Self::consensus_or(consolidated_ops)?;
@@ -4095,7 +4098,7 @@ impl SymOp {
             return Ok(consensus_or);
         };
         
-        debug!("simplify_or: consensus_or: consolidated_ops = {}", consolidated_ops.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(", "));
+        trace!("simplify_or: consensus_or: consolidated_ops = {}", consolidated_ops.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(", "));
 
         // if they were all false, then consolidated_ops would be empty
         if consolidated_ops.len() == 0 {
@@ -4322,10 +4325,10 @@ impl SymOp {
 
     /// Simplify a tuple get, besides a get from an option
     fn inner_simplify_tuple_get(name: ClarityName, op: SymOp) -> Result<Option<SymOp>, Error> {
-        debug!("simplify (get {name} {op})");
+        trace!("simplify (get {name} {op})");
         match op {
             Self::Constant(Value::Tuple(data)) => {
-                debug!("op is a constant tuple");
+                trace!("op is a constant tuple");
                 let v = Self::context_free_clarity_eval_mainnet(vec![
                     SymbolicExpression::atom("get".try_into()?),
                     SymbolicExpression::atom(name.clone()),
@@ -4336,7 +4339,7 @@ impl SymOp {
             }
             Self::Constant(Value::Optional(optdata)) => {
                 if let Some(value) = optdata.data && let Value::Tuple(data) = &*value {
-                    debug!("op is a constant optional tuple");
+                    trace!("op is a constant optional tuple");
                     let v = Self::context_free_clarity_eval_mainnet(vec![
                         SymbolicExpression::atom("get".try_into()?),
                         SymbolicExpression::atom(name.clone()),
@@ -4351,7 +4354,7 @@ impl SymOp {
             }
             Self::TupleCons(fields) => {
                 // lift out of fields
-                debug!("op is a tuple constructor");
+                trace!("op is a tuple constructor");
                 let Some((_name, sym)) = fields.iter().find(|(fname, _fop)| *fname == name) else {
                     return Err(Error::Bug(format!("No such tuple key {name} in {fields:?}")));
                 };
@@ -4359,7 +4362,7 @@ impl SymOp {
             }
             Self::TupleMerge(base, merged) => {
                 // lift out of merged, then base
-                debug!("op is a tuple-merge");
+                trace!("op is a tuple-merge");
                 if let Some(sym) = Self::inner_simplify_tuple_get(name.clone(), *merged)? {
                     return Ok(Some(sym));
                 };
@@ -4371,13 +4374,13 @@ impl SymOp {
             Self::ConsSome(some_inner_op) => {
                 // N.B. this cannot recurse forever since the typechecker already made sure
                 // that some_inner_op has type tuple
-                debug!("op is a some-constructor");
+                trace!("op is a some-constructor");
                 Ok(Self::inner_simplify_tuple_get(name.clone(), *some_inner_op)?
                     .map(|new_inner_op| Self::ConsSome(Box::new(new_inner_op))))
             }
             Self::LoadedDataVariable(var_name, inner_op) => match *inner_op {
                 Self::Constant(Value::Tuple(data)) => {
-                    debug!("op is a loaded data-var tuple constant");
+                    trace!("op is a loaded data-var tuple constant");
                     let v = Self::context_free_clarity_eval_mainnet(vec![
                         SymbolicExpression::atom("get".try_into()?),
                         SymbolicExpression::atom(name.clone()),
@@ -4387,7 +4390,7 @@ impl SymOp {
                     Ok(Some(Self::Constant(v)))
                 }
                 Self::TupleCons(fields) => {
-                    debug!("op is a loaded data-var tuple constructor");
+                    trace!("op is a loaded data-var tuple constructor");
                     // lift out of fields
                     let Some((_name, sym)) = fields.iter().find(|(fname, _fop)| *fname == name) else {
                         return Err(Error::Bug(format!("No such tuple key {name} in {fields:?}")));
@@ -4395,7 +4398,7 @@ impl SymOp {
                     Ok(Some(*sym.clone()))
                 }
                 Self::ConsSome(some_inner_op) => {
-                    debug!("op is a loaded data-var optional tuple");
+                    trace!("op is a loaded data-var optional tuple");
                     // N.B. this cannot recurse forever since the typechecker already made sure
                     // that some_inner_op has type tuple
                     Ok(Some(Self::inner_simplify_tuple_get(name.clone(), *some_inner_op.clone())?
@@ -4405,7 +4408,7 @@ impl SymOp {
             }
             Self::LoadedMapEntry(map_name, map_key, Some(inner_op)) => match *inner_op {
                 Self::Constant(Value::Tuple(data)) => {
-                    debug!("op is a loaded map entry tuple constant");
+                    trace!("op is a loaded map entry tuple constant");
                     let v = Self::context_free_clarity_eval_mainnet(vec![
                         SymbolicExpression::atom("get".try_into()?),
                         SymbolicExpression::atom(name.clone()),
@@ -4416,7 +4419,7 @@ impl SymOp {
                 }
                 Self::TupleCons(fields) => {
                     // lift out of fields
-                    debug!("op is a loaded map entry tuple constructor");
+                    trace!("op is a loaded map entry tuple constructor");
                     let Some((_name, sym)) = fields.iter().find(|(fname, _fop)| *fname == name) else {
                         return Err(Error::Bug(format!("No such tuple key {name} in {fields:?}")));
                     };
@@ -4536,7 +4539,7 @@ impl SymOp {
 
     /// Apply tactics to simplify a symbolic operation
     fn inner_simplify(symop: SymOp) -> Result<SymOp, Error> {
-        debug!("Simplify {:?}", &symop);
+        trace!("Simplify {:?}", &symop);
         match symop {
             Self::Constant(v) => Ok(Self::Constant(v)),
             Self::Variable(v) => Ok(Self::Variable(v)),
@@ -5347,7 +5350,7 @@ impl SymOp {
 
         let old = cur.clone();
         loop {
-            debug!("simplify: {cur}");
+            trace!("simplify: {cur}");
             let new = Self::inner_simplify(cur.clone())?;
             if new == cur {
                 break;
@@ -5356,7 +5359,7 @@ impl SymOp {
         }
 
         set_simplified(cur.clone());
-        debug!("simplified({}): {old} ==> {cur}", old == cur);
+        trace!("simplified({}): {old} ==> {cur}", old == cur);
         Ok(cur)
     }
 
@@ -5371,7 +5374,7 @@ impl SymOp {
 
     /// Bind a formula to a symbol in this symop
     pub fn bind_symbol(self, sym_id: SymId, symop: SymOp) -> Box<SymOp> {
-        debug!("Bind symbol '{sym_id}' to {symop} in {self}");
+        trace!("Bind symbol '{sym_id}' to {symop} in {self}");
         let op = match self {
             Self::Constant(v) => Self::Constant(v),
             Self::Variable(v) => {
@@ -6184,7 +6187,7 @@ impl Continuation {
         if symbex.tx_sponsor.is_some() {
             cont.tx_sponsor = symbex.tx_sponsor.clone();
         }
-        info!("Root continuation {}", cont.id);
+        debug!("Root continuation {}", cont.id);
         cont
     }
 
@@ -6220,7 +6223,7 @@ impl Continuation {
             panicking: false,
             early_return: false,
         };
-        debug!("Created continuation {} ({}) from parent {}: pred={}", cont.id, cont.function_path.as_ref().map(|s| s.as_str()).unwrap_or("unreachable"), parent_id, &cont.predicate);
+        trace!("Created continuation {} ({}) from parent {}: pred={}", cont.id, cont.function_path.as_ref().map(|s| s.as_str()).unwrap_or("unreachable"), parent_id, &cont.predicate);
         cont
     }
     
@@ -6231,7 +6234,7 @@ impl Continuation {
         let mut cont = Self::from_parent(parent, function_path, start_line);
         cont.caller = Some(parent_copy);
         cont.current_function = Some(current_function);
-        info!("Created continuation {} ({}) from caller {}", cont.id, cont.function_path.as_ref().map(|s| s.as_str()).unwrap_or("unreachable"), parent_id);
+        debug!("Created continuation {} ({}) from caller {}", cont.id, cont.function_path.as_ref().map(|s| s.as_str()).unwrap_or("unreachable"), parent_id);
         cont
     }
 
@@ -6259,7 +6262,7 @@ impl Continuation {
             None
         };
 
-        info!("Created continuation {} ({}) from callee {}", cont.id, cont.function_path.as_ref().map(|s| s.as_str()).unwrap_or("unreachable"), parent_id);
+        debug!("Created continuation {} ({}) from callee {}", cont.id, cont.function_path.as_ref().map(|s| s.as_str()).unwrap_or("unreachable"), parent_id);
         cont
     }
 
@@ -6293,7 +6296,7 @@ impl Continuation {
 
         let mut free_predicate = free.predicate.clone().as_symop();
         for (sym_id, symop) in bound_formulae.iter() {
-            debug!("Bind predicate symbol {sym_id} = {symop}");
+            trace!("Bind predicate symbol {sym_id} = {symop}");
             free_predicate = *free_predicate.bind_symbol(sym_id.clone(), symop.clone());
         }
         free_predicate = parent.bind_globals(free_predicate);
@@ -6301,7 +6304,7 @@ impl Continuation {
 
         let mut final_formula = free.final_formula.clone();
         for (sym_id, symop) in bound_formulae.iter() {
-            debug!("Bind final formula symbol {sym_id} = {symop}");
+            trace!("Bind final formula symbol {sym_id} = {symop}");
             final_formula = *final_formula.bind_symbol(sym_id.clone(), symop.clone());
         }
         final_formula = parent.bind_globals(final_formula);
@@ -6319,7 +6322,7 @@ impl Continuation {
             let mut new_val = val.clone().simplify()?;
             for (sym_id, symop) in bound_formulae.iter() {
                 let symop = symop.clone().simplify()?;
-                debug!("Bind pre-var (var-set {name}) symbol {sym_id} = {symop}");
+                trace!("Bind pre-var (var-set {name}) symbol {sym_id} = {symop}");
                 new_val = new_val.bind_symbol(sym_id.clone(), symop).simplify()?;
             }
             pre_var_state.insert(name.clone(), new_val);
@@ -6330,7 +6333,7 @@ impl Continuation {
             let mut new_val = val.clone().simplify()?;
             for (sym_id, symop) in bound_formulae.iter() {
                 let symop = symop.clone().simplify()?;
-                debug!("Bind var (var-set {name}) symbol {sym_id} = {symop}");
+                trace!("Bind var (var-set {name}) symbol {sym_id} = {symop}");
                 new_val = new_val.bind_symbol(sym_id.clone(), symop).simplify()?;
             }
             var_state.insert(name.clone(), new_val);
@@ -6342,7 +6345,7 @@ impl Continuation {
                 let mut new_key_sym = key_sym.clone();
                 for (sym_id, symop) in bound_formulae.iter() {
                     let symop = symop.clone().simplify()?;
-                    debug!("Bind (pre-map-write {map_name} {key_sym}) symbol {sym_id} = {symop}");
+                    trace!("Bind (pre-map-write {map_name} {key_sym}) symbol {sym_id} = {symop}");
                     new_key_sym = new_key_sym.bind_symbol(sym_id.clone(), symop.clone()).simplify()?;
                 }
                 new_key_sym = parent.bind_globals(new_key_sym);
@@ -6364,7 +6367,7 @@ impl Continuation {
                 let mut new_val_sym = val_sym.clone();
                 for (sym_id, symop) in bound_formulae.iter() {
                     let symop = symop.clone().simplify()?;
-                    debug!("Bind (map-write {map_name} {key_sym}) symbol {sym_id} = {symop}");
+                    trace!("Bind (map-write {map_name} {key_sym}) symbol {sym_id} = {symop}");
                     new_key_sym = new_key_sym.bind_symbol(sym_id.clone(), symop.clone()).simplify()?;
                     new_val_sym = new_val_sym.bind_symbol(sym_id.clone(), symop.clone()).simplify()?;
                 }
@@ -6387,7 +6390,7 @@ impl Continuation {
                 let mut new_key_sym = key_sym.clone();
                 for (sym_id, symop) in bound_formulae.iter() {
                     let symop = symop.clone().simplify()?;
-                    debug!("Bind (map-delete {map_name} {key_sym}) symbol {sym_id} = {symop}");
+                    trace!("Bind (map-delete {map_name} {key_sym}) symbol {sym_id} = {symop}");
                     new_key_sym = new_key_sym.bind_symbol(sym_id.clone(), symop.clone()).simplify()?;
                 }
                 new_key_sym = parent.bind_globals(new_key_sym);
@@ -6454,10 +6457,10 @@ impl Continuation {
             early_return: free.early_return || parent.early_return,
         };
 
-        info!("Created continuation {} ({}) from pre-evaluated continuation {} and parent {}", cont.id, cont.function_path.as_ref().map(|s| s.as_str()).unwrap_or("unreachable"), free.id, parent.id);
-        info!("Parent continuation\n{}", parent);
-        info!("Free continuation\n{}", free);
-        info!("Evaluated continuation\n{}", &cont);
+        debug!("Created continuation {} ({}) from pre-evaluated continuation {} and parent {}", cont.id, cont.function_path.as_ref().map(|s| s.as_str()).unwrap_or("unreachable"), free.id, parent.id);
+        debug!("Parent continuation\n{}", parent);
+        debug!("Free continuation\n{}", free);
+        debug!("Evaluated continuation\n{}", &cont);
         Ok(cont)
     }
 
@@ -6480,6 +6483,28 @@ impl Continuation {
                 return None;
             }
         }
+    }
+
+    /// Get the compressed view of all bound formulae
+    pub fn get_bound_formulae(&self) -> HashMap<SymId, SymOp> {
+        let mut cursor = self;
+        let mut queue = VecDeque::new();
+        queue.push_back(cursor);
+        while let Some(parent) = cursor.parent.as_ref() {
+            queue.push_back(parent);
+            cursor = parent;
+        }
+        
+        let mut ret = HashMap::new();
+        for ancestor in queue.into_iter() {
+            for dropped in ancestor.dropped_formulae.iter() {
+                ret.remove(dropped);
+            }
+            for (sym_id, sym_val) in ancestor.bound_formulae.iter() {
+                ret.insert(sym_id.clone(), sym_val.clone());
+            }
+        }
+        ret
     }
 
     /// Find the data var formula with the given data var name
@@ -6833,12 +6858,12 @@ impl Continuation {
                 }
             }
             let cursor = cursor_stack.pop().expect("infallible");
-            debug!("Compressing state from continuation {}", cursor.id);
+            trace!("Compressing state from continuation {}", cursor.id);
             if !end {
                 parent = cursor.parent.clone();
                 caller = cursor.caller.clone();
-                debug!("New parent of compressed continuation snapshot of {} will be {}", self.id, parent.as_ref().map(|p| format!("{}", p.id)).unwrap_or("(none)".to_string()));
-                debug!("New caller of compressed continuation snapshot of {} will be {}", self.id, caller.as_ref().map(|c| format!("{}", c.id)).unwrap_or("(none)".to_string()));
+                trace!("New parent of compressed continuation snapshot of {} will be {}", self.id, parent.as_ref().map(|p| format!("{}", p.id)).unwrap_or("(none)".to_string()));
+                trace!("New caller of compressed continuation snapshot of {} will be {}", self.id, caller.as_ref().map(|c| format!("{}", c.id)).unwrap_or("(none)".to_string()));
                 if let Some(ancestor_id) = ancestor_id {
                     assert_eq!(parent.as_ref().map(|p| p.id), Some(ancestor_id));
                 }
@@ -6868,7 +6893,7 @@ impl Continuation {
         let early_return = self.early_return || self.halted();
 
         if early_return {
-            debug!("Rolling up an early-return continuation {}", self.id);
+            trace!("Rolling up an early-return continuation {}", self.id);
         }
         
         // check that ancestor_id is actually an ancestor.
@@ -6889,7 +6914,7 @@ impl Continuation {
 
         assert!(is_ancestor, "Continuation {} does not descend from {:?}", self.id, &ancestor_id);
 
-        debug!("Roll back continunation {} to its ancestor {:?}", self.id, &ancestor_id);
+        trace!("Roll back continunation {} to its ancestor {:?}", self.id, &ancestor_id);
 
         // compute state for the rolled-up continuation
         let snapshot = self.snapshot_access_state(ancestor_id);
@@ -6944,12 +6969,12 @@ impl Continuation {
         else {
             "".to_string()
         };
-        info!("Roll up continuation {} to ancestor {:?} to create continuation {} {} {}", self.id, ancestor_id, merged.id, &bound_formulae_str, &unbound_formulae_str);
-        debug!("Continuation name: {}", merged.get_function_path());
-        debug!("Continuation:\n{}", &merged);
-        debug!("Trace:\n{}", &merged.trace());
-        debug!("Old continuation:\n{old_cont_str}");
-        debug!("Old trace:\n{old_trace}");
+        debug!("Roll up continuation {} to ancestor {:?} to create continuation {} {} {}", self.id, ancestor_id, merged.id, &bound_formulae_str, &unbound_formulae_str);
+        trace!("Continuation name: {}", merged.get_function_path());
+        trace!("Continuation:\n{}", &merged);
+        trace!("Trace:\n{}", &merged.trace());
+        trace!("Old continuation:\n{old_cont_str}");
+        trace!("Old trace:\n{old_trace}");
         merged
     }
     
@@ -7004,24 +7029,24 @@ impl Continuation {
         for accessed in reachable_map_accesses.into_iter() {
             if rolled_up.map_state.contains_key(&accessed) {
                 // this function may access a map written in this continuation
-                info!("Function {func_name} reads state from map {accessed}, which was written to by continuation {}", self.id);
+                debug!("Function {func_name} reads state from map {accessed}, which was written to by continuation {}", self.id);
                 return Ok(false);
             }
             if rolled_up.reachable_map_writes.contains(&accessed) {
                 // this function may access a map that might have been written before
-                info!("Function {func_name} reads state from map {accessed}, which may be written to by continuation {}", self.id);
+                debug!("Function {func_name} reads state from map {accessed}, which may be written to by continuation {}", self.id);
                 return Ok(false);
             }
         }
         for accessed in reachable_var_accesses.into_iter() {
             if rolled_up.var_state.contains_key(&accessed) {
                 // this function may access a var written in this continuation
-                info!("Function {func_name} reads state from data-var {accessed}, which was written to by continuation {}", self.id);
+                debug!("Function {func_name} reads state from data-var {accessed}, which was written to by continuation {}", self.id);
                 return Ok(false);
             }
             if rolled_up.reachable_var_writes.contains(&accessed) {
                 // this function may access a var that might have been written before
-                info!("Function {func_name} reads state from data-var {accessed}, which may be written to by continuation {}", self.id);
+                debug!("Function {func_name} reads state from data-var {accessed}, which may be written to by continuation {}", self.id);
                 return Ok(false);
             }
         }
@@ -7055,7 +7080,7 @@ impl Continuation {
                 if let Some(set) = evaled_map_reads.get(map_name) {
                     if set.contains(&key_sym) {
                         // this cont wrote a map entry that evaled_cont reads
-                        info!("Evaled continuation {} reads map {map_name} key {key_sym}, which continuation {} wrote", evaled_cont.id, self.id);
+                        debug!("Evaled continuation {} reads map {map_name} key {key_sym}, which continuation {} wrote", evaled_cont.id, self.id);
                         return Ok(false);
                     }
                 }
@@ -7066,7 +7091,7 @@ impl Continuation {
             let var_name = &var_access.name;
             if self.inner_lookup_data_var(var_name).is_some() {
                 // this cont write a var that evaled_cont reads
-                info!("Evaled continuation {} reads var {var_name}, which continuation {} wrote", evaled_cont.id, self.id);
+                debug!("Evaled continuation {} reads var {var_name}, which continuation {} wrote", evaled_cont.id, self.id);
                 return Ok(false);
             }
         }
@@ -7282,7 +7307,7 @@ impl Continuation {
             ..self
         };
 
-        info!("Combined continuations {} to produce {}: Joined predicates\n{}", ids.into_iter().map(|i| i.to_string()).collect::<Vec<_>>().join(","), combined.id, preds.into_iter().map(|p| p.to_string()).collect::<Vec<_>>().join("\n"));
+        debug!("Combined continuations {} to produce {}: Joined predicates\n{}", ids.into_iter().map(|i| i.to_string()).collect::<Vec<_>>().join(","), combined.id, preds.into_iter().map(|p| p.to_string()).collect::<Vec<_>>().join("\n"));
         Ok(combined)
     }
 }
@@ -7506,7 +7531,7 @@ impl Callgraph {
             let fq_name = FullName(target_contract.clone(), def_name.clone());
             reachable.insert(fq_name.clone(), node);
 
-            debug!("top-level function: {fq_name}: {func_args:?}");
+            trace!("top-level function: {fq_name}: {func_args:?}");
             frontier.insert(fq_name, (func_args, func_body.to_vec()));
             Ok(())
         })?;
@@ -7536,7 +7561,7 @@ impl Callgraph {
             let Some(node) = self.reachable.get_mut(&name) else {
                 return Err(Error::Bug(format!("unreachable -- no reachable node for {name}")));
             };
-            debug!("Function {name} is {}", if is_pure { "pure" } else { "not pure" });
+            trace!("Function {name} is {}", if is_pure { "pure" } else { "not pure" });
             node.is_pure = is_pure;
         }
 
@@ -7553,7 +7578,7 @@ impl Callgraph {
         body_list: &[SymbolicExpression]
     ) -> Result<(), Error> {
         for body in body_list.iter() {
-            debug!("build: {func_name}: visit {}", &body.expr);
+            trace!("build: {func_name}: visit {}", &body.expr);
             let Some(lv) = body.match_list() else {
                 continue;
             };
@@ -7593,7 +7618,7 @@ impl Callgraph {
 
                                 // find the default concretization 
                                 let Some(target_contract_id) = self.default_trait_concretizations.get(&trait_ref) else {
-                                    return Err(Error::NotFound(format!("No concretization for '{trait_name}'")));
+                                    return Err(Error::NotFound(format!("No concretization for '{trait_name}' in {func_name}")));
                                 };
                                 target_contract_id.clone()
                             }
@@ -7613,7 +7638,7 @@ impl Callgraph {
                             return Err(Error::Bug(format!("Unexplored function {function_base_name}")));
                         };
 
-                        debug!("function {func_name} calls {fq_name}");
+                        trace!("function {func_name} calls {fq_name}");
                         node.callable.push(CallgraphFunction::new(fq_name, body.span.start_line));
                     },
                     "map-insert"
@@ -7629,7 +7654,7 @@ impl Callgraph {
                             return Err(Error::Bug(format!("map name in {function_base_name} is not an atom")));
                         };
                         
-                        debug!("function {} mutates map {}", &func_name, map_name);
+                        trace!("function {} mutates map {}", &func_name, map_name);
                         
                         let map_full_name = FullName(target_contract.clone(), map_name.clone());
                         node.add_writable_map(map_full_name.clone());
@@ -7645,7 +7670,7 @@ impl Callgraph {
                             return Err(Error::Bug(format!("map name in {function_base_name} is not an atom")));
                         };
                         
-                        debug!("function {} accesses map {}", &func_name, map_name);
+                        trace!("function {} accesses map {}", &func_name, map_name);
                         
                         let map_full_name = FullName(target_contract.clone(), map_name.clone());
                         node.add_readable_map(map_full_name.clone());
@@ -7660,7 +7685,7 @@ impl Callgraph {
                             return Err(Error::Bug(format!("{function_base_name} missing function (not atom)")));
                         };
                         let fq_name = FullName(func_name.contract_id().clone(), called_func_name.clone());
-                        debug!("function {func_name} calls {fq_name}");
+                        trace!("function {func_name} calls {fq_name}");
                         node.callable.push(CallgraphFunction::new(fq_name, body.span.start_line));
                     }
                     "var-set" => {
@@ -7674,7 +7699,7 @@ impl Callgraph {
                             return Err(Error::Bug(format!("var name not an atom")));
                         };
                         
-                        debug!("function {} mutates var {}", &func_name, var_name);
+                        trace!("function {} mutates var {}", &func_name, var_name);
                         
                         let var_full_name = FullName(target_contract.clone(), var_name.clone());
                         node.add_writable_var(var_full_name);
@@ -7690,7 +7715,7 @@ impl Callgraph {
                             return Err(Error::Bug(format!("var name not an atom")));
                         };
                         
-                        debug!("function {} accesses var {}", &func_name, var_name);
+                        trace!("function {} accesses var {}", &func_name, var_name);
 
                         let var_full_name = FullName(target_contract.clone(), var_name.clone());
                         node.add_readable_var(var_full_name);
@@ -7705,7 +7730,7 @@ impl Callgraph {
                             let Some(node) = self.reachable.get_mut(&func_name) else {
                                 return Err(Error::Bug(format!("Unexplored function {function_base_name}")));
                             };
-                            debug!("function {func_name} calls {fq_name}");
+                            trace!("function {func_name} calls {fq_name}");
                             node.callable.push(CallgraphFunction::new(fq_name, body.span.start_line));
                         }
                         for ili in lv.iter() {
@@ -7929,6 +7954,44 @@ impl SymContract {
     }
 }
 
+/// Symbolic execution engine configuration
+#[derive(Debug, Clone)]
+pub struct SymbexConfig {
+    drop_early_returns: HashSet<FullName>,
+    skip_function_calls: HashSet<FullName>,
+    skip_contract_calls: HashSet<FullName>,
+    skip_pure_calls: bool,
+    skip_causally_independent_calls: bool,
+    combine_continuations: bool,
+    check_proofs: bool
+}
+
+impl SymbexConfig {
+    pub fn new(symbex: &Symbex) -> Self {
+        Self {
+            drop_early_returns: symbex.drop_early_returns.clone(),
+            skip_function_calls: symbex.skip_function_calls.clone(),
+            skip_contract_calls: symbex.skip_contract_calls.clone(),
+            skip_pure_calls: symbex.skip_pure_calls,
+            skip_causally_independent_calls: symbex.skip_causally_independent_calls,
+            combine_continuations: symbex.combine_continuations,
+            check_proofs: symbex.check_proofs,
+        }
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            drop_early_returns: HashSet::new(),
+            skip_function_calls: HashSet::new(),
+            skip_contract_calls: HashSet::new(),
+            skip_pure_calls: true,
+            skip_causally_independent_calls: true,
+            combine_continuations: true,
+            check_proofs: true
+        }
+    }
+}
+
 /// Symbolic execution engine
 #[derive(Debug)]
 pub struct Symbex {
@@ -7953,6 +8016,8 @@ pub struct Symbex {
     explore_function_calls: bool,
     /// option to skip evaluating specific function calls
     skip_function_calls: HashSet<FullName>,
+    /// option to skip evaluating specific contract-calls
+    skip_contract_calls: HashSet<FullName>,
     /// option to skip function calls that do not do I/O and instead treat them as symbols
     skip_pure_calls: bool,
     /// option to skip function calls that do I/O that is causally independent of the
@@ -7965,9 +8030,25 @@ pub struct Symbex {
     evaluated_functions: HashMap<FullName, Vec<Continuation>>,
     /// combine continuations that have the same halting states and final formulae
     combine_continuations: bool,
-    /// @clairvoyance program context
-    command_context: CommandContext
+    /// whether or not to abort on proof failure
+    check_proofs: bool,
 }
+
+pub fn print_continuation(cont: &Continuation) {
+    eprintln!("{cont}");
+    let trace = cont.trace();
+    eprintln!("Symbolic stack trace:\n{trace}");
+
+    let halt = format!("{}", Halt::from(cont.clone()));
+    let mut halt_strs = halt.split("\n");
+    let mut halt_with_comments = vec![];
+    while let Some(halt_str) = halt_strs.next() {
+        halt_with_comments.push(format!(";;     {halt_str}"));
+    }
+    let halts = halt_with_comments.join("\n");
+    eprintln!("Halt description:\n{halts}\n");
+}
+
 
 impl Symbex {
     /// Get a ref to a contract's typemap.
@@ -8013,14 +8094,14 @@ impl Symbex {
     /// * eliminate unreachable continuations.
     /// * if we have a chain of linear continuations, then compress them.
     /// * if multiple continuations have the same halting state, combine them (unless told not to)
-    fn reduce_continuations(&self, conts: Vec<Continuation>) -> Vec<Continuation> {
+    fn reduce_continuations(&self, config: &SymbexConfig, conts: Vec<Continuation>) -> Vec<Continuation> {
         let mut filtered_conts : Vec<_> = conts
            .into_iter()
            .map(|mut c| {
                let p = c.predicate.clone();
                match p.simplify() {
                    Ok(p) => {
-                       debug!("Continuation {} simplified predicate = {p}, old predicate = {}", c.id, &c.predicate);
+                       trace!("Continuation {} simplified predicate = {p}, old predicate = {}", c.id, &c.predicate);
                        c.predicate = p.clone();
                    }
                    Err(e) => {
@@ -8030,7 +8111,7 @@ impl Symbex {
                let f = c.final_formula.clone();
                match f.simplify() {
                    Ok(f) => {
-                       debug!("Continuation {} simplified final formula = {f}, old final formula = {}", c.id, &c.final_formula);
+                       trace!("Continuation {} simplified final formula = {f}, old final formula = {}", c.id, &c.final_formula);
                        c.final_formula = f.clone();
                    }
                    Err(e) => {
@@ -8041,17 +8122,17 @@ impl Symbex {
            })
            .filter(|c| {
                if SymOp::Panic == c.final_formula {
-                   info!("Continuation {} ({}) always panics", c.id, c.get_function_path());
-                   debug!("Continuation always panics:\n{c}");
+                   debug!("Continuation {} ({}) always panics", c.id, c.get_function_path());
+                   trace!("Continuation always panics:\n{c}");
                }
 
                if c.predicate != Predicate::False {
-                   debug!("Retain continuation {}", c.id);
+                   trace!("Retain continuation {}", c.id);
                    true
                }
                else {
-                   info!("Continuation {} ({}) is unreachable", c.id, c.get_function_path());
-                   debug!("Continuation is unreachable:\n{c}");
+                   debug!("Continuation {} ({}) is unreachable", c.id, c.get_function_path());
+                   trace!("Continuation is unreachable:\n{c}");
                    false
                }
            })
@@ -8142,7 +8223,7 @@ impl Symbex {
             }
         }
 
-        if self.combine_continuations {
+        if config.combine_continuations {
             // try to combine continuations
             let cmp_final_formulae = |f1: &SymOp, f2: &SymOp| {
                 f1 == f2
@@ -8161,7 +8242,7 @@ impl Symbex {
 
                 for (j, cont_j) in filtered_conts[(i+1)..].iter().enumerate() {
                     if cont_i.can_combine_with(cont_j, cmp_final_formulae) {
-                        info!("continuation {} ({}) can combine with continuation {} ({})", cont_i.get_function_path(), cont_i.id, cont_j.get_function_path(), cont_j.id);
+                        debug!("continuation {} ({}) can combine with continuation {} ({})", cont_i.get_function_path(), cont_i.id, cont_j.get_function_path(), cont_j.id);
                         if let Some(combined) = combineable.get_mut(&i) {
                             combined.push(i + 1 + j);
                         }
@@ -8201,14 +8282,19 @@ impl Symbex {
     
     /// Apply all (@clairvoyance ..) commands for a symbolic expression and its computed
     /// continuations
-    fn run_commands(&mut self, body: &SymbolicExpression, continuations: &[Continuation]) -> Result<(), Error> {
-        let commands = self.command_context.eval(body)?;
+    fn run_post_commands(&mut self, config: &SymbexConfig, body: &SymbolicExpression, mut original_cont: Continuation, continuations: &mut Vec<Continuation>) -> Result<(), Error> {
+        if !config.check_proofs {
+            return Ok(());
+        }
+
+        let mut command_context = CommandContext::new();
+        let commands = command_context.eval(body)?;
         if commands.len() > 0 {
-            info!("Commands on {body}:");
+            debug!("Commands on {body}:");
             for cmd in commands.iter() {
-                info!("\n{cmd}");
+                debug!("\n{cmd}");
             }
-            info!("End of commands");
+            debug!("End of commands");
         }
         else {
             return Ok(());
@@ -8217,26 +8303,252 @@ impl Symbex {
         let mut halts = vec![];
         for command in commands.into_iter() {
             match command {
-                Command::Test(..)
-                | Command::DefineSymbol(..) => {
-                    continue;
-                }
                 Command::Halt(halt) => {
                     halts.push(halt);
+                }
+                Command::DropEarlyReturns => {
+                    continuations.retain(|cont| !cont.early_return);
+                }
+                Command::SetResult(res) => {
+                    for cont in continuations.iter_mut() {
+                        cont.final_formula = res.clone();
+                    }
+                    original_cont.final_formula = res;
+                }
+                Command::Invariant(inv) => {
+                    let mut failed = vec![];
+                    for cont in continuations.iter() {
+                        // see if this continuation's predicate implies the invariant
+                        let bound_formulae = cont.get_bound_formulae();
+                        let mut rewritten_inv = inv.clone();
+                        for (sym_id, symop) in bound_formulae.into_iter() {
+                            rewritten_inv = *rewritten_inv.bind_symbol(sym_id, symop);
+                        }
+
+                        // merge predicate with statements about maps and vars
+                        let mut var_stmts = vec![];
+                        let mut map_stmts = vec![];
+                        for (var_name, var_val) in cont.var_state.iter() {
+                            var_stmts.push(Box::new(SymOp::Equals(vec![Box::new(SymOp::FetchVar(var_name.clone())), Box::new(var_val.clone())])));
+                        }
+                        for (map_name, map_state) in cont.map_state.iter() {
+                            for (key_op, val_op) in map_state.iter() {
+                                map_stmts.push(Box::new(SymOp::Equals(vec![Box::new(SymOp::FetchEntry(map_name.clone(), Box::new(key_op.clone()))), Box::new(val_op.clone())])));
+                            }
+                        }
+                        let full_predicate = SymOp::And(vec![
+                            Box::new(cont.predicate.clone().as_symop()),
+                            Box::new(SymOp::And(map_stmts)),
+                            Box::new(SymOp::And(var_stmts))
+                        ]).simplify()?;
+
+                        info!("Full predicate:\n{}", &full_predicate);
+                        info!("Invariant:\n{}", &rewritten_inv);
+
+                        let implies = SymOp::Or(vec![
+                            Box::new(SymOp::Not(Box::new(full_predicate))),
+                            Box::new(rewritten_inv)
+                        ])
+                        .simplify()?
+                        .try_as_predicate()?;
+
+                        info!("Implication:\n{}", &implies.clone().as_symop());
+
+                        if implies != Predicate::True {
+                            failed.push(cont.clone());
+                        }
+                    }
+                    if failed.len() > 0 {
+                        return Err(Error::InvariantFailure(body.clone(), inv, failed));
+                    }
+                }
+                Command::PrintProducedContinuations => {
+                    eprintln!("=========== Begin produced continuations for {body}");
+                    for (i, cont) in continuations.iter().enumerate() {
+                        if i > 0 {
+                            eprintln!("--------------------------------------------------------------");
+                        }
+                        print_continuation(cont);
+                    }
+                    eprintln!("=========== End of produced continuations for {body}");
+                }
+                _ => {
+                    continue;
                 }
             }
         }
 
+        if halts.len() == 0 {
+            // no proofs to check
+            return Ok(());
+        }
+
         let failures = ProofFailures::from_continuations_and_halts(continuations.to_vec(), halts)?;
         if !failures.is_empty() {
-            warn!("Errors were encountered while checking invariants for {}", body);
+            debug!("Errors were encountered while checking invariants for {}", body);
             return Err(Error::ProofFailure(failures));
+        }
+        else {
+            debug!("Proof checks passed on {body}");
         }
 
         Ok(())
     }
+    
+    fn make_config(&self, parent_config: &SymbexConfig) -> SymbexConfig {
+        let mut new_config = SymbexConfig::new(self);
+        new_config.drop_early_returns.extend(parent_config.drop_early_returns.clone().into_iter());
+        new_config.skip_function_calls.extend(parent_config.skip_function_calls.clone().into_iter());
+        new_config.skip_contract_calls.extend(parent_config.skip_contract_calls.clone().into_iter());
+        new_config.skip_pure_calls = parent_config.skip_pure_calls;
+        new_config.skip_causally_independent_calls = parent_config.skip_causally_independent_calls;
+        new_config.combine_continuations = parent_config.combine_continuations;
+        new_config.check_proofs = parent_config.check_proofs;
+        new_config
+    }
 
-    fn eval_variadic_native<I, F>(&mut self, continuation: Continuation, function_name: &str, args: &[SymbolicExpression], initial: I, fold: F) -> Result<Vec<Continuation>, Error> 
+    fn get_contract_call_contract(&self, continuation: &Continuation, lv: &[SymbolicExpression]) -> Result<QualifiedContractIdentifier, Error> {
+        let contract_principal = if let Some(Value::Principal(PrincipalData::Contract(contract_principal))) = lv.get(1).ok_or_else(|| Error::NotFound("No contract ID".into()))?.match_literal_value() {
+            // direct contract call
+            contract_principal.clone()
+        }
+        else if let Some(trait_name) = lv.get(1).ok_or_else(|| Error::NotFound("No contract ID".into()))?.match_atom() {
+            // call to a trait reference.
+            // look it up
+            let cur_contract = continuation.get_current_contract_id();
+            let fq_name = if let Some(cur_func) = continuation.current_function.as_ref() {
+                FullName(cur_contract.clone(), cur_func.as_str().try_into()?)
+            }
+            else {
+                FullName::root(cur_contract.clone())
+            };
+
+            let target_contract_id = if let Some(func_traits) = self.trait_concretizations.get(&fq_name) {
+                let Some(target_contract_id) = func_traits.get(trait_name) else {
+                    return Err(Error::NotFound(format!("Trait '{trait_name}' in function {fq_name} is not concretized")));
+                };
+                target_contract_id.clone()
+            }
+            else {
+                return Err(Error::NotFound(format!("Function {fq_name} has no concretized traits")));
+            };
+
+            target_contract_id
+        }
+        else {
+            return Err(Error::NotFound(format!("contract-call contract is not a literal value or an atom: {:?}", &lv.get(1))));
+        };
+        Ok(contract_principal)
+    }
+    
+    /// Apply all (@clairvoyance ..) directives for a symbolic expression on this symbolic
+    /// executor instance which apply prior to computing its continuations.
+    fn run_pre_commands(&mut self, parent_config: &SymbexConfig, continuation: &Continuation, body: &SymbolicExpression) -> Result<SymbexConfig, Error> {
+        let mut command_context = CommandContext::new();
+        let commands = command_context.eval(body)?;
+        if commands.len() > 0 {
+            debug!("Commands on {body}:");
+            for cmd in commands.iter() {
+                debug!("\n{cmd}");
+            }
+            debug!("End of commands");
+        }
+        else {
+            return Ok(parent_config.clone());
+        }
+
+        let mut config = self.make_config(parent_config);
+       
+        for command in commands.into_iter() {
+            match command {
+                Command::SkipFunctionCall(name_opt) => {
+                    let name = if let Some(name) = name_opt {
+                        name
+                    }
+                    else {
+                        let Some(lv) = body.match_list() else {
+                            return Err(Error::new_program_error(format!("`skip-function-call` without a name only applies to function call sites (in {body})")));
+                        };
+                        if lv.len() == 0 {
+                            return Err(Error::new_program_error(format!("`skip-function-call` without a name only applies to function call sites (in {body})")));
+                        }
+                        let Some(name) = lv[0].match_atom() else {
+                            return Err(Error::new_program_error(format!("`skip-function-call` without a name only applies to function call sites (in {body})")));
+                        };
+                        name.clone()
+                    };
+                    let fq_name = FullName(continuation.get_current_contract_id(), name.clone());
+                    config.skip_function_calls.insert(fq_name);
+                }
+                Command::SkipContractCall(name_opt) => {
+                    let fq_name = if let Some(fq_name) = name_opt {
+                        fq_name
+                    }
+                    else {
+                        let Some(lv) = body.match_list() else {
+                            return Err(Error::new_program_error(format!("`skip-contract-call` without a name only applies to contract-call sites (in {body})")));
+                        };
+                        if lv.len() <= 2 {
+                            return Err(Error::new_program_error(format!("`skip-contract-call` without a name only applies to contract-call sites (in {body})")));
+                        }
+                        let contract_principal = self.get_contract_call_contract(continuation, lv)?;
+                        let Some(name) = lv[2].match_atom() else {
+                            return Err(Error::new_program_error(format!("`skip-contract-call` without a name only applies to function call sites (in {body})")));
+                        };
+                        let fq_name = FullName(contract_principal, name.clone());
+                        fq_name
+                    };
+                    config.skip_contract_calls.insert(fq_name);
+                }
+                Command::ExploreAll => {
+                    config.combine_continuations = false;
+                    config.skip_pure_calls = false;
+                    config.skip_causally_independent_calls = false;
+                }
+                Command::PrintLn(expr) => {
+                    let bound_formulae = continuation.get_bound_formulae();
+                    let mut rewritten_expr = expr.clone();
+                    for (sym_id, symop) in bound_formulae.into_iter() {
+                        rewritten_expr = *rewritten_expr.bind_symbol(sym_id, symop);
+                    }
+                    let v = rewritten_expr.simplify()?;
+                    eprintln!("{v}");
+                }
+                Command::PrintContinuation => {
+                    print_continuation(&continuation);
+                }
+                Command::StopExploring => {
+                    eprintln!("Stopping symbolic execution on explicit directive");
+                    return Err(Error::Stopped);
+                }
+                Command::Pause(expr) => {
+                    eprintln!("Symbolic execution paused at line {}", expr.span.start_line);
+                    eprintln!("Current symbolic expression: {expr}");
+                    eprintln!();
+                    eprintln!("Press Return to continue");
+                    let mut s = String::new();
+                    let _ = match io::stdin().read_line(&mut s) {
+                        Ok(_x) => _x,
+                        Err(e) => match e.kind() {
+                            io::ErrorKind::UnexpectedEof => {
+                                continue;
+                            }
+                            _ => {
+                                return Err(Error::Failed(format!("I/O error: {e:?}")));
+                            }
+                        }
+                    };
+                }
+                _ => {
+                    continue;
+                }
+            }
+        }
+
+        Ok(config)
+    }
+    
+    fn eval_variadic_native<I, F>(&mut self, config: &SymbexConfig, continuation: Continuation, function_name: &str, args: &[SymbolicExpression], initial: I, fold: F) -> Result<Vec<Continuation>, Error> 
     where
         I: Fn(SymOp) -> SymOp,
         F: Fn(SymOp, SymOp) -> SymOp
@@ -8254,7 +8566,7 @@ impl Symbex {
                     }
                     let left_cont_formula = left_cont.final_formula.clone();
                     let left_cont_predicate = left_cont.predicate.clone();
-                    let mut conts = self.eval(Continuation::from_parent(Rc::new(left_cont), function_name.to_string(), symexp.span.start_line), symexp)?;
+                    let mut conts = self.eval(&config, Continuation::from_parent(Rc::new(left_cont), function_name.to_string(), symexp.span.start_line), symexp)?;
                     for cont in conts.iter_mut() {
                         if cont.halted() {
                             continue;
@@ -8267,48 +8579,48 @@ impl Symbex {
                     }
                     right_conts.extend(conts.into_iter());
                 }
-                left_conts_opt = Some(self.reduce_continuations(right_conts));
+                left_conts_opt = Some(self.reduce_continuations(config, right_conts));
             }
             else {
-                let mut conts = self.eval(Continuation::from_parent(continuation_rc.clone(), function_name.to_string(), symexp.span.start_line), symexp)?;
+                let mut conts = self.eval(config, Continuation::from_parent(continuation_rc.clone(), function_name.to_string(), symexp.span.start_line), symexp)?;
                 for cont in conts.iter_mut() {
                     if cont.halted() {
                         continue;
                     }
                     cont.final_formula = initial(cont.final_formula.clone()).simplify()?;
                 }
-                left_conts_opt = Some(self.reduce_continuations(conts));
+                left_conts_opt = Some(self.reduce_continuations(config, conts));
             }
         }
         let Some(conts) = left_conts_opt.take() else {
             return Err(Error::Bug(format!("No continuations produced from {args:?}")));
         };
-        Ok(self.reduce_continuations(conts))
+        Ok(self.reduce_continuations(config, conts))
     }
 
     /// eval_variadic_native, but where the initial constructor is an identity
-    fn eval_foldable_native<F>(&mut self, continuation: Continuation, function_name: &str, args: &[SymbolicExpression], fold: F) -> Result<Vec<Continuation>, Error> 
+    fn eval_foldable_native<F>(&mut self, config: &SymbexConfig, continuation: Continuation, function_name: &str, args: &[SymbolicExpression], fold: F) -> Result<Vec<Continuation>, Error> 
     where
         F: Fn(SymOp, SymOp) -> SymOp
     {
-        self.eval_variadic_native(continuation, function_name, args, |initial| initial, fold)
+        self.eval_variadic_native(config, continuation, function_name, args, |initial| initial, fold)
     }
 
-    fn eval_native_1arg<C>(&mut self, continuation: Continuation, function_name: &str, arg: SymbolicExpression, cons: C) -> Result<Vec<Continuation>, Error>
+    fn eval_native_1arg<C>(&mut self, config: &SymbexConfig, continuation: Continuation, function_name: &str, arg: SymbolicExpression, cons: C) -> Result<Vec<Continuation>, Error>
     where
         C: Fn(SymOp) -> SymOp
     {
-        self.eval_variadic_native(continuation, function_name, &[arg], cons, |_, _| unreachable!())
+        self.eval_variadic_native(config, continuation, function_name, &[arg], cons, |_, _| unreachable!())
     }
     
-    fn eval_native_2args<C>(&mut self, continuation: Continuation, function_name: &str, arg1: SymbolicExpression, arg2: SymbolicExpression, cons: C) -> Result<Vec<Continuation>, Error>
+    fn eval_native_2args<C>(&mut self, config: &SymbexConfig, continuation: Continuation, function_name: &str, arg1: SymbolicExpression, arg2: SymbolicExpression, cons: C) -> Result<Vec<Continuation>, Error>
     where
         C: Fn(SymOp, SymOp) -> SymOp
     {
-        self.eval_variadic_native(continuation, function_name, &[arg1, arg2], |initial| initial, cons)
+        self.eval_variadic_native(config, continuation, function_name, &[arg1, arg2], |initial| initial, cons)
     }
     
-    fn eval_native_n_args<C>(&mut self, continuation: Continuation, function_name: &str, args: &[SymbolicExpression], cons: C) -> Result<Vec<Continuation>, Error>
+    fn eval_native_n_args<C>(&mut self, config: &SymbexConfig, continuation: Continuation, function_name: &str, args: &[SymbolicExpression], cons: C) -> Result<Vec<Continuation>, Error>
     where
         C: Fn(Vec<SymOp>) -> SymOp
     {
@@ -8323,7 +8635,7 @@ impl Symbex {
                 }
 
                 let parent_rc = Rc::new(cont);
-                let new_conts = self.eval(Continuation::from_parent(parent_rc, function_name.to_string(), arg.span.start_line), arg)?;
+                let new_conts = self.eval(config, Continuation::from_parent(parent_rc, function_name.to_string(), arg.span.start_line), arg)?;
 
                 for new_cont in new_conts.into_iter() {
                     if new_cont.halted() {
@@ -8363,11 +8675,11 @@ impl Symbex {
         Ok(ret)
     }
 
-    fn eval_native_3args<C>(&mut self, continuation: Continuation, function_name: &str, arg1: SymbolicExpression, arg2: SymbolicExpression, arg3: SymbolicExpression, cons: C) -> Result<Vec<Continuation>, Error>
+    fn eval_native_3args<C>(&mut self, config: &SymbexConfig, continuation: Continuation, function_name: &str, arg1: SymbolicExpression, arg2: SymbolicExpression, arg3: SymbolicExpression, cons: C) -> Result<Vec<Continuation>, Error>
     where
         C: Fn(SymOp, SymOp, SymOp) -> SymOp
     {
-        self.eval_native_n_args(continuation, function_name, &[arg1, arg2, arg3], |mut args| {
+        self.eval_native_n_args(config, continuation, function_name, &[arg1, arg2, arg3], |mut args| {
             let arg2 = args.pop().expect("infallible");
             let arg1 = args.pop().expect("infallible");
             let arg0 = args.pop().expect("infallible");
@@ -8375,8 +8687,13 @@ impl Symbex {
         })
     }
 
-    /// Try to evaluate a causally-independent function
-    fn try_eval_causally_independent_contract_function(&mut self, function_base_name: &ClarityName, binding_cont: Continuation, arg_symbols_opt: Option<&[SymbolicExpression]>, start_line: u32) -> Result<Result<Vec<Continuation>, Continuation>, Error> {
+    /// Try to evaluate a causally-independent function.
+    /// Used both for direct function-calls, and for higher-order function calls.
+    /// In the first case, `arg_symbols_opt` should be Some(..), so the code here can bind all
+    /// arguments to symbols in `binding_cont`.
+    /// In the latter case, `arg_symbols_opt` should be None, and the caller should have already
+    /// bound all arguments to symbols prior to calling.
+    fn try_eval_causally_independent_contract_function(&mut self, config: &SymbexConfig, function_base_name: &ClarityName, binding_cont: Continuation, arg_symbols_opt: Option<&[SymbolicExpression]>, start_line: u32) -> Result<Result<Vec<Continuation>, Continuation>, Error> {
         let cur_contract = binding_cont.get_current_contract_id();
         let parent_func = binding_cont.function_path.clone().unwrap_or("".to_string());
         let function_name = format!("{parent_func}/{}", &function_base_name);
@@ -8388,15 +8705,15 @@ impl Symbex {
 
         let is_causally_independent = binding_cont.is_causally_independent(&fq_name, &self.callgraph())?;
         if !self.explore_function_calls
-            || self.skip_function_calls.contains(&fq_name)
-            || (!is_root && is_pure && self.skip_pure_calls)
-            || (!is_root && is_causally_independent && self.skip_causally_independent_calls)
+            || config.skip_function_calls.contains(&fq_name)
+            || (!is_root && is_pure && config.skip_pure_calls)
+            || (!is_root && is_causally_independent && config.skip_causally_independent_calls)
         {
-            if !is_root && is_pure && self.skip_pure_calls {
-                info!("Will not evaluate function {fq_name} from continuation {}, since it is pure", binding_cont.id);
+            if !is_root && is_pure && config.skip_pure_calls {
+                debug!("Will not evaluate function {fq_name} from continuation {}, since it is pure", binding_cont.id);
             }
-            if !is_root && is_causally_independent && self.skip_causally_independent_calls {
-                info!("Will not evaluate function {fq_name} from continuation {}, since it is causally independent", binding_cont.id);
+            if !is_root && is_causally_independent && config.skip_causally_independent_calls {
+                debug!("Will not evaluate function {fq_name} from continuation {}, since it is causally independent", binding_cont.id);
             }
 
             // skip this; treat this function call as a symbol
@@ -8418,7 +8735,7 @@ impl Symbex {
                                 next_skip_cont_set.push(vec![(skip_cont, args)]);
                                 continue;
                             }
-                            let next_conts = self.eval(Continuation::from_parent(Rc::new(skip_cont), format!("{function_name}.skipped/arg[{i}]"), arg.span.start_line), arg)?;
+                            let next_conts = self.eval(config, Continuation::from_parent(Rc::new(skip_cont), format!("{function_name}.skipped/arg[{i}]"), arg.span.start_line), arg)?;
                             let next_conts_and_args : Vec<_> = next_conts
                                 .into_iter()
                                 .map(|cont| {
@@ -8464,7 +8781,7 @@ impl Symbex {
                     final_conts.push(final_cont);
                 }
             }
-            return Ok(Ok(self.reduce_continuations(final_conts)));
+            return Ok(Ok(self.reduce_continuations(config, final_conts)));
         }
         else {
             return Ok(Err(binding_cont))
@@ -8480,7 +8797,7 @@ impl Symbex {
     /// is None, then the argument names for this function must already be bound in `binding_cont`
     /// (or this call will error out)
     /// * `start_line` is the line number of the callsite.
-    fn eval_precomputed_contract_function(&mut self, function_base_name: &ClarityName, binding_cont: Continuation, arg_symbols_opt: Option<&[SymbolicExpression]>, start_line: u32) -> Result<Vec<Continuation>, Error> {
+    fn eval_precomputed_contract_function(&mut self, config: &SymbexConfig, function_base_name: &ClarityName, binding_cont: Continuation, arg_symbols_opt: Option<&[SymbolicExpression]>, start_line: u32) -> Result<Vec<Continuation>, Error> {
         let cur_contract = binding_cont.get_current_contract_id();
         let parent_func = binding_cont.function_path.clone().unwrap_or("".to_string());
         let function_name = format!("{parent_func}/{}", &function_base_name);
@@ -8507,7 +8824,7 @@ impl Symbex {
                             final_conts.push(evaled_cont);
                             continue;
                         }
-                        let next_conts = self.eval(Continuation::from_parent(Rc::new(evaled_cont), format!("{function_name}.evaled/arg[{i}]"), arg.span.start_line), arg)?;
+                        let next_conts = self.eval(config, Continuation::from_parent(Rc::new(evaled_cont), format!("{function_name}.evaled/arg[{i}]"), arg.span.start_line), arg)?;
                         let next_conts_and_args : Vec<_> = next_conts
                             .into_iter()
                             .map(|cont| {
@@ -8562,22 +8879,22 @@ impl Symbex {
                 for cont in precomputed_conts.iter() {
                     let eval_cont = Continuation::from_evaluated(cont, format!("{function_name}.evaled"), binding_cont_rc.clone())?;
                     if eval_cont.panicking {
-                        info!("Continuation {} (id {}) panics", eval_cont.get_function_path(), eval_cont.id);
+                        debug!("Continuation {} (id {}) panics", eval_cont.get_function_path(), eval_cont.id);
                         final_conts.push(eval_cont);
                         continue;
                     }
                     if eval_cont.predicate == Predicate::False {
-                        info!("Continuation {} (id {}) is unreachable", eval_cont.get_function_path(), eval_cont.id);
+                        debug!("Continuation {} (id {}) is unreachable", eval_cont.get_function_path(), eval_cont.id);
                         continue;
                     }
 
-                    if !eval_cont.early_return && !is_root && self.skip_causally_independent_calls && binding_cont_rc.is_read_independent(&eval_cont)? && cont.is_read_only_so_far() {
-                        info!("Will not evaluate function {fq_name} in continuation {} from free continuation {}, since it is causally read-independent of binding continuation {}", eval_cont.id, cont.id, binding_cont_rc.id);
+                    if !eval_cont.early_return && !is_root && config.skip_causally_independent_calls && binding_cont_rc.is_read_independent(&eval_cont)? && cont.is_read_only_so_far() {
+                        debug!("Will not evaluate function {fq_name} in continuation {} from free continuation {}, since it is causally read-independent of binding continuation {}", eval_cont.id, cont.id, binding_cont_rc.id);
                         continue;
                     }
 
-                    if self.drop_early_returns.contains(&fq_name) && eval_cont.early_return {
-                        info!("Will not evaluate early-return continuation {} (free continuation {}) of {fq_name}", eval_cont.id, cont.id);
+                    if config.drop_early_returns.contains(&fq_name) && eval_cont.early_return {
+                        debug!("Will not evaluate early-return continuation {} (free continuation {}) of {fq_name}", eval_cont.id, cont.id);
                         continue;
                     }
 
@@ -8588,7 +8905,7 @@ impl Symbex {
                 if pushed == 0 {
                     // all continuations are read-independent of the
                     // binding continuation, so we can skip
-                    info!("All continuations of {fq_name} are read-independent of continuation {}", binding_cont_id);
+                    debug!("All continuations of {fq_name} are read-independent of continuation {}", binding_cont_id);
                     let mut final_cont = Continuation::from_parent(binding_cont_rc, format!("{function_name}.eval-skipped/return"), start_line);
                     final_cont.add_reachable_storage_accesses(&fq_name, &self.callgraph())?;
                     final_cont.final_formula = SymOp::FunctionCall(fq_name.clone(), args);
@@ -8596,16 +8913,16 @@ impl Symbex {
                 }
             }
         }
-        Ok(self.reduce_continuations(final_conts))
+        Ok(self.reduce_continuations(config, final_conts))
     }
     
     /// Call a function within a contract
-    fn eval_contract_function(&mut self, continuation: Continuation, function_base_name: &ClarityName, lv: &[SymbolicExpression], start_line: u32) -> Result<Result<Vec<Continuation>, Continuation>, Error> {
+    fn eval_contract_function(&mut self, config: &SymbexConfig, continuation: Continuation, function_base_name: &ClarityName, lv: &[SymbolicExpression], start_line: u32) -> Result<Result<Vec<Continuation>, Continuation>, Error> {
         let cur_contract = continuation.get_current_contract_id();
         let fq_name = FullName(cur_contract.clone(), function_base_name.clone());
 
         if self.contract_context(&cur_contract)?.functions.get(function_base_name).is_some() {
-            let continuation = match self.try_eval_causally_independent_contract_function(function_base_name, continuation, Some(lv), start_line) {
+            let continuation = match self.try_eval_causally_independent_contract_function(config, function_base_name, continuation, Some(lv), start_line) {
                 Ok(Ok(conts)) => {
                     return Ok(Ok(conts));
                 }
@@ -8616,28 +8933,28 @@ impl Symbex {
             };
 
             if self.evaluated_functions.get(&fq_name).is_some() {
-                let evaled_conts = self.eval_precomputed_contract_function(function_base_name, continuation, Some(lv), start_line)?;
+                let evaled_conts = self.eval_precomputed_contract_function(config, function_base_name, continuation, Some(lv), start_line)?;
                 Ok(Ok(evaled_conts))
             }
             else {
-                return self.apply_user_function(continuation, function_base_name, lv.get(1..).unwrap_or(&[]))
+                return self.apply_user_function(config, continuation, function_base_name, lv.get(1..).unwrap_or(&[]))
                     .map(|conts| Ok(conts));
             }
         }
         else {
             if function_base_name.len() > 20 {
-                info!("Not a contract function: {fq_name}");
+                debug!("Not a contract function: {fq_name}");
             }
             return Ok(Err(continuation));
         }
     }
 
     /// Call a user function in the contract as part of a map, filter, or fold
-    fn eval_shortcircuit_higher_order_contract_function(&mut self, function_base_name: &ClarityName, binding_cont: Continuation, start_line: u32) -> Result<Result<Vec<Continuation>, Continuation>, Error> {
+    fn eval_shortcircuit_higher_order_contract_function(&mut self, config: &SymbexConfig, function_base_name: &ClarityName, binding_cont: Continuation, start_line: u32) -> Result<Result<Vec<Continuation>, Continuation>, Error> {
         let cur_contract = binding_cont.get_current_contract_id();
         let fq_name = FullName(cur_contract.clone(), function_base_name.clone());
 
-        let continuation = match self.try_eval_causally_independent_contract_function(function_base_name, binding_cont, None, start_line) {
+        let continuation = match self.try_eval_causally_independent_contract_function(config, function_base_name, binding_cont, None, start_line) {
             Ok(Ok(conts)) => {
                 return Ok(Ok(conts));
             }
@@ -8648,7 +8965,7 @@ impl Symbex {
         };
 
         if self.evaluated_functions.get(&fq_name).is_some() {
-            let evaled_conts = self.eval_precomputed_contract_function(function_base_name, continuation, None, start_line)?;
+            let evaled_conts = self.eval_precomputed_contract_function(config, function_base_name, continuation, None, start_line)?;
             return Ok(Ok(evaled_conts));
         }
         else {
@@ -8682,18 +8999,20 @@ impl Symbex {
         Ok(sym_opt)
     }
 
-    pub fn eval(&mut self, mut continuation: Continuation, body: &SymbolicExpression) -> Result<Vec<Continuation>, Error> {
+    pub fn eval(&mut self, parent_config: &SymbexConfig, mut continuation: Continuation, body: &SymbolicExpression) -> Result<Vec<Continuation>, Error> {
         if continuation.halted() {
             return Ok(vec![continuation]);
         }
+        let original_continuation = continuation.clone();
+        let config = self.run_pre_commands(parent_config, &continuation, body)?;
 
-        debug!("Simplify continuation {} predicate {}", continuation.id, &continuation.predicate);
+        trace!("Simplify continuation {} predicate {}", continuation.id, &continuation.predicate);
         let pred = continuation.predicate.clone().simplify()?;
         if pred == Predicate::False {
             // this is unreachable anyway
             return Ok(vec![]);
         }
-        info!("Evaluating continuation {}\ncurrent contract: {}\n   function name: {}\n            body: {}\n       predicate: {}\n", continuation.id, &continuation.get_current_contract_id(), continuation.get_function_path(), &body.expr, &pred);
+        debug!("Evaluating continuation {}\ncurrent contract: {}\n   function name: {}\n            body: {}\n       predicate: {}\n", continuation.id, &continuation.get_current_contract_id(), continuation.get_function_path(), &body.expr, &pred);
         if continuation.id <= last_cont_id() {
             return Err(Error::Bug(format!("Tried to evaluate a continuation twice: {} (at {})", continuation.id, last_cont_id())));
         }
@@ -8712,7 +9031,7 @@ impl Symbex {
             }
             SymbolicExpressionType::List(lv) => {
                 if let Some(first) = lv.first() && let Some(function_base_name) = first.match_atom() {
-                    let conts_res = self.eval_contract_function(continuation, function_base_name, lv, body.span.start_line)?;
+                    let conts_res = self.eval_contract_function(&config, continuation, function_base_name, lv, body.span.start_line)?;
                     let conts = match conts_res {
                         Ok(conts) => conts,
                         Err(mut continuation) => {
@@ -8722,6 +9041,7 @@ impl Symbex {
                             match function_base_name.as_str() {
                                 "+" => {
                                     self.eval_foldable_native(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1..).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?,
@@ -8730,6 +9050,7 @@ impl Symbex {
                                 }
                                 "-" => {
                                     self.eval_foldable_native(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1..).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?,
@@ -8738,6 +9059,7 @@ impl Symbex {
                                 }
                                 "*" => {
                                     self.eval_foldable_native(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1..).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?,
@@ -8746,6 +9068,7 @@ impl Symbex {
                                 }
                                 "/" => {
                                     self.eval_foldable_native(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1..).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?,
@@ -8754,6 +9077,7 @@ impl Symbex {
                                 }
                                 "to-int" => {
                                     self.eval_native_1arg(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
@@ -8762,6 +9086,7 @@ impl Symbex {
                                 }
                                 "to-uint" => {
                                     self.eval_native_1arg(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
@@ -8770,6 +9095,7 @@ impl Symbex {
                                 }
                                 "mod" => {
                                     self.eval_native_2args(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing argument 1 to {function_name}")))?.clone(),
@@ -8779,6 +9105,7 @@ impl Symbex {
                                 }
                                 "pow" => {
                                     self.eval_native_2args(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing argument 1 to {function_name}")))?.clone(),
@@ -8788,6 +9115,7 @@ impl Symbex {
                                 }
                                 "sqrti" => {
                                     self.eval_native_1arg(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
@@ -8796,6 +9124,7 @@ impl Symbex {
                                 }
                                 "log2" => {
                                     self.eval_native_1arg(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
@@ -8804,6 +9133,7 @@ impl Symbex {
                                 }
                                 "and" => {
                                     self.eval_foldable_native(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1..).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?,
@@ -8812,6 +9142,7 @@ impl Symbex {
                                 }
                                 "or" => {
                                     self.eval_foldable_native(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1..).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?,
@@ -8820,6 +9151,7 @@ impl Symbex {
                                 }
                                 "not" => {
                                     self.eval_native_1arg(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
@@ -8828,6 +9160,7 @@ impl Symbex {
                                 }
                                 ">" => {
                                     self.eval_native_2args(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing argument 1 to {function_name}")))?.clone(),
@@ -8837,6 +9170,7 @@ impl Symbex {
                                 }
                                 ">=" => {
                                     self.eval_native_2args(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing argument 1 to {function_name}")))?.clone(),
@@ -8846,6 +9180,7 @@ impl Symbex {
                                 }
                                 "is-eq" => {
                                     self.eval_variadic_native(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1..).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?,
@@ -8855,6 +9190,7 @@ impl Symbex {
                                 }
                                 "<=" => {
                                     self.eval_native_2args(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing argument 1 to {function_name}")))?.clone(),
@@ -8864,6 +9200,7 @@ impl Symbex {
                                 }
                                 "<" => {
                                     self.eval_native_2args(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing argument 1 to {function_name}")))?.clone(),
@@ -8873,6 +9210,7 @@ impl Symbex {
                                 }
                                 "append" => {
                                     self.eval_native_2args(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing argument 1 to {function_name}")))?.clone(),
@@ -8882,6 +9220,7 @@ impl Symbex {
                                 }
                                 "concat" => {
                                     self.eval_foldable_native(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1..).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?,
@@ -8905,7 +9244,7 @@ impl Symbex {
                                     };
 
                                     // NOTE: `new_len_sym` is always a UInt constant
-                                    let mut len_cont = self.eval(Continuation::from_parent(Rc::new(continuation), format!("{function_name}.max-len"), new_len_sym.span.start_line), &new_len_sym)?; 
+                                    let mut len_cont = self.eval(&config, Continuation::from_parent(Rc::new(continuation), format!("{function_name}.max-len"), new_len_sym.span.start_line), &new_len_sym)?; 
                                     if len_cont.len() != 1 {
                                         return Err(Error::Bug(format!("as-max-len? length evaluation had {} continuation(s); expected 1. Symexp was {}", len_cont.len(), &new_len_sym)));
                                     }
@@ -8918,7 +9257,7 @@ impl Symbex {
                                     };
 
                                     // now we can evaluate the list
-                                    let list_conts = self.eval(Continuation::from_parent(Rc::new(len_cont), format!("{function_name}.list"), list_sym.span.start_line), &list_sym)?;
+                                    let list_conts = self.eval(&config, Continuation::from_parent(Rc::new(len_cont), format!("{function_name}.list"), list_sym.span.start_line), &list_sym)?;
 
                                     // if y is greater than or equal to the maximum length of x,
                                     // then this will always succeed
@@ -8968,6 +9307,7 @@ impl Symbex {
                                 }
                                 "len" => {
                                     self.eval_native_1arg(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
@@ -8976,6 +9316,7 @@ impl Symbex {
                                 },
                                 "element-at?" | "element-at" => {
                                     self.eval_native_2args(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing argument 1 to {function_name}")))?.clone(),
@@ -8985,6 +9326,7 @@ impl Symbex {
                                 }
                                 "index-of" | "index-of?" => {
                                     self.eval_native_2args(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing argument 1 to {function_name}")))?.clone(),
@@ -8994,6 +9336,7 @@ impl Symbex {
                                 }
                                 "buff-to-int-le" => {
                                     self.eval_native_1arg(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
@@ -9002,6 +9345,7 @@ impl Symbex {
                                 }
                                 "buff-to-uint-le" => {
                                     self.eval_native_1arg(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
@@ -9010,6 +9354,7 @@ impl Symbex {
                                 }
                                 "buff-to-int-be" => {
                                     self.eval_native_1arg(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
@@ -9018,6 +9363,7 @@ impl Symbex {
                                 }
                                 "buff-to-uint-be" => {
                                     self.eval_native_1arg(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
@@ -9026,6 +9372,7 @@ impl Symbex {
                                 }
                                 "is-standard" => {
                                     self.eval_native_1arg(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
@@ -9034,6 +9381,7 @@ impl Symbex {
                                 }
                                 "principal-destruct?" => {
                                     self.eval_native_1arg(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
@@ -9043,6 +9391,7 @@ impl Symbex {
                                 "principal-construct?" => {
                                     if lv.len() == 3 {
                                         self.eval_native_2args(
+                                            &config,
                                             continuation,
                                             function_name.as_str(),
                                             lv.get(1).ok_or_else(|| Error::Bug(format!("Missing argument 1 to {function_name}")))?.clone(),
@@ -9052,6 +9401,7 @@ impl Symbex {
                                     }
                                     else if lv.len() == 4 {
                                         self.eval_native_3args(
+                                            &config,
                                             continuation,
                                             function_name.as_str(),
                                             lv.get(1).ok_or_else(|| Error::Bug(format!("Missing argument 1 to {function_name}")))?.clone(),
@@ -9066,6 +9416,7 @@ impl Symbex {
                                 }
                                 "string-to-int?" => {
                                     self.eval_native_1arg(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
@@ -9074,6 +9425,7 @@ impl Symbex {
                                 }
                                 "string-to-uint?" => {
                                     self.eval_native_1arg(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
@@ -9082,6 +9434,7 @@ impl Symbex {
                                 }
                                 "int-to-ascii" => {
                                     self.eval_native_1arg(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
@@ -9090,6 +9443,7 @@ impl Symbex {
                                 }
                                 "int-to-utf8" => {
                                     self.eval_native_1arg(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
@@ -9105,6 +9459,7 @@ impl Symbex {
                                     }
                                     else {
                                         let conts = self.eval_variadic_native(
+                                            &config,
                                             continuation,
                                             function_name.as_str(),
                                             list_syms,
@@ -9141,7 +9496,7 @@ impl Symbex {
                                         return Err(Error::Bug(format!("Variable name '{:?}' is not an atom", &var_name_expr)));
                                     };
 
-                                    let mut conts = self.eval(Continuation::from_parent(Rc::new(continuation), format!("{function_name}.var-value"), var_val_expr.span.start_line), var_val_expr)?;
+                                    let mut conts = self.eval(&config, Continuation::from_parent(Rc::new(continuation), format!("{function_name}.var-value"), var_val_expr.span.start_line), var_val_expr)?;
                                     for cont in conts.iter_mut() {
                                         if cont.halted() {
                                             continue;
@@ -9151,7 +9506,7 @@ impl Symbex {
                                         // (var-set ..) always evals to True
                                         cont.final_formula = SymOp::True();
 
-                                        debug!("var-set cont:\n{}", &cont);
+                                        trace!("var-set cont:\n{}", &cont);
                                     }
                                     conts
                                 },
@@ -9161,7 +9516,7 @@ impl Symbex {
                                     };
                                     let key_symexp = lv.get(2).ok_or_else(|| Error::Bug("Missing key expr".into()))?;
 
-                                    let mut key_conts = self.eval(Continuation::from_parent(Rc::new(continuation), format!("{function_name}.{map_name}"), key_symexp.span.start_line), key_symexp)?;
+                                    let mut key_conts = self.eval(&config, Continuation::from_parent(Rc::new(continuation), format!("{function_name}.{map_name}"), key_symexp.span.start_line), key_symexp)?;
 
                                     for cont in key_conts.iter_mut() {
                                         if cont.halted() {
@@ -9208,7 +9563,7 @@ impl Symbex {
                                     let key_symexp = lv.get(2).ok_or_else(|| Error::Bug("Missing key expr".into()))?;
                                     let val_symexp = lv.get(3).ok_or_else(|| Error::Bug("Missing value expr".into()))?;
                                    
-                                    let key_conts = self.eval(Continuation::from_parent(Rc::new(continuation), format!("{function_name}.key"), key_symexp.span.start_line), key_symexp)?;
+                                    let key_conts = self.eval(&config, Continuation::from_parent(Rc::new(continuation), format!("{function_name}.key"), key_symexp.span.start_line), key_symexp)?;
 
                                     let mut final_conts = vec![];
                                     let mut val_cont_sets = vec![];
@@ -9220,7 +9575,7 @@ impl Symbex {
 
                                         let key_formula = cont.final_formula.clone().simplify()?;
                                         let parent_rc = Continuation::from_parent(Rc::new(cont), format!("{function_name}.value"), val_symexp.span.start_line);
-                                        let val_conts = self.eval(parent_rc, val_symexp)?;
+                                        let val_conts = self.eval(&config, parent_rc, val_symexp)?;
                                         val_cont_sets.push((key_formula, val_conts));
                                     }
 
@@ -9247,7 +9602,7 @@ impl Symbex {
                                     let key_symexp = lv.get(2).ok_or_else(|| Error::Bug("Missing key expr".into()))?;
                                     let val_symexp = lv.get(3).ok_or_else(|| Error::Bug("Missing value expr".into()))?;
                                    
-                                    let key_conts = self.eval(Continuation::from_parent(Rc::new(continuation), format!("{function_name}.key"), key_symexp.span.start_line), key_symexp)?;
+                                    let key_conts = self.eval(&config, Continuation::from_parent(Rc::new(continuation), format!("{function_name}.key"), key_symexp.span.start_line), key_symexp)?;
 
                                     let mut final_conts = vec![];
                                     let mut val_cont_sets = vec![];
@@ -9259,7 +9614,7 @@ impl Symbex {
 
                                         let key_formula = cont.final_formula.clone().simplify()?;
                                         let parent_rc = Continuation::from_parent(Rc::new(cont), format!("{function_name}.value"), val_symexp.span.start_line);
-                                        let val_conts = self.eval(parent_rc, val_symexp)?;
+                                        let val_conts = self.eval(&config, parent_rc, val_symexp)?;
                                         val_cont_sets.push((key_formula, val_conts));
                                     }
 
@@ -9311,7 +9666,7 @@ impl Symbex {
                                     };
                                     let key_symexp = lv.get(2).ok_or_else(|| Error::Bug("Missing key expr".into()))?;
 
-                                    let key_conts = self.eval(Continuation::from_parent(Rc::new(continuation), format!("{function_name}"), key_symexp.span.start_line), key_symexp)?;
+                                    let key_conts = self.eval(&config, Continuation::from_parent(Rc::new(continuation), format!("{function_name}"), key_symexp.span.start_line), key_symexp)?;
 
                                     let mut final_conts = vec![];
                                     for mut cont in key_conts.into_iter() {
@@ -9374,7 +9729,7 @@ impl Symbex {
                                                 continue;
                                             }
                                             let parent_rc = Rc::new(cont);
-                                            let next = self.eval(Continuation::from_parent(parent_rc, format!("{function_name}.tuple-item-{i}"), value_exp.span.start_line), value_exp)?;
+                                            let next = self.eval(&config, Continuation::from_parent(parent_rc, format!("{function_name}.tuple-item-{i}"), value_exp.span.start_line), value_exp)?;
 
                                             for next_cont in next.into_iter() {
                                                 let mut key_values = prev_key_values.clone();
@@ -9405,7 +9760,7 @@ impl Symbex {
                                    };
                                    let sym = lv.get(2).ok_or_else(|| Error::Bug("Missing tuple symbolic expression".into()))?;
 
-                                   let mut conts = self.eval(Continuation::from_parent(Rc::new(continuation), format!("{function_name}.tuple-get"), sym.span.start_line), sym)?;
+                                   let mut conts = self.eval(&config, Continuation::from_parent(Rc::new(continuation), format!("{function_name}.tuple-get"), sym.span.start_line), sym)?;
                                    for cont in conts.iter_mut() {
                                        if cont.halted() {
                                            continue;
@@ -9420,7 +9775,7 @@ impl Symbex {
                                    let dest_tuple = lv.get(1).ok_or_else(|| Error::Bug("Missing destination tuple".into()))?;
                                    let src_tuple = lv.get(2).ok_or_else(|| Error::Bug("Missing source tuple".into()))?;
 
-                                   let dest_conts = self.eval(Continuation::from_parent(Rc::new(continuation), format!("{function_name}.tuple-merge-dest"), dest_tuple.span.start_line), dest_tuple)?;
+                                   let dest_conts = self.eval(&config, Continuation::from_parent(Rc::new(continuation), format!("{function_name}.tuple-merge-dest"), dest_tuple.span.start_line), dest_tuple)?;
                                    let mut src_conts = vec![];
                                    for dest_cont in dest_conts.into_iter() {
                                        if dest_cont.halted() {
@@ -9431,7 +9786,7 @@ impl Symbex {
                                        let dest_formula = dest_cont.final_formula.clone();
                                        let dest_pred = dest_cont.predicate.clone();
 
-                                       let mut next_conts = self.eval(Continuation::from_parent(Rc::new(dest_cont), format!("{function_name}.tuple-merge-src"), src_tuple.span.start_line), src_tuple)?;
+                                       let mut next_conts = self.eval(&config, Continuation::from_parent(Rc::new(dest_cont), format!("{function_name}.tuple-merge-src"), src_tuple.span.start_line), src_tuple)?;
 
                                        for next_cont in next_conts.iter_mut() {
                                            if next_cont.halted() {
@@ -9451,6 +9806,7 @@ impl Symbex {
                                 }
                                 "hash160" => {
                                     self.eval_native_1arg(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
@@ -9459,6 +9815,7 @@ impl Symbex {
                                 }
                                 "sha256" => {
                                     self.eval_native_1arg(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
@@ -9467,6 +9824,7 @@ impl Symbex {
                                 }
                                 "sha512" => {
                                     self.eval_native_1arg(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
@@ -9475,6 +9833,7 @@ impl Symbex {
                                 }
                                 "sha512/256" => {
                                     self.eval_native_1arg(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
@@ -9483,6 +9842,7 @@ impl Symbex {
                                 }
                                 "keccak256" => {
                                     self.eval_native_1arg(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
@@ -9491,6 +9851,7 @@ impl Symbex {
                                 }
                                 "secp256k1-recover?" => {
                                     self.eval_native_2args(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing argument 1 to {function_name}")))?.clone(),
@@ -9500,6 +9861,7 @@ impl Symbex {
                                 }
                                 "secp256k1-verify" => {
                                     self.eval_native_3args(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing argument 1 to {function_name}")))?.clone(),
@@ -9510,6 +9872,7 @@ impl Symbex {
                                 }
                                 "contract-of" => {
                                     self.eval_native_1arg(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
@@ -9532,7 +9895,7 @@ impl Symbex {
 
                                     let query_cont = Continuation::from_parent(Rc::new(continuation), format!("{function_name}.query-value"),prop_sym.span.start_line);
 
-                                    let mut conts = self.eval(query_cont, query_sym)?;
+                                    let mut conts = self.eval(&config, query_cont, query_sym)?;
                                     for cont in conts.iter_mut() {
                                         if cont.halted() {
                                             continue;
@@ -9579,6 +9942,7 @@ impl Symbex {
                                 }
                                 "is-ok" => {
                                     self.eval_native_1arg(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
@@ -9587,6 +9951,7 @@ impl Symbex {
                                 }
                                 "is-err" => {
                                     self.eval_native_1arg(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
@@ -9595,6 +9960,7 @@ impl Symbex {
                                 }
                                 "is-some" => {
                                     self.eval_native_1arg(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
@@ -9603,6 +9969,7 @@ impl Symbex {
                                 }
                                 "is-none" => {
                                     self.eval_native_1arg(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
@@ -9622,7 +9989,7 @@ impl Symbex {
                                     let mut new_conts = vec![];
 
                                     // evaluate `x`
-                                    let cond_conts = self.eval(Continuation::from_parent(Rc::new(continuation), format!("{function_name}.cond"), cond_sym.span.start_line), &cond_sym)?;
+                                    let cond_conts = self.eval(&config, Continuation::from_parent(Rc::new(continuation), format!("{function_name}.cond"), cond_sym.span.start_line), &cond_sym)?;
 
                                     for cond_cont in cond_conts.into_iter() {
                                         if cond_cont.halted() {
@@ -9692,7 +10059,7 @@ impl Symbex {
                                     let mut new_conts = vec![];
 
                                     // evaluate `x`
-                                    let cond_conts = self.eval(Continuation::from_parent(Rc::new(continuation), format!("{function_name}.cond"), cond_sym.span.start_line), &cond_sym)?;
+                                    let cond_conts = self.eval(&config, Continuation::from_parent(Rc::new(continuation), format!("{function_name}.cond"), cond_sym.span.start_line), &cond_sym)?;
 
                                     for cond_cont in cond_conts.into_iter() {
                                         if cond_cont.halted() {
@@ -9725,6 +10092,7 @@ impl Symbex {
                                 }
                                 "err" => {
                                     self.eval_native_1arg(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
@@ -9733,6 +10101,7 @@ impl Symbex {
                                 }
                                 "ok" => {
                                     self.eval_native_1arg(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
@@ -9741,6 +10110,7 @@ impl Symbex {
                                 }
                                 "some" => {
                                     self.eval_native_1arg(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
@@ -9780,7 +10150,7 @@ impl Symbex {
                                     };
                                     let addr_cont = Continuation::from_parent(Rc::new(continuation), format!("{function_name}.address-eval"), addr_sym.span.start_line);
 
-                                    let mut conts = self.eval(addr_cont, addr_sym)?;
+                                    let mut conts = self.eval(&config, addr_cont, addr_sym)?;
                                     for cont in conts.iter_mut() {
                                         if cont.halted() {
                                             continue;
@@ -9805,6 +10175,7 @@ impl Symbex {
                                 }
                                 "bit-and" => {
                                     self.eval_foldable_native(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1..).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?,
@@ -9813,6 +10184,7 @@ impl Symbex {
                                 }
                                 "bit-or" => {
                                     self.eval_foldable_native(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1..).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?,
@@ -9821,6 +10193,7 @@ impl Symbex {
                                 }
                                 "xor" => {
                                     self.eval_native_2args(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing argument 1 to {function_name}")))?.clone(),
@@ -9830,6 +10203,7 @@ impl Symbex {
                                 }
                                 "bit-xor" => {
                                     self.eval_foldable_native(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1..).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?,
@@ -9838,6 +10212,7 @@ impl Symbex {
                                 }
                                 "bit-not" => {
                                     self.eval_native_1arg(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
@@ -9846,6 +10221,7 @@ impl Symbex {
                                 }
                                 "bit-shift-left" => {
                                     self.eval_native_2args(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing argument 1 to {function_name}")))?.clone(),
@@ -9855,6 +10231,7 @@ impl Symbex {
                                 }
                                 "bit-shift-right" => {
                                     self.eval_native_2args(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing argument 1 to {function_name}")))?.clone(),
@@ -9864,6 +10241,7 @@ impl Symbex {
                                 }
                                 "slice" | "slice?" => {
                                     self.eval_native_3args(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing argument 1 to {function_name}")))?.clone(),
@@ -9878,7 +10256,7 @@ impl Symbex {
                                     };
 
                                     let expr_cont = Continuation::from_parent(Rc::new(continuation), format!("{function_name}.expr-eval"), exp_sym.span.start_line);
-                                    let conts = self.eval(expr_cont, exp_sym)?;
+                                    let conts = self.eval(&config, expr_cont, exp_sym)?;
                                     let mut ret = vec![];
                                     for cont in conts.into_iter() {
                                         if cont.halted() {
@@ -9917,7 +10295,7 @@ impl Symbex {
                                     };
                                     
                                     let buff_cont = Continuation::from_parent(Rc::new(continuation), format!("{function_name}.buff-eval"), buf_sym.span.start_line);
-                                    let conts = self.eval(buff_cont, buf_sym)?;
+                                    let conts = self.eval(&config, buff_cont, buf_sym)?;
                                     let mut ret = vec![];
                                     for cont in conts.into_iter() {
                                         if cont.halted() {
@@ -9976,6 +10354,7 @@ impl Symbex {
                                     }
 
                                     self.eval_native_n_args(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1..).ok_or_else(|| Error::Bug(format!("Missing arguments for {function_name}")))?,
@@ -9991,6 +10370,7 @@ impl Symbex {
                                 }
                                 "get-bitcoin-tx-output?" => {
                                     self.eval_native_2args(
+                                        &config,
                                         continuation,
                                         function_name.as_str(),
                                         lv.get(1).ok_or_else(|| Error::Bug(format!("Missing argument 1 to {function_name}")))?.clone(),
@@ -10019,7 +10399,7 @@ impl Symbex {
                                     let mut new_conts = vec![];
 
                                     // evaluate `x`
-                                    let default_conts = self.eval(Continuation::from_parent(Rc::new(continuation), format!("{function_name}.default"), default_sym.span.start_line), &default_sym)?;
+                                    let default_conts = self.eval(&config, Continuation::from_parent(Rc::new(continuation), format!("{function_name}.default"), default_sym.span.start_line), &default_sym)?;
                                     for default_cont in default_conts.into_iter() {
                                         if default_cont.halted() {
                                             new_conts.push(default_cont);
@@ -10030,7 +10410,7 @@ impl Symbex {
                                         let parent_rc = Rc::new(default_cont);
 
                                         // evaluate `y` for this `x`'s continuation
-                                        let opt_conts = self.eval(Continuation::from_parent(parent_rc, format!("{function_name}.optional"), opt_sym.span.start_line), &opt_sym)?;
+                                        let opt_conts = self.eval(&config, Continuation::from_parent(parent_rc, format!("{function_name}.optional"), opt_sym.span.start_line), &opt_sym)?;
                                         for opt_cont in opt_conts.into_iter() {
                                             if opt_cont.halted() {
                                                 new_conts.push(opt_cont);
@@ -10073,7 +10453,7 @@ impl Symbex {
                                     let mut new_conts = vec![];
 
                                     // evaluate `x`
-                                    let cond_conts = self.eval(Continuation::from_parent(Rc::new(continuation), format!("{function_name}.cond-eval"), cond_sym.span.start_line), &cond_sym)?;
+                                    let cond_conts = self.eval(&config, Continuation::from_parent(Rc::new(continuation), format!("{function_name}.cond-eval"), cond_sym.span.start_line), &cond_sym)?;
                                     for cond_cont in cond_conts.into_iter() {
                                         if cond_cont.halted() {
                                             new_conts.push(cond_cont);
@@ -10104,14 +10484,14 @@ impl Symbex {
                                         // case 2: `x` is false.
                                         // evaluate `y`, and set all of its continuations as
                                         // early-return.
-                                        let err_conts = self.eval(cond_false, &err_sym)?;
+                                        let err_conts = self.eval(&config, cond_false, &err_sym)?;
                                         for mut err_cont in err_conts.into_iter() {
                                             if err_cont.halted() {
                                                 new_conts.push(err_cont);
                                                 continue;
                                             }
 
-                                            debug!("Continuation {} is early-return", err_cont.id);
+                                            trace!("Continuation {} is early-return", err_cont.id);
                                             err_cont.early_return = true;
                                             new_conts.push(err_cont);
                                         }
@@ -10136,7 +10516,7 @@ impl Symbex {
                                     let mut new_conts = vec![];
 
                                     // evaluate `x`
-                                    let cond_conts = self.eval(Continuation::from_parent(Rc::new(continuation), format!("{function_name}.cond-eval"), cond_sym.span.start_line), &cond_sym)?;
+                                    let cond_conts = self.eval(&config, Continuation::from_parent(Rc::new(continuation), format!("{function_name}.cond-eval"), cond_sym.span.start_line), &cond_sym)?;
 
                                     // evaluate `y` from each `x`
                                     for cond_cont in cond_conts.into_iter() {
@@ -10148,7 +10528,7 @@ impl Symbex {
                                         let cond_formula = cond_cont.final_formula.clone();
 
                                         let parent_rc = Rc::new(cond_cont);
-                                        let err_conts = self.eval(Continuation::from_parent(parent_rc, format!("{function_name}.err-eval"), err_sym.span.start_line), &err_sym)?;
+                                        let err_conts = self.eval(&config, Continuation::from_parent(parent_rc, format!("{function_name}.err-eval"), err_sym.span.start_line), &err_sym)?;
 
                                         for parent_cont in err_conts.into_iter() {
                                             if parent_cont.halted() {
@@ -10195,7 +10575,7 @@ impl Symbex {
                                                 }
                                             };
 
-                                            debug!("Continuation {} is early-return", err_cont.id);
+                                            trace!("Continuation {} is early-return", err_cont.id);
                                             err_cont.early_return = true;
 
                                             new_conts.push(ok_cont);
@@ -10222,7 +10602,7 @@ impl Symbex {
                                     let mut new_conts = vec![];
 
                                     // evaluate `x`
-                                    let cond_conts = self.eval(Continuation::from_parent(Rc::new(continuation), format!("{function_name}.cond-eval"), cond_sym.span.start_line), &cond_sym)?;
+                                    let cond_conts = self.eval(&config, Continuation::from_parent(Rc::new(continuation), format!("{function_name}.cond-eval"), cond_sym.span.start_line), &cond_sym)?;
 
                                     // evaluate `y` from each `x`
                                     for cond_cont in cond_conts.into_iter() {
@@ -10233,7 +10613,7 @@ impl Symbex {
                                         let cond_formula = cond_cont.final_formula.clone();
 
                                         let parent_rc = Rc::new(cond_cont);
-                                        let err_conts = self.eval(Continuation::from_parent(parent_rc, format!("{function_name}.err-eval"), err_sym.span.start_line), &err_sym)?;
+                                        let err_conts = self.eval(&config, Continuation::from_parent(parent_rc, format!("{function_name}.err-eval"), err_sym.span.start_line), &err_sym)?;
 
                                         for parent_cont in err_conts.into_iter() {
                                             if parent_cont.halted() {
@@ -10253,7 +10633,7 @@ impl Symbex {
                                             let mut err_cont = Continuation::from_parent(parent_rc.clone(), format!("{function_name}.is-ok"), err_sym.span.start_line);
                                             err_cont.predicate = cond_predicate.and(Predicate::IsOkay(cond_formula.clone()));
                                             
-                                            debug!("Continuation {} is early-return", err_cont.id);
+                                            trace!("Continuation {} is early-return", err_cont.id);
                                             err_cont.early_return = true;
 
                                             new_conts.push(is_err_cont);
@@ -10290,7 +10670,7 @@ impl Symbex {
 
                                         let mut new_conts = vec![];
 
-                                        let cond_conts = self.eval(Continuation::from_parent(Rc::new(continuation), format!("{function_name}.cond-eval"), cond_sym.span.start_line), &cond_sym)?;
+                                        let cond_conts = self.eval(&config, Continuation::from_parent(Rc::new(continuation), format!("{function_name}.cond-eval"), cond_sym.span.start_line), &cond_sym)?;
                                         for cond_cont in cond_conts.into_iter() {
                                             if cond_cont.halted() {
                                                 new_conts.push(cond_cont);
@@ -10306,7 +10686,7 @@ impl Symbex {
                                             ok_cont.predicate = parent_pred.clone().and(Predicate::IsOkay(cond_formula.clone()));
                                             ok_cont.bind_symop(&ok_sym_name.clone(), SymOp::UnwrapPanic(Box::new(cond_formula.clone())).simplify()?);
 
-                                            let mut ok_conts = self.eval(ok_cont, &cond_ok_sym)?;
+                                            let mut ok_conts = self.eval(&config, ok_cont, &cond_ok_sym)?;
                                             for ok_cont in ok_conts.iter_mut() {
                                                 ok_cont.unbind(ok_sym_name);
                                             }
@@ -10318,7 +10698,7 @@ impl Symbex {
                                             err_cont.predicate = parent_pred.clone().and(Predicate::IsErr(cond_formula.clone()));
                                             err_cont.bind_symop(&err_sym_name.clone(), SymOp::UnwrapErrPanic(Box::new(cond_formula.clone())).simplify()?);
 
-                                            let mut err_conts = self.eval(err_cont, &cond_err_sym)?;
+                                            let mut err_conts = self.eval(&config, err_cont, &cond_err_sym)?;
                                             for err_cont in err_conts.iter_mut() {
                                                 err_cont.unbind(err_sym_name);
                                             }
@@ -10347,7 +10727,7 @@ impl Symbex {
 
                                         let mut new_conts = vec![];
 
-                                        let cond_conts = self.eval(Continuation::from_parent(Rc::new(continuation), format!("{function_name}.cond"), cond_sym.span.start_line), &cond_sym)?;
+                                        let cond_conts = self.eval(&config, Continuation::from_parent(Rc::new(continuation), format!("{function_name}.cond"), cond_sym.span.start_line), &cond_sym)?;
                                         for cond_cont in cond_conts.into_iter() {
                                             if cond_cont.halted() {
                                                 new_conts.push(cond_cont);
@@ -10364,7 +10744,7 @@ impl Symbex {
                                             some_cont.predicate = parent_pred.clone().and(Predicate::IsSome(cond_formula.clone()));
                                             some_cont.bind_symop(&some_sym_name.clone(), SymOp::UnwrapPanic(Box::new(cond_formula.clone())).simplify()?);
 
-                                            let mut some_conts = self.eval(some_cont, &cond_some_sym)?;
+                                            let mut some_conts = self.eval(&config, some_cont, &cond_some_sym)?;
                                             for some_cont in some_conts.iter_mut() {
                                                 some_cont.unbind(some_sym_name);
                                             }
@@ -10375,7 +10755,7 @@ impl Symbex {
 
                                             none_cont.predicate = parent_pred.clone().and(Predicate::IsNone(cond_formula.clone()));
 
-                                            let none_conts = self.eval(none_cont, &cond_none_sym)?;
+                                            let none_conts = self.eval(&config, none_cont, &cond_none_sym)?;
                                             new_conts.extend(none_conts.into_iter());
                                         }
 
@@ -10394,7 +10774,7 @@ impl Symbex {
                                     let parent_rc = Rc::new(continuation);
 
                                     let mut new_conts = vec![];
-                                    let cond_conts = self.eval(Continuation::from_parent(parent_rc, format!("{function_name}.inner"), exp_sym.span.start_line), &exp_sym)?;
+                                    let cond_conts = self.eval(&config, Continuation::from_parent(parent_rc, format!("{function_name}.inner"), exp_sym.span.start_line), &exp_sym)?;
                                     for cond_cont in cond_conts.into_iter() {
                                         if cond_cont.halted() {
                                             new_conts.push(cond_cont);
@@ -10449,7 +10829,7 @@ impl Symbex {
                                             }
                                         };
                                             
-                                        debug!("Continuation {} is early-return", fail_cont.id);
+                                        trace!("Continuation {} is early-return", fail_cont.id);
                                         fail_cont.early_return = true;
                                         fail_cont.final_formula = fail_formula;
                                         fail_cont.predicate = fail_predicate;
@@ -10474,7 +10854,7 @@ impl Symbex {
                                     let mut final_conts = vec![];
                                     let mut ret = vec![];
 
-                                    let conts = self.eval(Continuation::from_parent(Rc::new(continuation), format!("{function_name}.sequence"), sequence.span.start_line), &sequence)?;
+                                    let conts = self.eval(&config, Continuation::from_parent(Rc::new(continuation), format!("{function_name}.sequence"), sequence.span.start_line), &sequence)?;
 
                                     // for each sequence continuation, apply the given
                                     // function on each item in the sequence.
@@ -10545,7 +10925,7 @@ impl Symbex {
                                                         binding_cont.bind_symop(&func.arguments[0], SymOp::UnwrapPanic(Box::new(SymOp::ElementAt(Box::new(seq_formula.clone()), Box::new(SymOp::Constant(Value::UInt(seq_i - 1)))))).simplify()?);
 
                                                         let callee_cont = Continuation::from_caller(Rc::new(binding_cont), format!("{function_name}/{func_name}.seq-{seq_i}.body"), func_name.to_string(), func.body.span.start_line);
-                                                        let body_conts = self.eval(callee_cont, &func.body)?;
+                                                        let body_conts = self.eval(&config, callee_cont, &func.body)?;
 
                                                         let mut return_conts = vec![];
                                                         for cont in body_conts.into_iter() {
@@ -10639,6 +11019,7 @@ impl Symbex {
                                 }
                                 "if" => {
                                     self.eval_if(
+                                        &config,
                                         continuation,
                                         lv.get(1).ok_or_else(|| Error::Bug("Missing if-predicate".into()))?.clone(),
                                         lv.get(2).ok_or_else(|| Error::Bug("Missing if-true branch".into()))?.clone(),
@@ -10646,7 +11027,7 @@ impl Symbex {
                                     )?
                                 }
                                 "let" => {
-                                    self.let_bind(continuation, lv.get(1..).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?)?
+                                    self.let_bind(&config, continuation, lv.get(1..).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?)?
                                 },
                                 "map" => {
                                     // When evaluating `(map func sequence-1 sequence-2 ... sequence-n)`,
@@ -10688,7 +11069,7 @@ impl Symbex {
                                                 continue;
                                             }
 
-                                            let conts = self.eval(Continuation::from_parent(Rc::new(last_cont), format!("{function_name}.seq-{i}"), seq.span.start_line), seq)?;
+                                            let conts = self.eval(&config, Continuation::from_parent(Rc::new(last_cont), format!("{function_name}.seq-{i}"), seq.span.start_line), seq)?;
                                             next_conts.extend(conts.into_iter());
                                         }
                                         sequence_conts.push(next_conts.clone());
@@ -10880,7 +11261,7 @@ impl Symbex {
                                                         }
 
                                                         let callee_cont = Continuation::from_caller(Rc::new(binding_cont), format!("{function_name}/{func_name}.seq-{seq_i}.body"), func_name.to_string(), func.body.span.start_line);
-                                                        let conts = self.eval(callee_cont, &func.body)?;
+                                                        let conts = self.eval(&config, callee_cont, &func.body)?;
 
                                                         let conts : Vec<_> = conts
                                                             .into_iter()
@@ -10973,7 +11354,7 @@ impl Symbex {
                                     };
 
                                     let mut ret = vec![];
-                                    let conts = self.eval(Continuation::from_parent(Rc::new(continuation), format!("{function_name}.sequence"), sequence.span.start_line), &sequence)?;
+                                    let conts = self.eval(&config, Continuation::from_parent(Rc::new(continuation), format!("{function_name}.sequence"), sequence.span.start_line), &sequence)?;
 
                                     let mut initial_conts = vec![];
                                     for cont in conts.into_iter() {
@@ -10982,7 +11363,7 @@ impl Symbex {
                                             continue;
                                         }
                                         let seq_formula = cont.final_formula.clone().simplify()?;
-                                        let initial_value_conts = self.eval(Continuation::from_parent(Rc::new(cont), format!("{function_name}.initial"), initial_value.span.start_line), &initial_value)?;
+                                        let initial_value_conts = self.eval(&config, Continuation::from_parent(Rc::new(cont), format!("{function_name}.initial"), initial_value.span.start_line), &initial_value)?;
                                         initial_conts.push((seq_formula, initial_value_conts));
                                     }
 
@@ -11035,7 +11416,7 @@ impl Symbex {
                                                         binding_cont.bind_symop(&func.arguments[0], SymOp::UnwrapPanic(Box::new(SymOp::ElementAt(Box::new(seq_formula.clone()), Box::new(SymOp::Constant(Value::UInt(seq_i - 1)))))).simplify()?);
                                                         binding_cont.bind_symop(&func.arguments[1], value_formula.simplify()?);
                                                         let bound = vec![func.arguments[0].clone(), func.arguments[1].clone()];
-                                                        let body_conts = match self.eval_shortcircuit_higher_order_contract_function(func_name, binding_cont, func.body.span.start_line)? {
+                                                        let body_conts = match self.eval_shortcircuit_higher_order_contract_function(&config, func_name, binding_cont, func.body.span.start_line)? {
                                                             Ok(conts) => {
                                                                 conts
                                                                     .into_iter()
@@ -11053,7 +11434,7 @@ impl Symbex {
                                                             Err(binding_cont) => {
                                                                 // have to directly evaluate
                                                                 let callee_cont = Continuation::from_caller(Rc::new(binding_cont), format!("{function_name}/{func_name}.seq-({seq_i}-of-{seq_maxlen})-cont-({cont_i}-of-{cont_set_len})-contset-({cont_set_i}-of-{cont_set_set_len}).body"), func_name.to_string(), func.body.span.start_line);
-                                                                let body_conts : Vec<_> = self.eval(callee_cont, &func.body)?
+                                                                let body_conts : Vec<_> = self.eval(&config, callee_cont, &func.body)?
                                                                     .into_iter()
                                                                     .map(|cont| {
                                                                         if cont.panicking {
@@ -11095,7 +11476,7 @@ impl Symbex {
                                         }
                                     }
 
-                                    self.reduce_continuations(ret)
+                                    self.reduce_continuations(&config, ret)
                                 },
                                 "begin" => {
                                     let mut ret = vec![];
@@ -11112,8 +11493,8 @@ impl Symbex {
                                                     continue;
                                                 }
 
-                                                let next_conts = self.eval(Continuation::from_parent(Rc::new(cont), format!("{function_name}.expr[{i}]"), symexp.span.start_line), symexp)?;
-                                                new_conts.push(self.reduce_continuations(next_conts));
+                                                let next_conts = self.eval(&config, Continuation::from_parent(Rc::new(cont), format!("{function_name}.expr[{i}]"), symexp.span.start_line), symexp)?;
+                                                new_conts.push(self.reduce_continuations(&config, next_conts));
                                             }
                                         }
                                         conts = new_conts;
@@ -11125,45 +11506,22 @@ impl Symbex {
                                 }
                                 "print" => {
                                     let expr = lv.get(1).ok_or_else(|| Error::Bug("Missing argument to `print`".into()))?;
-                                    let conts = self.eval(Continuation::from_parent(Rc::new(continuation), function_name.to_string(), expr.span.start_line), expr)?;
+                                    let conts = self.eval(&config, Continuation::from_parent(Rc::new(continuation), function_name.to_string(), expr.span.start_line), expr)?;
                                     conts
                                 }
                                 "contract-call?" => {
-                                    let contract_principal = if let Some(Value::Principal(contract_principal)) = lv.get(1).ok_or_else(|| Error::NotFound("No contract ID".into()))?.match_literal_value() {
-                                        // direct contract call
-                                        contract_principal.clone()
-                                    }
-                                    else if let Some(trait_name) = lv.get(1).ok_or_else(|| Error::NotFound("No contract ID".into()))?.match_atom() {
-                                        // call to a trait reference.
-                                        // look it up
-                                        let cur_contract = continuation.get_current_contract_id();
-                                        let fq_name = if let Some(cur_func) = continuation.current_function.as_ref() {
-                                            FullName(cur_contract.clone(), cur_func.as_str().try_into()?)
-                                        }
-                                        else {
-                                            FullName::root(cur_contract.clone())
-                                        };
-
-                                        let target_contract_id : PrincipalData = if let Some(func_traits) = self.trait_concretizations.get(&fq_name) {
-                                            let Some(target_contract_id) = func_traits.get(trait_name) else {
-                                                return Err(Error::NotFound(format!("Trait '{trait_name}' in function {fq_name} is not concretized")));
-                                            };
-                                            target_contract_id.clone().into()
-                                        }
-                                        else {
-                                            return Err(Error::NotFound(format!("Function {fq_name} has no concretized traits")));
-                                        };
-
-                                        target_contract_id
-                                    }
-                                    else {
-                                        return Err(Error::NotFound(format!("contract-call contract is not a literal value or an atom: {:?}", &lv.get(1))));
-                                    };
-
+                                    let contract_principal = self.get_contract_call_contract(&continuation, lv)?;
                                     let Some(target_func_name) = lv.get(2).ok_or_else(|| Error::Bug("No function name".into()))?.match_atom() else {
                                         return Err(Error::Bug(format!("contract-call function name not found: {:?}", &lv.get(2))));
                                     };
+                                    let target_func_fullname = FullName(contract_principal.clone(), target_func_name.clone());
+                                     
                                     let target_func_name_and_args = lv.get(2..).ok_or_else(|| Error::Bug("No function args".into()))?;
+
+                                    if config.skip_contract_calls.contains(&target_func_fullname) {
+                                        debug!("Skipping contract-call to {}", &target_func_fullname);
+                                        unimplemented!();
+                                    }
 
                                     let mut cc_cont = Continuation::from_parent(Rc::new(continuation), function_name.clone(), body.span.start_line);
 
@@ -11171,9 +11529,9 @@ impl Symbex {
                                     let old_current_contract = cc_cont.get_current_contract();
 
                                     cc_cont.contract_caller = Some(SymOp::Constant(Value::Principal(cc_cont.get_current_contract())));
-                                    cc_cont.current_contract = Some(contract_principal.clone());
+                                    cc_cont.current_contract = Some(PrincipalData::Contract(contract_principal.clone()));
 
-                                    let mut conts = match self.eval_contract_function(cc_cont, target_func_name, target_func_name_and_args, body.span.start_line)? {
+                                    let mut conts = match self.eval_contract_function(&config, cc_cont, target_func_name, target_func_name_and_args, body.span.start_line)? {
                                         Ok(conts) => conts,
                                         Err(_) => {
                                             return Err(Error::Bug(format!("contract-call? to unknown user-defined function {target_func_name} in {contract_principal}")));
@@ -11231,18 +11589,18 @@ impl Symbex {
                 unreachable!()
             }
         };
-        info!("Reduce continuations after {body} (parent cont was {cont_id} path {cont_path})"); 
-        let continuations = self.reduce_continuations(continuations);
+        debug!("Reduce continuations after {body} (parent cont was {cont_id} path {cont_path})"); 
+        let mut continuations = self.reduce_continuations(&config, continuations);
 
         for continuation in continuations.iter() {
-            debug!("eval continuation {}: {} pred={}, formula={}", continuation.id, &continuation.function_path.clone().unwrap_or("".to_string()), &continuation.predicate.clone().simplify().unwrap(), &continuation.final_formula.clone().simplify().unwrap());
+            trace!("eval continuation {}: {} pred={}, formula={}", continuation.id, &continuation.function_path.clone().unwrap_or("".to_string()), &continuation.predicate.clone().simplify().unwrap(), &continuation.final_formula.clone().simplify().unwrap());
         }
 
-        self.run_commands(body, &continuations)?;
+        self.run_post_commands(&config, body, original_continuation, &mut continuations)?;
         Ok(continuations)
     }
 
-    fn apply_user_function(&mut self, continuation: Continuation, function_name: &ClarityName, function_arg_values: &[SymbolicExpression]) -> Result<Vec<Continuation>, Error> {
+    fn apply_user_function(&mut self, config: &SymbexConfig, continuation: Continuation, function_name: &ClarityName, function_arg_values: &[SymbolicExpression]) -> Result<Vec<Continuation>, Error> {
         let cur_contract = continuation.get_current_contract_id();
         let fq_name = FullName(cur_contract.clone(), function_name.clone());
 
@@ -11261,7 +11619,7 @@ impl Symbex {
         for (i, symexp) in function_arg_values.iter().enumerate() {
             let mut new_conts = vec![];
             for (cont, mut symops) in conts.into_iter() {
-                let arg_conts = self.eval(Continuation::from_parent(Rc::new(cont), format!("{}.arg[{}]={}", &fq_function, i, &func.arguments[i]), symexp.span.start_line), symexp)?;
+                let arg_conts = self.eval(config, Continuation::from_parent(Rc::new(cont), format!("{}.arg[{}]={}", &fq_function, i, &func.arguments[i]), symexp.span.start_line), symexp)?;
                 for arg_cont in arg_conts.into_iter() {
                     if arg_cont.halted() {
                         new_conts.push((arg_cont, vec![]));
@@ -11292,13 +11650,13 @@ impl Symbex {
             }
 
             let callee_cont = Continuation::from_caller(Rc::new(binding_cont), format!("{}.body", &fq_function), function_name.to_string(), func.body.span.start_line);
-            let conts = self.eval(callee_cont, &func.body)?;
+            let conts = self.eval(config, callee_cont, &func.body)?;
 
             let conts : Vec<_> = conts
                 .into_iter()
                 .filter(|cont| {
-                    if self.drop_early_returns.contains(&fq_name) && cont.early_return {
-                        info!("Will not evaluate early-return continuation {} of {fq_name}", cont.id);
+                    if config.drop_early_returns.contains(&fq_name) && cont.early_return {
+                        debug!("Will not evaluate early-return continuation {} of {fq_name}", cont.id);
                         false
                     }
                     else {
@@ -11319,13 +11677,13 @@ impl Symbex {
 
             called_conts.extend(conts.into_iter());
         }
-        Ok(self.reduce_continuations(called_conts))
+        Ok(self.reduce_continuations(&config, called_conts))
     }
 
-    fn eval_if(&mut self, continuation: Continuation, predicate_symexp: SymbolicExpression, if_true_symexp: SymbolicExpression, if_false_symexp: SymbolicExpression) -> Result<Vec<Continuation>, Error> {
+    fn eval_if(&mut self, config: &SymbexConfig, continuation: Continuation, predicate_symexp: SymbolicExpression, if_true_symexp: SymbolicExpression, if_false_symexp: SymbolicExpression) -> Result<Vec<Continuation>, Error> {
         let parent_func = continuation.function_path.clone().unwrap_or("".to_string());
         let continuation_rc = Rc::new(continuation);
-        let predicate_conts = self.eval(Continuation::from_parent(continuation_rc.clone(), format!("{}/if", &parent_func), predicate_symexp.span.start_line), &predicate_symexp)?;
+        let predicate_conts = self.eval(&config, Continuation::from_parent(continuation_rc.clone(), format!("{}/if", &parent_func), predicate_symexp.span.start_line), &predicate_symexp)?;
         let mut branch_conts = vec![];
         for predicate_cont in predicate_conts.into_iter() {
             if predicate_cont.halted() {
@@ -11338,7 +11696,7 @@ impl Symbex {
                 let mut true_continuation = Continuation::from_parent(predicate_rc.clone(), format!("{}.true", &parent_func), if_true_symexp.span.start_line);
                 true_continuation.predicate = true_continuation.predicate.clone().and(predicate.clone());
 
-                let if_true_conts = self.eval(true_continuation, &if_true_symexp)?;
+                let if_true_conts = self.eval(config, true_continuation, &if_true_symexp)?;
                 if_true_conts
             }
             else {
@@ -11349,7 +11707,7 @@ impl Symbex {
                 let mut false_continuation = Continuation::from_parent(predicate_rc.clone(), format!("{}.false", parent_func), if_false_symexp.span.start_line);
                 false_continuation.predicate = false_continuation.predicate.clone().and(predicate.clone().not());
 
-                let if_false_conts = self.eval(false_continuation, &if_false_symexp)?;
+                let if_false_conts = self.eval(config, false_continuation, &if_false_symexp)?;
                 if_false_conts
             }
             else {
@@ -11362,7 +11720,7 @@ impl Symbex {
         Ok(branch_conts)
     }
 
-    fn let_bind(&mut self, continuation: Continuation, let_bindings: &[SymbolicExpression]) -> Result<Vec<Continuation>, Error> {
+    fn let_bind(&mut self, config: &SymbexConfig, continuation: Continuation, let_bindings: &[SymbolicExpression]) -> Result<Vec<Continuation>, Error> {
         if let_bindings.len() < 2 {
             return Err(Error::Bug(format!("Let-binding has wrong length {}", let_bindings.len())));
         };
@@ -11417,7 +11775,7 @@ impl Symbex {
                     continue;
                 }
 
-                let bind_conts = self.eval(Continuation::from_parent(Rc::new(cont), format!("{function_name}.bind[{i}].{bind_name}"), (*body_symexp).span.start_line), body_symexp)?;
+                let bind_conts = self.eval(config, Continuation::from_parent(Rc::new(cont), format!("{function_name}.bind[{i}].{bind_name}"), (*body_symexp).span.start_line), body_symexp)?;
                 for mut bind_cont in bind_conts.into_iter() {
                     if bind_cont.halted() {
                         new_conts.push((bind_cont, bound_syms.clone()));
@@ -11459,8 +11817,8 @@ impl Symbex {
                             continue;
                         }
                         let next_body_cont = Continuation::from_parent(Rc::new(body_cont), format!("{function_name}.expr[{i}]"), body.span.start_line);
-                        let conts = self.eval(next_body_cont, body)?;
-                        next_body_conts.push(self.reduce_continuations(conts));
+                        let conts = self.eval(config, next_body_cont, body)?;
+                        next_body_conts.push(self.reduce_continuations(&config, conts));
                     }
                 }
                 body_conts = next_body_conts;
@@ -11475,9 +11833,140 @@ impl Symbex {
                 }
             }
         }
-        Ok(self.reduce_continuations(bound_conts))
+        Ok(self.reduce_continuations(&config, bound_conts))
     }
     
+    /// Apply all (@clairvoyance ..) directives for a symbolic expression on this symbolic
+    /// executor instance which apply prior any evaluation
+    pub fn from_contract_comments(code: &str, mut search_paths: Vec<String>) -> Result<Symbex, Error> {
+        // first, parse and analyze this contract in a throw-away datastore
+        let default_contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "clairvoyance".try_into().unwrap());
+        let ast = ast::parse_ast(&default_contract_id, &code)?;
+
+        // walk through top-level comments
+        let mut command_context = CommandContext::new();
+
+        let mut trait_concretizations = vec![];
+        let mut default_traits = vec![];
+        let mut deps = vec![];
+        let mut contract_id = None;
+        let mut contract_sponsor = None;
+        
+        let function_symexps = SymContract::extract_function_symexps(&ast.expressions);
+        search_paths.push("".to_string());
+
+        // commands in all top-level expressions
+        for toplevel_body in ast.expressions.iter() {
+            let commands = command_context.eval(toplevel_body)?;
+            if commands.len() > 0 {
+                debug!("Commands on top-level {toplevel_body}:");
+                for cmd in commands.iter() {
+                    debug!("\n{cmd}");
+                }
+                debug!("End of commands");
+            }
+            else {
+                continue;
+            }
+
+            for command in commands.into_iter() {
+                match command {
+                    Command::Dependency(contract_id, path, sponsor_opt) => {
+                        let mut found = false;
+                        for search_path in search_paths.iter() {
+                            let path = if let Some('/') = path.chars().next() {
+                                path.clone()
+                            }
+                            else {
+                                format!("{search_path}/{path}")
+                            };
+
+                            if let Err(_e) = fs::metadata(&path) {
+                                continue;
+                            }
+                            let Ok(data) = fs::read(&path) else {
+                                continue;
+                            };
+
+                            let Ok(code) = str::from_utf8(&data) else {
+                                continue;
+                            };
+
+                            found = true;
+                            deps.push((contract_id.clone(), code.to_string(), sponsor_opt));
+                            break;
+                        }
+                        if !found {
+                            return Err(Error::new_program_error(format!("Unable to read `{path}`. Search path was `{}`", search_paths.to_vec().join(":"))));
+                        }
+                    }
+                    Command::DefaultTraitImpl(trait_id, contract_id) => {
+                        default_traits.push((trait_id, contract_id));
+                    }
+                    Command::ContractSponsor(sponsor) => {
+                        if contract_sponsor.is_some() {
+                            return Err(Error::new_program_error(format!("`(contract-sponsor ..)` directive used more than once")));
+                        }
+                        contract_sponsor = Some(sponsor)
+                    }
+                    Command::ContractId(deployed_id) => {
+                        if contract_id.is_some() {
+                            return Err(Error::new_program_error(format!("`(contract-id ..)` directive used more than once")));
+                        }
+                        contract_id = Some(deployed_id);
+                    }
+                    _ => {
+                        continue;
+                    }
+                }
+            }
+        }
+
+        let contract_id = contract_id.unwrap_or(default_contract_id);
+
+        // commands in function-level comments
+        // (i.e. trait concretizations)
+        for (name, body) in function_symexps.iter() {
+            let commands = command_context.eval(body)?;
+            if commands.len() > 0 {
+                debug!("Commands on function {body}:");
+                for cmd in commands.iter() {
+                    debug!("\n{cmd}");
+                }
+                debug!("End of commands");
+            }
+            else {
+                continue;
+            }
+
+            for command in commands.into_iter() {
+                match command {
+                    Command::ConcretizeTrait(trait_var_name, impl_contract_id) => {
+                        let fq_func_name = FullName(contract_id.clone(), name.clone());
+                        trait_concretizations.push((fq_func_name, trait_var_name.clone(), impl_contract_id.clone()));
+                    },
+                    _ => {
+                        continue;
+                    }
+                }
+            }
+        }
+
+        let this_idx = deps.len();
+        deps.push((contract_id, code.to_string(), contract_sponsor.clone()));
+        let mut symbex = Symbex::from_contracts(deps, this_idx)?
+            .with_tx_sponsor(contract_sponsor);
+
+        for (fq_name, arg_name, contract_id) in trait_concretizations.into_iter() {
+            symbex = symbex.concretize_trait(fq_name, arg_name, contract_id);
+        }
+        for (trait_id, contract_id) in default_traits.into_iter() {
+            symbex = symbex.default_trait(trait_id, contract_id);
+        }
+
+        Ok(symbex)
+    }
+
     pub fn from_contract(contract_id: QualifiedContractIdentifier, code: &str) -> Result<Self, Error> {
         Self::from_contract_ex(contract_id, code, None)
     }
@@ -11496,7 +11985,7 @@ impl Symbex {
         let target_contract = contracts.get(target_contract_idx).map(|(contract_id, _, _)| contract_id.clone()).ok_or_else(|| Error::NotFound("bad target contract index".into()))?;
 
         for (contract_id, code, contract_sponsor) in contracts.into_iter() {
-            info!("Instantiate contract {}", &contract_id);
+            debug!("Instantiate contract {}", &contract_id);
             let ast = ast::parse_ast(&contract_id, &code)?;
             let mut analysis = ast::make_contract_analysis_from_ast(&mut datastore, &contract_id, &ast)?;
             let contract_context = ast::make_contract_context_from_ast(
@@ -11526,60 +12015,67 @@ impl Symbex {
             default_trait_concretizations: HashMap::new(),
             explore_function_calls: true,
             skip_function_calls: HashSet::new(),
+            skip_contract_calls: HashSet::new(),
             skip_pure_calls: true,
             skip_causally_independent_calls: true,
             drop_early_returns: HashSet::new(),
             evaluated_functions: HashMap::new(),
             combine_continuations: true,
-            command_context: CommandContext::new()
+            check_proofs: true,
         };
         Ok(symbex)
     }
 
     pub fn with_tx_sender(mut self, tx_sender: Option<StandardPrincipalData>) -> Self {
         self.tx_sender = tx_sender.map(|tx_sender| SymOp::Constant(Value::Principal(PrincipalData::Standard(tx_sender))));
-        debug!("tx-sender is {:?}", &self.tx_sender);
+        trace!("tx-sender is {:?}", &self.tx_sender);
         self
     }
 
     pub fn with_tx_sponsor(mut self, tx_sponsor: Option<StandardPrincipalData>) -> Self {
         self.tx_sponsor = tx_sponsor.map(|tx_sponsor| SymOp::Constant(Value::some(Value::Principal(PrincipalData::Standard(tx_sponsor))).expect("infallible")));
-        debug!("tx-sponsor? is {:?}", &self.tx_sponsor);
+        trace!("tx-sponsor? is {:?}", &self.tx_sponsor);
         self
     }
 
     pub fn with_contract_caller(mut self, contract_caller: Option<PrincipalData>) -> Self {
         self.contract_caller = contract_caller.map(|contract_caller| SymOp::Constant(Value::Principal(contract_caller)));
-        debug!("contract-caller is {:?}", &self.contract_caller);
+        trace!("contract-caller is {:?}", &self.contract_caller);
         self
     }
 
     pub fn with_function_call_exploration(mut self, explore: bool) -> Self {
         self.explore_function_calls = explore;
-        debug!("explore_function_calls = {}", self.explore_function_calls);
+        trace!("explore_function_calls = {}", self.explore_function_calls);
         self
     }
 
     pub fn with_skipped_function_call(mut self, func_name: FullName) -> Self {
-        debug!("skip_function_call {func_name}");
+        trace!("skip_function_call {func_name}");
         self.skip_function_calls.insert(func_name);
+        self
+    }
+    
+    pub fn with_skipped_contract_call(mut self, func_name: FullName) -> Self {
+        trace!("skip_contract_call {func_name}");
+        self.skip_contract_calls.insert(func_name);
         self
     }
 
     pub fn skip_pure(mut self, val: bool) -> Self {
         self.skip_pure_calls = val;
-        debug!("skip_pure_calls = {}", self.skip_pure_calls);
+        trace!("skip_pure_calls = {}", self.skip_pure_calls);
         self
     }
 
     pub fn skip_causally_independent(mut self, val: bool) -> Self {
         self.skip_causally_independent_calls = val;
-        debug!("skip_causally_independent_calls = {}", self.skip_causally_independent_calls);
+        trace!("skip_causally_independent_calls = {}", self.skip_causally_independent_calls);
         self
     }
 
     pub fn drop_early_return(mut self, function_name: FullName) -> Self {
-        info!("Drop early-returns from {}", &function_name);
+        debug!("Drop early-returns from {}", &function_name);
         self.drop_early_returns.insert(function_name);
         self
     }
@@ -11606,6 +12102,11 @@ impl Symbex {
         self
     }
 
+    pub fn check_proofs(mut self, check: bool) -> Self {
+        self.check_proofs = check;
+        self
+    }
+
     pub fn init(mut self) -> Result<Self, Error> {
         self.do_init()?;
         Ok(self)
@@ -11621,6 +12122,7 @@ impl Symbex {
    
     pub fn eval_all(&mut self) -> Result<Vec<Continuation>, Error> {
         self.do_init()?;
+        let config = SymbexConfig::new(self);
 
         let current_contract = PrincipalData::Contract(self.contract_context(&self.target_contract)?.contract_identifier.clone());
 
@@ -11640,20 +12142,20 @@ impl Symbex {
                 continue;
             }
 
-            info!("Evaluating function '{contract_func}'");
+            debug!("Evaluating function '{contract_func}'");
             let conts : Vec<_> = self.eval_user_function(contract_func.name().as_str())?
                 .into_iter()
                 .map(|cont| cont.rollup())
                 .collect();
 
             for cont in conts.iter() {
-                info!("Computed continuation for function '{contract_func}'\n{cont}");
-                info!("Trace:\n{}", cont.clone().trace());
+                debug!("Computed continuation for function '{contract_func}'\n{cont}");
+                debug!("Trace:\n{}", cont.clone().trace());
             }
             self.evaluated_functions.insert(contract_func, conts);
         }
 
-        info!("Evaluating top-level symbols");
+        debug!("Evaluating top-level symbols");
 
         let mut conts = vec![root_continuation];
         let syms = self.symbols(&self.target_contract)?.to_vec();
@@ -11661,29 +12163,37 @@ impl Symbex {
             let mut next = vec![];
             for cont in conts.into_iter() {
                 let cont_rc = Rc::new(cont);
-                let next_conts = self.eval(Continuation::from_parent(cont_rc.clone(), "".to_string(), sym.span.start_line), sym)?;
+                let next_conts = self.eval(&config, Continuation::from_parent(cont_rc.clone(), "".to_string(), sym.span.start_line), sym)?;
                 assert!(next_conts.len() > 0, "No continuation produced from {cont_rc:?}");
                 next.extend(next_conts.into_iter());
             }
             conts = next;
         }
 
-        Ok(self.reduce_continuations(conts))
+        Ok(self.reduce_continuations(&config, conts))
     }
   
     /// Symbolically evaluate a user function.
     /// Each argument will be bound to a SymOp::Variable of the appropriate type.
+    /// `function_name` may be a FullName
     pub fn eval_user_function(&mut self, function_name: &str) -> Result<Vec<Continuation>, Error> {
         self.do_init()?;
+        let config = SymbexConfig::new(self);
 
-        if self.contract_context(&self.target_contract)?.functions.get(function_name).is_none() {
-            return Err(Error::NotFound(format!("No such function '{function_name}' in target contract {}", &self.target_contract)));
+        let fq_name = if let Ok(fq_name) = FullName::try_from(function_name) {
+            fq_name
+        }
+        else {
+            if self.contract_context(&self.target_contract)?.functions.get(function_name).is_none() {
+                return Err(Error::NotFound(format!("No such function '{function_name}' in target contract {}", &self.target_contract)));
+            };
+
+            let fq_name = FullName(
+                self.contract_context(&self.target_contract)?.contract_identifier.clone(),
+                ClarityName::try_from(function_name).map_err(|_| Error::Bug("Invalid function name".into()))?
+            );
+            fq_name
         };
-
-        let fq_name = FullName(
-            self.contract_context(&self.target_contract)?.contract_identifier.clone(),
-            ClarityName::try_from(function_name).map_err(|_| Error::Bug("Invalid function name".into()))?
-        );
 
         let reachable_funcs = self.callgraph().reachable_from(&fq_name)?;
         for reachable_func in reachable_funcs.into_iter() {
@@ -11691,26 +12201,26 @@ impl Symbex {
                 continue;
             }
             
-            info!("Evaluating reachable function '{reachable_func}' in {}", &self.target_contract);
-            let conts : Vec<_> = self.inner_eval_user_function(&reachable_func)?
+            debug!("Evaluating reachable function '{reachable_func}' in {}", &self.target_contract);
+            let conts : Vec<_> = self.inner_eval_user_function(&config, &reachable_func)?
                 .into_iter()
                 .filter(|c| !c.panicking)
                 .map(|c| c.rollup())
                 .collect();
 
             for cont in conts.iter() {
-                info!("Computed continuation for function '{reachable_func}'\n{cont}");
-                info!("Trace:\n{}", cont.clone().trace());
+                debug!("Computed continuation for function '{reachable_func}'\n{cont}");
+                debug!("Trace:\n{}", cont.clone().trace());
             }
 
             self.evaluated_functions.insert(reachable_func, conts);
         }
 
-        info!("Evaluating function '{function_name}'");
-        self.inner_eval_user_function(&fq_name)
+        debug!("Evaluating function '{fq_name}'");
+        self.inner_eval_user_function(&config, &fq_name)
     }
 
-    fn inner_eval_user_function(&mut self, fq_function_name: &FullName) -> Result<Vec<Continuation>, Error> {
+    fn inner_eval_user_function(&mut self, config: &SymbexConfig, fq_function_name: &FullName) -> Result<Vec<Continuation>, Error> {
         let contract_id = fq_function_name.contract_id();
         let function_name = fq_function_name.name().as_str();
 
@@ -11748,13 +12258,18 @@ impl Symbex {
 
         // run that function!
         let callee_cont = Continuation::from_caller(Rc::new(binding_cont), format!("{}.body", &function_name), function_name.to_string(), func.body.span.start_line);
-        let conts = self.eval(callee_cont, &func.body)?;
+        let original_cont = callee_cont.clone();
+
+        // HACK: the function definition (not body) contains the pre-evaluation commands, so
+        // synthesize the SymbexConfig from it and pass it into Self::eval() for this function.
+        let func_config = self.run_pre_commands(config, &callee_cont, &func_def)?;
+        let conts = self.eval(&func_config, callee_cont, &func.body)?;
 
         let mut conts : Vec<_> = conts
             .into_iter()
             .filter(|cont| {
                 if self.drop_early_returns.contains(&fq_name) && cont.early_return {
-                    info!("Will not evaluate early-return continuation {} of {fq_name}", cont.id);
+                    debug!("Will not evaluate early-return continuation {} of {fq_name}", cont.id);
                     false
                 }
                 else {
@@ -11776,13 +12291,17 @@ impl Symbex {
         // each early-return continuation loses its mutable state
         for cont in conts.iter_mut() {
             if cont.early_return {
-                info!("Final continuation {} ({}) is an early-return continuation, and has no side-effects", cont.get_function_path(), cont.id);
+                debug!("Final continuation {} ({}) is an early-return continuation, and has no side-effects", cont.get_function_path(), cont.id);
+                cont.clear_side_effects();
+            }
+            if cont.panicking {
+                debug!("Final continuation {} ({}) is a panicking continuation, and has no side-effects", cont.get_function_path(), cont.id);
                 cont.clear_side_effects();
             }
         }
 
-        let conts = self.reduce_continuations(conts);
-        self.run_commands(&func_def, &conts)?;
+        let mut conts = self.reduce_continuations(&config, conts);
+        self.run_post_commands(&config, &func_def, original_cont, &mut conts)?;
         Ok(conts)
     }
 }
