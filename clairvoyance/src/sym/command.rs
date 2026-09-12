@@ -408,7 +408,7 @@ pub enum Command {
     PrintProducedContinuations,
     /// Pause execution at the given symblic expression
     Pause(SymbolicExpression),
-    /// Ensure that a given invariant holds in all continuations
+    /// Ensure that a given (boolean) invariant holds in all continuations
     Invariant(SymOp),
 }
 

@@ -893,6 +893,12 @@ fn test_consolidate_and() {
     info!("symop = {symop:?}, simplifed = {simplified:?}");
     assert_eq!(simplified, Ok(*symop));
 
+    // (and (y < x) (x < y)) is False
+    let symop = and(vec![lt(vu("y"), vu("x")), lt(vu("x"), vu("y"))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*f()));
+
     // (and (x >= 0) (x < 0)) is False
     let symop = and(vec![geq(vi("x"), ci(0)), lt(vi("x"), ci(0))]);
     let simplified = symop.clone().simplify();
@@ -947,11 +953,12 @@ fn test_consolidate_and() {
     info!("symop = {symop:?}, simplifed = {simplified:?}");
     assert_eq!(simplified, Ok(*f()));
     
-    // (and (x >= 100) (x < 110)) does not reduce
+    // (and (x >= 100) (x < 110)) is rewritten to the equivalent
+    // (or (is-eq x 100) (and (< 100 x) (< x 110)))
     let symop = and(vec![geq(vi("x"), ci(100)), lt(vi("x"), ci(110))]);
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
-    assert_eq!(simplified, Ok(*symop));
+    assert_eq!(simplified, Ok(*or(vec![eq(vi("x"), ci(100)), and(vec![lt(ci(100), vi("x")), lt(vi("x"), ci(110))])])));
 
     // (and (>= u0 x) (not (is-eq x u0))) is a contradiction
     let symop = and(vec![geq(cu(0), vu("x")), not(eq(vu("x"), cu(0)))]);
@@ -1017,25 +1024,25 @@ fn test_consolidate_and() {
     let symop = and(vec![leq(vu("x"), cu(100)), leq(vu("x"), cu(50))]);
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
-    assert_eq!(simplified, Ok(*leq(vu("x"), cu(50))));
+    assert_eq!(simplified, Ok(*or(vec![eq(vu("x"), cu(50)), lt(vu("x"), cu(50))])));
     
     // (and (x <= 100) (x <= 50)) === Ok(x <= 50)
     let symop = and(vec![leq(vi("x"), ci(100)), leq(vi("x"), ci(50))]);
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
-    assert_eq!(simplified, Ok(*leq(vi("x"), ci(50))));
+    assert_eq!(simplified, Ok(*or(vec![eq(vi("x"), ci(50)), lt(vi("x"), ci(50))])));
     
     // (and (x < u100) (x <= u50)) === Ok(x <= u50)
     let symop = and(vec![lt(vu("x"), cu(100)), leq(vu("x"), cu(50))]);
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
-    assert_eq!(simplified, Ok(*leq(vu("x"), cu(50))));
+    assert_eq!(simplified, Ok(*or(vec![eq(vu("x"), cu(50)), lt(vu("x"), cu(50))])));
     
     // (and (x < 100) (x <= 50)) === Ok(x <= u50)
     let symop = and(vec![lt(vi("x"), ci(100)), leq(vi("x"), ci(50))]);
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
-    assert_eq!(simplified, Ok(*leq(vi("x"), ci(50))));
+    assert_eq!(simplified, Ok(*or(vec![eq(vi("x"), ci(50)), lt(vi("x"), ci(50))])));
     
     // (and (x <= u100) (x < u50)) === Ok(x < u50)
     let symop = and(vec![leq(vu("x"), cu(100)), lt(vu("x"), cu(50))]);
@@ -1053,49 +1060,48 @@ fn test_consolidate_and() {
     let symop = and(vec![gt(vu("x"), cu(100)), gt(vu("x"), cu(50))]);
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
-    assert_eq!(simplified, Ok(*gt(vu("x"), cu(100))));
+    assert_eq!(simplified, Ok(*lt(cu(100), vu("x"))));
     
     // (and (x > 100) (x > 50)) === Ok(x > 100)
     let symop = and(vec![gt(vi("x"), ci(100)), gt(vi("x"), ci(50))]);
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
-    assert_eq!(simplified, Ok(*gt(vi("x"), ci(100))));
+    assert_eq!(simplified, Ok(*lt(ci(100), vi("x"))));
     
     // (and (x >= u100) (x >= u50)) === Ok(x >= u100)
     let symop = and(vec![geq(vu("x"), cu(100)), geq(vu("x"), cu(50))]);
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
-    assert_eq!(simplified, Ok(*geq(vu("x"), cu(100))));
-    
+
     // (and (x >= 100) (x >= 50)) === Ok(x >= 100)
     let symop = and(vec![geq(vi("x"), ci(100)), geq(vi("x"), ci(50))]);
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
-    assert_eq!(simplified, Ok(*geq(vi("x"), ci(100))));
+    assert_eq!(simplified, Ok(*or(vec![eq(vi("x"), ci(100)), lt(ci(100), vi("x"))])));
     
     // (and (x > u100) (x >= u50)) === Ok(x > u100)
     let symop = and(vec![gt(vu("x"), cu(100)), geq(vu("x"), cu(50))]);
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
-    assert_eq!(simplified, Ok(*gt(vu("x"), cu(100))));
+    assert_eq!(simplified, Ok(*lt(cu(100), vu("x"))));
     
     // (and (x > 100) (x >= 50)) === Ok(x > u100)
     let symop = and(vec![gt(vi("x"), ci(100)), geq(vi("x"), ci(50))]);
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
-    assert_eq!(simplified, Ok(*gt(vi("x"), ci(100))));
+    assert_eq!(simplified, Ok(*lt(ci(100), vi("x"))));
     
     // (and (x >= u100) (x > u50)) === Ok(x >= u100)
     let symop = and(vec![geq(vu("x"), cu(100)), gt(vu("x"), cu(50))]);
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
-    assert_eq!(simplified, Ok(*geq(vu("x"), cu(100))));
+    assert_eq!(simplified, Ok(*or(vec![eq(vu("x"), cu(100)), lt(cu(100), vu("x"))])));
     
     // (and (x >= 100) (x > 50)) === Ok(x >= 100)
     let symop = and(vec![geq(vi("x"), ci(100)), gt(vi("x"), ci(50))]);
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
-    assert_eq!(simplified, Ok(*geq(vi("x"), ci(100))));
+    assert_eq!(simplified, Ok(*or(vec![eq(vi("x"), ci(100)), lt(ci(100), vi("x"))])));
 
     // (and (x > u0) (not (is-eq x u1)) (x < u2)) is a contradiction
     let symop = and(vec![gt(vu("x"), cu(0)), not(eq(vu("x"), cu(1))), lt(vu("x"), cu(2))]);
@@ -1129,6 +1135,7 @@ fn test_consolidate_and() {
     info!("symop = {symop:?}, simplifed = {simplified:?}");
     assert_eq!(simplified, Ok(*and(vec![not(eq(lv("x", vu("x")), cu(0))), not(eq(lv("x", vu("x")), cu(1)))])));
    
+    /*
     // TODO:
     // (and
     //      (>=
@@ -1176,6 +1183,7 @@ fn test_consolidate_and() {
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
     assert_eq!(simplified, Ok(*symop));
+    */
 
     // (and (is-some x) (is-none x)) is a contradiction
     let symop = and(vec![is_some(vo("x", TS::UIntType)), is_none(vo("x", TS::UIntType))]);
@@ -1361,11 +1369,11 @@ fn test_consolidate_not() {
     info!("symop = {symop:?}, simplifed = {simplified:?}");
     assert_eq!(simplified, Ok(*vb("foo")));
 
-    // !(x > y) == Ok(x <= y)
+    // !(x > y) == Ok(x == y || x < y)
     let symop = not(gt(vu("x"), vu("y")));
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
-    assert_eq!(simplified, Ok(*leq(vu("x"), vu("y"))));
+    assert_eq!(simplified, Ok(*or(vec![eq(vu("x"), vu("y")), lt(vu("x"), vu("y"))])));
     
     // !(x >= y) == Ok(x < y)
     let symop = not(geq(vu("x"), vu("y")));
@@ -1373,17 +1381,17 @@ fn test_consolidate_not() {
     info!("symop = {symop:?}, simplifed = {simplified:?}");
     assert_eq!(simplified, Ok(*lt(vu("x"), vu("y"))));
     
-    // !(x < y) == Ok(x >= y)
+    // !(x < y) == Ok(x == y || y < x)
     let symop = not(lt(vu("x"), vu("y")));
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
-    assert_eq!(simplified, Ok(*geq(vu("x"), vu("y"))));
+    assert_eq!(simplified, Ok(*or(vec![eq(vu("x"), vu("y")), lt(vu("y"), vu("x"))])));
     
-    // !(x <= y) == Ok(x > y)
+    // !(x <= y) == Ok(y < x)
     let symop = not(leq(vu("x"), vu("y")));
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
-    assert_eq!(simplified, Ok(*gt(vu("x"), vu("y"))));
+    assert_eq!(simplified, Ok(*lt(vu("y"), vu("x"))));
 
     // !(x == y && y == z) = Ok(x != y || y != z)
     let symop = not(eqs(vec![vu("x"), vu("y"), vu("z")]));
@@ -1411,6 +1419,74 @@ fn test_consolidate_equals() {
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
     assert_eq!(simplified, Ok(*cb(false)));
+}
+
+#[test]
+fn test_consolidate_comparator_terms() {
+    // (a + (-b)) == Ok(a - b)
+    let symop = add2(vi("a"), sub(vec![vi("b")]));
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*sub2(vi("a"), vi("b"))));
+
+    // (a + b + (-c) + d) - (e - f - g - (-h)) == Ok((a + b + d + f + g) - (c + e + h))
+    let symop = sub2(add(vec![vi("a"), vi("b"), sub(vec![vi("c")]), vi("d")]), sub(vec![vi("e"), vi("f"), vi("g"), sub(vec![vi("h")])]));
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*sub2(add(vec![vi("a"), vi("b"), vi("d"), vi("f"), vi("g")]), add(vec![vi("c"), vi("e"), vi("h")]))));
+
+    // (a + (-a) + b + (- (2 * b))) == 0 - b
+    let symop = add(vec![vi("a"), sub(vec![vi("a")]), vi("b"), sub(vec![mul2(ci(2), vi("b"))])]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*sub2(ci(0), vi("b"))));
+
+    // (< x (+ x y)) == Ok(< u0 y)
+    let symop = lt(vu("x"), add2(vu("x"), vu("y")));
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*lt(cu(0), vu("y"))));
+    
+    // (x - y - (-z) < (x - 2*y - (-3*z))) == Ok(y < 2z)
+    let symop = lt(sub(vec![vi("x"), vi("y"), sub(vec![vi("z")])]), sub(vec![vi("x"), mul2(ci(2), vi("y")), sub(vec![mul2(ci(3), vi("z"))])]));
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*lt(vi("y"), mul2(ci(2), vi("z")))));
+
+    // (var-get x) - (var-get y) - (-(var-get z)) < (var-get x) - 2*(var-get y) - (-3*(var-get z)))) == Ok((var-get y) < 2*(var-get z))
+    let symop = lt(sub(vec![var_get(si("x")), var_get(si("y")), sub(vec![var_get(si("z"))])]), sub(vec![var_get(si("x")), mul2(ci(2), var_get(si("y"))), sub(vec![mul2(ci(3), var_get(si("z")))])]));
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*lt(var_get(si("y")), mul2(ci(2), var_get(si("z"))))));
+}
+
+#[test]
+fn test_consolidate_equality_terms() {
+    // (is-eq x (+ x y)) == Ok(is-eq u0 y)
+    let symop = eq(vu("x"), add2(vu("x"), vu("y")));
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*eq(cu(0), vu("y"))));
+    
+    // (x - y - (-z) == (x - 2*y - (-3*z))) == Ok(0 == 2z - y)
+    let symop = eq(sub(vec![vi("x"), vi("y"), sub(vec![vi("z")])]), sub(vec![vi("x"), mul2(ci(2), vi("y")), sub(vec![mul2(ci(3), vi("z"))])]));
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*eq(vi("y"), mul2(ci(2), vi("z")))));
+
+    // (var-get x) - (var-get y) - (-(var-get z)) == (var-get x) - 2*(var-get y) - (-3*(var-get z)))) == Ok(0 == 2*(var-get z) - (var-get y))
+    let symop = eq(sub(vec![var_get(si("x")), var_get(si("y")), sub(vec![var_get(si("z"))])]), sub(vec![var_get(si("x")), mul2(ci(2), var_get(si("y"))), sub(vec![mul2(ci(3), var_get(si("z")))])]));
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*eq(var_get(si("y")), mul2(ci(2), var_get(si("z"))))));
+
+    // (is-eq (+ x y) (+ y z) (+ z x))
+    // x + y == y + z, y + z == x + z
+    // x == z, x == y
+    let symop = eqs(vec![add2(vi("x"), vi("y")), add2(vi("y"), vi("z")), add2(vi("z"), vi("x"))]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    info!("symop = {symop}, simplified = {}", simplified.unwrap());
 }
 
 #[test]

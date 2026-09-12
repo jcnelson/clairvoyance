@@ -954,6 +954,7 @@ impl SymOp {
             Self::TupleGet(_name, op) => op.inner_loaded().and_then(|op| op.is_unsigned()),
             Self::UnwrapPanic(op) => op.inner_loaded().and_then(|op| op.is_unsigned()),
             Self::UnwrapErrPanic(op) => op.inner_loaded().and_then(|op| op.is_unsigned()),
+            Self::LoadedMapEntry(_, _, Some(op)) => op.is_unsigned(),
             _ => None
         }
     }
@@ -1355,7 +1356,7 @@ impl SymOp {
     /// If a term has a constant multiplier, like k * x for symbol x and constant k, then use k as
     /// the count.
     /// The return value maps the String representation of a term to the term itself, its sign
-    /// (u8), and its count (u128).
+    /// (i8), and its count (u128).
     fn make_term_count_table(terms: Vec<Box<SymOp>>) -> Result<HashMap<String, (Box<SymOp>, i8, u128)>, Error> {
         let mut table = HashMap::new();
         for term in terms.into_iter() {
@@ -1447,6 +1448,13 @@ impl SymOp {
     /// between the two.  For each term in both tables, subtract the count in `diff` from that in
     /// `term_table`.  This is used to reduce a formula like (a + b) - (a + c) to (b - c)
     fn remove_terms(term_table: &mut HashMap<String, (Box<SymOp>, u128)>, diff: HashMap<String, u128>) {
+        for (op_s, (_, count)) in term_table.iter() {
+            trace!("remove_terms: term_table: count {count} of term {op_s}");
+        }
+        for (op_s, count) in diff.iter() {
+            trace!("remove_terms: diff: count {count} of term {op_s}");
+        }
+
         for (term, diff) in diff.into_iter() {
             let del = if let Some((_, add_count)) = term_table.get_mut(&term) {
                 if diff == *add_count {
@@ -1467,82 +1475,23 @@ impl SymOp {
                 term_table.remove(&term);
             }
         }
+       
+        trace!("remove_terms: {} terms remaining", term_table.len());
+        for (op_s, (_, count)) in term_table.iter() {
+            trace!("remove_terms: updated term_table: count {count} of term {op_s}");
+        }
     }
 
-    /// Combine terms in the form of (a + b + c + ...) - (x + y + z + ...)
-    /// `adds` are terms that are to be added together (i.e. a, b, c. ..)
-    /// `subs` are terms that are to be summed, and then subtracted from `adds` (i.e. x, y, z, ...)
-    fn combine_terms(mut adds: Vec<Box<SymOp>>, mut subs: Vec<Box<SymOp>>) -> Result<SymOp, Error> {
-        // remove identity elements
-        let mut filtered_adds = vec![];
-        let mut unsigned = None;
-        for i in 0..adds.len() {
-            if adds[i] == Box::new(SymOp::Constant(Value::UInt(0))) {
-                unsigned = Some(true);
-            }
-            else if adds[i] == Box::new(SymOp::Constant(Value::Int(0))) {
-                unsigned = Some(false);
-            }
-            else {
-                if let Some(s) = adds[i].is_unsigned() {
-                    unsigned = Some(s);
-                }
-                filtered_adds.push(adds[i].clone());
-            }
-        }
-        adds = filtered_adds;
-
-        let mut filtered_subs = vec![];
-        for i in 0..subs.len() {
-            if subs[i] == Box::new(SymOp::Constant(Value::UInt(0))) {
-                unsigned = Some(true);
-            }
-            else if subs[i] == Box::new(SymOp::Constant(Value::Int(0))) {
-                unsigned = Some(false);
-            }
-            else {
-                if let Some(s) = subs[i].is_unsigned() {
-                    unsigned = Some(s);
-                }
-                filtered_subs.push(subs[i].clone());
-            }
-        }
-        subs = filtered_subs;
-
-        if adds.len() == 0 && subs.len() == 0 {
-            if let Some(unsigned) = unsigned {
-                // at least one term
-                if unsigned {
-                    return Ok(SymOp::Constant(Value::UInt(0)));
-                }
-                else {
-                    return Ok(SymOp::Constant(Value::Int(0)));
-                }
-            }
-            else {
-                panic!("Got zero add terms");
-            }
-        }
-        else if adds.len() == 0 && subs.len() > 0 {
-            if let Some(unsigned) = unsigned {
-                // at least one term
-                if unsigned {
-                    adds.push(Box::new(SymOp::Constant(Value::UInt(0))));
-                }
-                else {
-                    adds.push(Box::new(SymOp::Constant(Value::Int(0))));
-                }
-            }
-            else {
-                panic!("Got zero terms");
-            }
-        }
-
-        let old_adds = adds.clone();
-        let old_subs = subs.clone();
-
+    fn make_add_sub_term_counts(adds: Vec<Box<SymOp>>, subs: Vec<Box<SymOp>>) -> Result<(HashMap<String, (Box<SymOp>, u128)>, HashMap<String, (Box<SymOp>, u128)>), Error> {
         let add_signed_table = Self::make_term_count_table(adds)?;
         let sub_signed_table = Self::make_term_count_table(subs)?;
+    
+        for (op_s, (_, sign, count)) in add_signed_table.iter() {
+            trace!("add_signed_table: count {count} of term {sign} * {op_s}");
+        }
+        for (op_s, (_, sign, count)) in sub_signed_table.iter() {
+            trace!("sub_signed_table: count {count} of term {sign} * {op_s}");
+        }
 
         // consolidate by sign
         let mut add_table = HashMap::new();
@@ -1563,73 +1512,57 @@ impl SymOp {
                 add_table.insert(term_s, (term, count));
             }
         }
+        
+        Ok((add_table, sub_table))
+    }
 
+    fn make_add_sub_term_diffs(add_table: &HashMap<String, (Box<SymOp>, u128)>, sub_table: &HashMap<String, (Box<SymOp>, u128)>) -> (HashMap<String, u128>, HashMap<String, u128>) {
         let mut add_diff = HashMap::new();
         let mut sub_diff = HashMap::new();
         for (add_term, (_, add_count)) in add_table.iter() {
             if let Some((_, sub_count)) = sub_table.get(add_term) {
+                trace!("add/sub term {add_term}: add {add_count}, sub {sub_count}");
                 if add_count > sub_count {
-                    sub_diff.insert(add_term.clone(), *add_count - *sub_count);
+                    add_diff.insert(add_term.clone(), *sub_count);
+                    sub_diff.insert(add_term.clone(), *sub_count);
                 }
                 else if add_count == sub_count {
                     add_diff.insert(add_term.clone(), *add_count);
                     sub_diff.insert(add_term.clone(), *sub_count);
                 }
                 else {
-                    add_diff.insert(add_term.clone(), *sub_count - *add_count);
+                    add_diff.insert(add_term.clone(), *add_count);
+                    sub_diff.insert(add_term.clone(), *add_count);
                 }
             }
         }
+        (add_diff, sub_diff)
+    }
 
-        Self::remove_terms(&mut add_table, add_diff);
-        Self::remove_terms(&mut sub_table, sub_diff);
-
+    fn reconstitute_adds_subs(add_table: HashMap<String, (Box<SymOp>, u128)>, sub_table: HashMap<String, (Box<SymOp>, u128)>, unsigned: Option<bool>) -> Result<SymOp, Error> {
         let mut new_adds = vec![];
         let mut new_subs = vec![];
 
         if add_table.len() == 0 {
             // all subtractions
             for (_, (op, count)) in sub_table.into_iter() {
-                let count = u128::try_from(count).map_err(|_| Error::Bug("Could not cast usize to u128".into()))?;
-                let count_op = Box::new(SymOp::Constant(
-                        if unsigned == Some(true) {
-                            Value::UInt(count)
-                        }
-                        else {
-                            let count = i128::try_from(count).map_err(|_| Error::Bug("Could not cast usize to i128".into()))?;
-                            Value::Int(count)
-                        }
-                    ));
-                if new_subs.len() == 0 {
-                    // first item is negative, so negate
-                    if count > 1 {
-                        let inner_mult = SymOp::Multiply(vec![
-                            count_op,
-                            op.clone()
-                        ]);
-                        new_subs.push(Box::new(SymOp::Subtract(vec![Box::new(inner_mult)])));
-                    }
-                    else {
-                        new_subs.push(Box::new(SymOp::Subtract(vec![op.clone()])))
-                    }
+                // NOTE: we don't need to restore negations, since they're already accounted for by
+                // the fact that all negated terms were put into the subs table
+                if count > 1 {
+                    let count = u128::try_from(count).map_err(|_| Error::Bug("Could not cast usize to u128".into()))?;
+                    let count_op = Box::new(SymOp::Constant(
+                            if unsigned == Some(true) {
+                                Value::UInt(count)
+                            }
+                            else {
+                                let count = i128::try_from(count).map_err(|_| Error::Bug("Could not cast usize to i128".into()))?;
+                                Value::Int(count)
+                            }
+                        ));
+                    new_subs.push(Box::new(SymOp::Multiply(vec![count_op, op.clone()])));
                 }
                 else {
-                    if count > 1 {
-                        let count = u128::try_from(count).map_err(|_| Error::Bug("Could not cast usize to u128".into()))?;
-                        let count_op = Box::new(SymOp::Constant(
-                                if unsigned == Some(true) {
-                                    Value::UInt(count)
-                                }
-                                else {
-                                    let count = i128::try_from(count).map_err(|_| Error::Bug("Could not cast usize to i128".into()))?;
-                                    Value::Int(count)
-                                }
-                            ));
-                        new_subs.push(Box::new(SymOp::Multiply(vec![count_op, op.clone()])));
-                    }
-                    else {
-                        new_subs.push(op.clone());
-                    }
+                    new_subs.push(op.clone());
                 }
             }
         }
@@ -1672,14 +1605,39 @@ impl SymOp {
             }
         }
         
-        trace!("combine_terms: adds = {:?}", &new_adds);
-        trace!("combine_terms: subs = {:?}", &new_subs);
+        if new_adds.len() == 0 && new_subs.len() == 0 {
+            if let Some(unsigned) = unsigned {
+                // at least one term
+                if unsigned {
+                    return Ok(SymOp::Constant(Value::UInt(0)));
+                }
+                else {
+                    return Ok(SymOp::Constant(Value::Int(0)));
+                }
+            }
+            else {
+                panic!("Got zero add terms");
+            }
+        }
+        else if new_adds.len() == 0 && new_subs.len() > 0 {
+            if let Some(unsigned) = unsigned {
+                // at least one term
+                if unsigned {
+                    new_adds.push(Box::new(SymOp::Constant(Value::UInt(0))));
+                }
+                else {
+                    new_adds.push(Box::new(SymOp::Constant(Value::Int(0))));
+                }
+            }
+            else {
+                panic!("Got zero terms");
+            }
+        }
+        
+        trace!("reconstitute_add_sub_terms: adds = {:?}", &new_adds);
+        trace!("reconstitute_add_sub_terms: subs = {:?}", &new_subs);
         
         if new_adds.len() == 0 && new_subs.len() == 0 {
-            let adds_str = old_adds.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(" ");
-            let subs_str = old_subs.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(" ");
-            error!("adds = (+ {adds_str})");
-            error!("subs = (- {subs_str})");
             panic!("new_adds.len() == 0 and new_subs.len() == 0");
         }
 
@@ -1719,7 +1677,111 @@ impl SymOp {
             }
         }
     }
-    
+
+    fn check_add_sub_unsigned(adds: &[Box<SymOp>], subs: &[Box<SymOp>]) -> Option<bool> {
+        let mut unsigned = None;
+        for i in 0..adds.len() {
+            if adds[i] == Box::new(SymOp::Constant(Value::UInt(0))) {
+                unsigned = Some(true);
+            }
+            else if adds[i] == Box::new(SymOp::Constant(Value::Int(0))) {
+                unsigned = Some(false);
+            }
+            else if let Some(s) = adds[i].is_unsigned() {
+                unsigned = Some(s);
+            }
+            if unsigned.is_some() {
+                return unsigned;
+            }
+        }
+
+        for i in 0..subs.len() {
+            if subs[i] == Box::new(SymOp::Constant(Value::UInt(0))) {
+                unsigned = Some(true);
+            }
+            else if subs[i] == Box::new(SymOp::Constant(Value::Int(0))) {
+                unsigned = Some(false);
+            }
+            else if let Some(s) = subs[i].is_unsigned() {
+                unsigned = Some(s);
+            }
+            if unsigned.is_some() {
+                return unsigned;
+            }
+        }
+        unsigned
+    }
+
+    /// Combine terms in the form of (a + b + c + ...) - (x + y + z + ...)
+    /// `adds` are terms that are to be added together (i.e. a, b, c. ..)
+    /// `subs` are terms that are to be summed, and then subtracted from `adds` (i.e. x, y, z, ...)
+    fn combine_add_sub_terms(mut adds: Vec<Box<SymOp>>, mut subs: Vec<Box<SymOp>>) -> Result<SymOp, Error> {
+        // remove identity elements
+        let mut filtered_adds = vec![];
+        let unsigned = Self::check_add_sub_unsigned(&adds, &subs);
+        for i in 0..adds.len() {
+            if adds[i] == Box::new(SymOp::Constant(Value::UInt(0))) {
+                continue;
+            }
+            if adds[i] == Box::new(SymOp::Constant(Value::Int(0))) {
+                continue;
+            }
+            filtered_adds.push(adds[i].clone());
+        }
+        adds = filtered_adds;
+
+        let mut filtered_subs = vec![];
+        for i in 0..subs.len() {
+            if subs[i] == Box::new(SymOp::Constant(Value::UInt(0))) {
+                continue;
+            }
+            if subs[i] == Box::new(SymOp::Constant(Value::Int(0))) {
+                continue;
+            }
+            filtered_subs.push(subs[i].clone());
+        }
+        subs = filtered_subs;
+
+        if adds.len() == 0 && subs.len() == 0 {
+            if let Some(unsigned) = unsigned {
+                // at least one term
+                if unsigned {
+                    return Ok(SymOp::Constant(Value::UInt(0)));
+                }
+                else {
+                    return Ok(SymOp::Constant(Value::Int(0)));
+                }
+            }
+            else {
+                panic!("Got zero add terms");
+            }
+        }
+        else if adds.len() == 0 && subs.len() > 0 {
+            if let Some(unsigned) = unsigned {
+                // at least one term
+                if unsigned {
+                    adds.push(Box::new(SymOp::Constant(Value::UInt(0))));
+                }
+                else {
+                    adds.push(Box::new(SymOp::Constant(Value::Int(0))));
+                }
+            }
+            else {
+                panic!("Got zero terms");
+            }
+        }
+
+        let (mut add_table, mut sub_table) = Self::make_add_sub_term_counts(adds, subs)?;
+        let (add_diff, sub_diff) = Self::make_add_sub_term_diffs(&add_table, &sub_table);
+
+        trace!("remove add terms");
+        Self::remove_terms(&mut add_table, add_diff);
+        
+        trace!("remove sub terms");
+        Self::remove_terms(&mut sub_table, sub_diff);
+
+        Self::reconstitute_adds_subs(add_table, sub_table, unsigned)
+    }
 
     /// flatten a Subtract(..)'s ops to extract constants and combine terms.
     /// Any inner Add(..) and Subtract(..) ops will be removed.
@@ -1731,11 +1793,26 @@ impl SymOp {
         //
         // adds: a, f
         // subs: b, (+ c d), e, g
-        //
+        
+        trace!("flatten_subs original ops: {:?}", &ops);
+        
+        // special case -- if there's just one op, then this is a negation
+        if ops.len() == 1 {
+            if let SymOp::Constant(Value::UInt(0)) = &*ops[0] {
+                // special special case: drop the negation for zero
+                return Ok((*ops[0]).clone());
+            }
+            if let SymOp::Constant(Value::Int(0)) = &*ops[0] {
+                // special special case: drop the negation for zero
+                return Ok((*ops[0]).clone());
+            }
+
+            return Ok(Self::Subtract(ops));
+        }
+
         let mut adds = vec![];
         let mut subs = vec![];
         
-        trace!("flatten_subs original ops: {:?}", &ops);
         for (i, op) in ops.into_iter().enumerate() {
             match *op {
                 Self::Add(inner) => {
@@ -1754,14 +1831,25 @@ impl SymOp {
                         return Err(Error::Bug("empty subtraction".into()));
                     };
                     if i == 0 {
-                        adds.push(first);
-                        if rest.len() > 0 {
+                        if rest.len() == 0 {
+                            // the first term is a negation
+                            subs.push(first);
+                        }
+                        else {
+                            // the first term is a subtraction
+                            adds.push(first);
                             subs.extend(rest.to_vec().into_iter());
                         }
                     }
                     else {
-                        subs.push(first);
-                        if rest.len() > 0 {
+                        if rest.len() == 0 {
+                            // a subsequent term is a negation.
+                            // subtracting a negation is an addition
+                            adds.push(first);
+                        }
+                        else {
+                            // a subsequent term is a subtraction
+                            subs.push(first);
                             adds.extend(rest.to_vec().into_iter());
                         }
                     }
@@ -1779,7 +1867,7 @@ impl SymOp {
         trace!("flatten_subs adds = {:?}", &adds);
         trace!("flatten_subs subs = {:?}", &subs);
        
-        let combined = Self::combine_terms(adds, subs)?;
+        let combined = Self::combine_add_sub_terms(adds, subs)?;
         trace!("combine_subs: combined = {:?}", &combined);
 
         Ok(combined)
@@ -1801,7 +1889,7 @@ impl SymOp {
         // (a + b - c - d - e + f + g + h)
         // (a + b + f + g + h) - (c + d + e)
         // (- (+ a b f g h) (+ c d e))
-        trace!("flatten_adds original ops: {:?}", &ops);
+        trace!("flatten_adds: original ops: {:?}", &ops);
         let mut adds = vec![];
         let mut subs = vec![];
         for op in ops.into_iter() {
@@ -1818,7 +1906,8 @@ impl SymOp {
                     };
                     if rest.len() == 0 {
                         // adding a negation 
-                        adds.push(Box::new(Self::Subtract(inner)));
+                        // adds.push(Box::new(Self::Subtract(inner)));
+                        subs.push(first);
                     }
                     else {
                         adds.push(first);
@@ -1831,11 +1920,11 @@ impl SymOp {
             }
         }
 
-        trace!("flatten_adds adds = {:?}", &adds);
-        trace!("flatten_adds subs = {:?}", &subs);
+        trace!("flatten_adds: combine_add_sub_terms adds = {:?}", &adds);
+        trace!("flatten_adds: combine_add_sub_terms subs = {:?}", &subs);
 
-        let combined = Self::combine_terms(adds, subs)?;
-        trace!("combine_subs: combined = {:?}", &combined);
+        let combined = Self::combine_add_sub_terms(adds, subs)?;
+        trace!("flatten_adds: combine_add_sub_terms: combined = {:?}", &combined);
 
         Ok(combined)
     }
@@ -1846,13 +1935,13 @@ impl SymOp {
         let flattened_op = Self::flatten_subtractions(ops)?;
 
         trace!("{} becomes {}", &sub, &flattened_op);
-        let Self::Subtract(mut ops) = flattened_op else {
+        let Self::Subtract(ops) = flattened_op else {
             return Ok(flattened_op);
         };
 
         if ops.len() == 1 {
-            let Some(op) = ops.pop() else { unreachable!() };
-            return Ok(*op)
+            // this is a negation
+            return Ok(Self::Subtract(ops));
         }
         let Some(first) = ops.get(0) else {
             return Err(Error::Bug("unreachable: Subtract(ops) should have more than one item".into()));
@@ -3293,6 +3382,21 @@ impl SymOp {
                     trace!("(and (is-eq x k1) (>= x k2)) implies k1 >= k2");
                     self.possible = self.possible && SymOp::value_geq(k1, k2).expect("unreachable -- check_possible value_geq(3) failed");
                 }
+                // (and (is-eq x k1) (> x k1)) is false
+                if let Some(k1) = self.eq.as_ref() && let Some(k2) = self.greater.as_ref() && k1 == k2 {
+                    trace!("(and (is-eq x k1) (> x k1)) is false");
+                    self.possible = false;
+                }
+                // (and (is-eq x k1) (< x k1)) is false
+                if let Some(k1) = self.eq.as_ref() && let Some(k2) = self.lesser.as_ref() && k1 == k2 {
+                    trace!("(and (is-eq x k1) (< x k1)) is false");
+                    self.possible = false;
+                }
+                // (and (> x k1) (< x k1)) is false
+                if let Some(k1) = self.greater.as_ref() && let Some(k2) = self.lesser.as_ref() && k1 == k2 {
+                    trace!("(and (> x k1) (< x k1)) is false");
+                    self.possible = false;
+                }
             }
 
             fn simplify(&mut self) {
@@ -3360,6 +3464,9 @@ impl SymOp {
                     if op2.is_constant() {
                         add_cmp(op1, op2, Cmp::Gt);
                     }
+                    else if op1.is_constant() {
+                        add_cmp(op2, op1, Cmp::Lt);
+                    }
                     else {
                         consolidated_ops.push(Box::new(Self::Greater(op1, op2)));
                         continue;
@@ -3368,6 +3475,9 @@ impl SymOp {
                 Self::Geq(op1, op2) => {
                     if op2.is_constant() {
                         add_cmp(op1, op2, Cmp::Geq);
+                    }
+                    else if op1.is_constant() {
+                        add_cmp(op2, op1, Cmp::Leq);
                     }
                     else {
                         consolidated_ops.push(Box::new(Self::Geq(op1, op2)));
@@ -3378,6 +3488,9 @@ impl SymOp {
                     if op2.is_constant() {
                         add_cmp(op1, op2, Cmp::Leq);
                     }
+                    else if op1.is_constant() {
+                        add_cmp(op2, op1, Cmp::Geq);
+                    }
                     else {
                         consolidated_ops.push(Box::new(Self::Leq(op1, op2)));
                         continue;
@@ -3386,6 +3499,9 @@ impl SymOp {
                 Self::Less(op1, op2) => {
                     if op2.is_constant() {
                         add_cmp(op1, op2, Cmp::Lt);
+                    }
+                    else if op1.is_constant() {
+                        add_cmp(op2, op1, Cmp::Gt);
                     }
                     else {
                         consolidated_ops.push(Box::new(Self::Less(op1, op2)));
@@ -3444,6 +3560,7 @@ impl SymOp {
 
         for (_op_s, set) in cmps.iter_mut() {
             set.simplify();
+            trace!("and_inequality_constant_simplify: op = {_op_s}, set = {set:?}");
             if !set.possible {
                 return Ok(SymOp::False());
             }
@@ -3455,6 +3572,95 @@ impl SymOp {
         }
         Ok(SymOp::And(consolidated_ops))
     }
+
+
+    /// Identify symbolic contradictions for inequality
+    fn and_inequality_symbolic_contradictions(ops: Vec<Box<SymOp>>) -> Result<Vec<Box<SymOp>>, Error> {
+        // try to put all inequality symbols in partial order.
+        // If that cannot be done due to a cycle, then this is a contradiction
+        let mut order : HashMap<String, HashSet<SymOp>> = HashMap::new();
+        for op in ops.iter() {
+            match &**op {
+                Self::Less(op1, op2) => {
+                    let op1_s = op1.to_string();
+                    if let Some(successors) = order.get_mut(&op1_s) {
+                        successors.insert((**op2).clone());
+                    }
+                    else {
+                        let mut successors = HashSet::new();
+                        successors.insert((**op2).clone());
+                        order.insert(op1_s, successors);
+                    };
+                }
+                Self::Greater(op1, op2) => {
+                    let op2_s = op2.to_string();
+                    if let Some(successors) = order.get_mut(&op2_s) {
+                        successors.insert((**op1).clone());
+                    }
+                    else {
+                        let mut successors = HashSet::new();
+                        successors.insert((**op1).clone());
+                        order.insert(op2_s, successors);
+                    };
+                }
+                _x => {
+                    continue;
+                }
+            }
+        }
+        for (key, successors) in order.iter() {
+            for s in successors.iter() {
+                 if s.to_string() == *key {
+                     trace!("Term {key} is succeeded by itself");
+                     return Ok(vec![Box::new(SymOp::False())]);
+                 }
+            }
+        }
+
+        trace!("and_inequality_symbolic_contradictions: order = {order:?}");
+
+        // contract -- convert order to the transitive closure, and in doing so, reduce this
+        // and-inequality to False if any term is found to be its own successor
+        loop {
+            let keys : Vec<_> = order.keys().into_iter().map(|k| k.to_string()).collect();
+            let mut contractions = 0;
+            for key in keys.into_iter() {
+                let mut closure = HashSet::new();
+                let Some(successors) = order.remove(&key) else {
+                    continue;
+                };
+
+                let mut successor_queue : VecDeque<_> = successors.into_iter().collect();
+                while let Some(front) = successor_queue.pop_front() {
+                    let front_s = front.to_string();
+                    if front_s == key {
+                        trace!("Term {front_s} visited twice in closure computed for {key}");
+                        return Ok(vec![Box::new(SymOp::False())]);
+                    }
+                    if closure.contains(&front) {
+                        trace!("Term {front_s} visited twice in closure computed for {key}");
+                        return Ok(vec![Box::new(SymOp::False())]);
+                    }
+                    closure.insert(front.clone());
+
+                    let Some(front_successors) = order.remove(&front_s) else {
+                        continue;
+                    };
+                    contractions += front_successors.len();
+                    successor_queue.extend(front_successors.into_iter());
+                }
+                order.insert(key, closure);
+                trace!("and_inequality_symbolic_contradictions: contractions = {contractions}, order = {order:?}");
+            }
+            if contractions == 0 {
+                break;
+            }
+        }
+
+        // no contradiction found
+        Ok(ops)
+    }
+
 
     /// Identify conflicting cons tests and eliminate contradictions
     /// i.e. is-some/is-none, is-ok/is-err
@@ -3883,6 +4089,14 @@ impl SymOp {
         };
         
         trace!("simplify_and: and_inequality_constant_simplify: consolidated_ops = {}", consolidated_ops.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
+        
+        // remove (and (x > y) (x < y)) contradictions
+        let mut consolidated_ops = Self::and_inequality_symbolic_contradictions(consolidated_ops)?;
+        if consolidated_ops.len() == 1 {
+            return Ok(*consolidated_ops.pop().expect("unreachable"));
+        }
+        
+        trace!("simplify_and: and_inequality_symbolic_contradictions: consolidated_ops = {}", consolidated_ops.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
 
         // flatten (is-eq) terms which have overlapping inner terms
         let consolidated_ops = Self::and_flatten_equals(consolidated_ops)?;
@@ -3898,7 +4112,7 @@ impl SymOp {
         let consolidated_ops = Self::and_equals_redundant(consolidated_ops)?;
         
         trace!("simplify_and: and_equals_redundant: consolidated_ops = {}", consolidated_ops.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
-        
+
         // eliminate and-cons contradictions 
         let consolidated_ops = match Self::and_cons_contradiction(consolidated_ops)? {
             Self::And(ops) => ops,
@@ -4114,7 +4328,7 @@ impl SymOp {
 
     /// fold and propagate constants for a Not(..)
     fn simplify_not(op: Box<SymOp>) -> Result<SymOp, Error> {
-        match op.simplify()? {
+        match *op {
             Self::Constant(x) => {
                 let v = Self::context_free_clarity_eval_mainnet(vec![
                     SymbolicExpression::atom("not".try_into()?),
@@ -4180,9 +4394,216 @@ impl SymOp {
         }
         Ok(simplified)
     }
+        
+    fn decompose_adds_subs(op: SymOp) -> Result<(Vec<Box<SymOp>>, Vec<Box<SymOp>>), Error> {
+        match op {
+            Self::Add(ops) => {
+                Ok((ops, vec![]))
+            }
+            Self::Subtract(ops) => {
+                let Some(first) = ops.first().cloned() else {
+                    return Err(Error::Bug("Empty subtract".to_string()));
+                };
+                if let Some(rest) = ops.get(1..) {
+                    Ok((vec![first], rest.to_vec()))
+                }
+                else {
+                    // this is negation
+                    Ok((vec![], vec![first]))
+                }
+            }
+            x => Ok((vec![Box::new(x)], vec![]))
+        }
+    }
+
+    /// Gather terms across a comparator operation
+    /// Given (a1 + b1 + c1 + ...) - (x1 + y1 + z1 + ...) CMP_OP (a2 + b2 + c2 + ...) - (x2 + y2 + z2 + ..),
+    /// Reduce to (a1 + b1 + c1 + ...) + (x2 + y2 + z2 + ...) CMP_OP (a2 + b2 + c2 + ...) + (x1 + y1 + z1 + ...).
+    /// In other words, eliminate subtraction on both sides, and set the left-hand side to 0
+    fn gather_comparator_terms(left_op: Box<SymOp>, right_op: Box<SymOp>) -> Result<(Box<SymOp>, Box<SymOp>), Error> {
+        let unsigned = [&left_op, &right_op].iter().find(|op| op.is_unsigned().is_some()).map(|op| op.is_unsigned().expect("unreachable")).unwrap_or(false);
+        let zero = if unsigned {
+            Self::Constant(Value::UInt(0))
+        }
+        else {
+            Self::Constant(Value::Int(0))
+        };
+        let mut lhs = zero.clone();
+        let rhs = Self::Subtract(vec![right_op.clone(), left_op.clone()]).simplify()?;
+
+        // add subtracted terms back to lhs
+        let (mut adds, subs) = Self::decompose_adds_subs(rhs)?;
+        for sub in subs.into_iter() {
+            lhs = lhs.add(*sub);
+        }
+
+        let rhs = if adds.len() == 0 {
+            zero
+        }
+        else if adds.len() == 1 {
+            *adds.pop().expect("unreachable")
+        }
+        else {
+            Self::Add(adds)
+        };
+
+        Ok((Box::new(lhs.simplify()?), Box::new(rhs.simplify()?)))
+    }
+
+    /// Gather terms across an equality operation
+    /// N.B. the "canonical" form here is just to subtract the terms in lexigraphic order
+    fn gather_eq_terms(op_sets: Vec<Box<SymOp>>) -> Result<Vec<Box<SymOp>>, Error> {
+        if op_sets.len() < 2 {
+            return Err(Error::Bug("Equality check between fewer than 2 terms".into()));
+        }
+      
+        let is_unsigned = |ops: &[Vec<Box<SymOp>>]| -> bool {
+            let mut is_unsigned = None;
+            for op_set in ops.iter() {
+                if is_unsigned.is_some() {
+                    break;
+                }
+                for op in op_set.iter() {
+                    if op.is_unsigned().is_some() {
+                        is_unsigned = op.is_unsigned();
+                        break;
+                    }
+                }
+            }
+            is_unsigned.unwrap_or(false)
+        };
+
+        let make_zero = |ops: &[Vec<Box<SymOp>>]| -> SymOp {
+            if is_unsigned(ops) {
+                Self::Constant(Value::UInt(0))
+            }
+            else {
+                Self::Constant(Value::Int(0))
+            }
+        };
+      
+        let make_add = |mut adds: Vec<Box<SymOp>>, ops: &[Vec<Box<SymOp>>]| -> SymOp {
+            if adds.len() > 1 {
+                Self::Add(adds)
+            }
+            else if adds.len() == 1 {
+                *adds.pop().expect("unreachable")
+            }
+            else {
+                make_zero(ops)
+            }
+        };
+
+        let common_terms = |left: &HashMap<String, (Box<SymOp>, u128)>, right: &HashMap<String, (Box<SymOp>, u128)>| -> HashMap<String, (Box<SymOp>, u128)> {
+            let mut common = HashMap::new();
+            for (l_term, (l_op, l_count)) in left.iter() {
+                let Some((_, r_count)) = right.get(l_term) else {
+                    continue;
+                };
+                common.insert(l_term.clone(), (l_op.clone(), (*l_count).min(*r_count)));
+            }
+            common
+        };
+
+        for (i, op) in op_sets.iter().enumerate() {
+            trace!("gather_eq_terms: op {i} = {op}");
+        }
+
+        // consolidate subtractions
+        let mut all_adds = vec![];
+        let mut all_subs = vec![];
+        let num_terms = op_sets.len();
+        for (i, op) in op_sets.iter().enumerate() {
+            let (add, sub) = Self::decompose_adds_subs(*op.clone())?;
+
+            trace!("gather_eq_terms: op {i} adds = {add:?}");
+            trace!("gather_eq_terms: op {i} subs = {sub:?}");
+
+            all_adds.push(add);
+            all_subs.push(sub);
+        }
+
+        // add each set's subtracted terms to all _other_ sets' added terms
+        for i in 0..num_terms {
+            for j in 0..num_terms {
+                if i == j {
+                    continue;
+                }
+                all_adds[i].extend(all_subs[j].clone().into_iter());
+            }
+        }
+
+        let unsigned = is_unsigned(&all_adds);
+
+        let mut add_term_counts = vec![];
+        for i in 0..num_terms {
+            let add_term = make_add(all_adds[i].clone(), &all_adds);
+
+            trace!("gather_eq_terms: gathered term {i} = {add_term}");
+        
+            let (adds, subs) = Self::decompose_adds_subs(add_term.clone())?;
+            assert_eq!(subs.len(), 0, "Subtraction in term {}: {}", i, add_term);
+
+            let (add_term_count, _) = Self::make_add_sub_term_counts(adds, subs)?;
+            add_term_counts.push(add_term_count);
+        }
+
+        assert!(add_term_counts.len() >= 2, "BUG: did not account for all add terms");
+
+        // remove terms common to all sets
+        let mut common = common_terms(&add_term_counts[0], &add_term_counts[1]);
+        for i in 2..add_term_counts.len() {
+            let new_common = common_terms(&add_term_counts[i-1], &add_term_counts[i]);
+            let mut remove = HashSet::new();
+            for (term_s, (_, count)) in common.iter_mut() {
+                if let Some((_, new_count)) = new_common.get(term_s) {
+                    *count = (*new_count).min(*count);
+                }
+                else {
+                    remove.insert(term_s.clone());
+                }
+            }
+            for term_s in remove.into_iter() {
+                common.remove(&term_s);
+            }
+        }
+
+        trace!("gather_eq_terms: {} term(s) common to all terms", common.len());
+        for (_, (op, count)) in common.iter() {
+            trace!("gather_eq_terms: comon term: count {count} of {op}");
+        }
+
+        if common.len() == 0 {
+            // nothing in common, so we can stop
+            return Ok(op_sets);
+        }
+
+        let mut sub_ops = vec![];
+        for (_, (op, count)) in common.into_iter() {
+            let term = if count > 1 {
+                let count_term = if unsigned {
+                    Box::new(Self::Constant(Value::UInt(count as u128)))
+                }
+                else {
+                    Box::new(Self::Constant(Value::Int(count as i128)))
+                };
+                Self::Multiply(vec![count_term, op])
+            }
+            else {
+                *op
+            };
+            sub_ops.push(Box::new(term));
+        }
+
+        let mut new_ops = vec![];
+        for i in 0..num_terms {
+            let adds_uniq = Box::new(Self::Subtract(vec![Box::new(make_add(all_adds[i].clone(), &all_adds)), Box::new(make_add(sub_ops.clone(), &all_adds))]).simplify()?);
+            new_ops.push(adds_uniq);
+        }
+        Ok(new_ops)
+    }
 
     // fold and propagate constants for an Equals(..)
-    // TODO: term-gathering
     fn simplify_equals(ops: Vec<Box<SymOp>>) -> Result<SymOp, Error> {
         let mut consolidated_ops = vec![];
         for op in ops.into_iter() {
@@ -4205,6 +4626,12 @@ impl SymOp {
             return Ok(Self::False());
         }
 
+        trace!("simplify_equals: simplified = {}", simplified.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
+
+        let simplified = Self::gather_eq_terms(simplified)?;
+        
+        trace!("simplify_equals: gather_eq_terms = {}", simplified.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
+        
         Ok(Self::Equals(simplified))
     }
     
@@ -4737,83 +5164,26 @@ impl SymOp {
                 Self::simplify_not(op)
             },
             Self::Greater(x, y) => {
-                // TODO: term-gathering
-                let op = Self::simplify_native_2args(">", x, y, |x, y| Self::Greater(x, y))?;
-                if let Self::Greater(x, y) = op {
-                    // put constants on the right hand side
-                    if x.is_constant() && !y.is_constant() {
-                        Ok(Self::Less(y, x))
-                    }
-                    // trivial case: 0 > y never
-                    else if let Self::Constant(Value::UInt(0)) = *x {
-                        Ok(Self::False())
-                    }
-                    else {
-                        Ok(Self::Greater(x, y))
-                    }
-                }
-                else {
-                    Ok(op)
-                }
+                Ok(Self::Less(y, x))
             }
             Self::Geq(x, y) => {
-                // TODO: term-gathering
-                let op = Self::simplify_native_2args(">=", x, y, |x, y| Self::Geq(x, y))?;
-                if let Self::Geq(x, y) = op {
-                    // put constants on the right hand side
-                    if x.is_constant() && !y.is_constant() {
-                        Ok(Self::Leq(y, x))
-                    }
-                    // trivial case: x >= u0 always
-                    else if let Self::Constant(Value::UInt(0)) = *y {
-                        Ok(Self::True())
-                    }
-                    else {
-                        Ok(Self::Geq(x, y))
-                    }
-                }
-                else {
-                    Ok(op)
-                }
+                Ok(Self::Leq(y, x))
             },
             Self::Equals(ops) => {
                 Self::simplify_equals(ops)
             }
             Self::Leq(x, y) => {
-                // TODO: term-gathering
-                let op = Self::simplify_native_2args("<=", x, y, |x, y| Self::Leq(x, y))?;
-                if let Self::Leq(x, y) = op {
-                    // put constants on the right hand side
-                    if x.is_constant() && !y.is_constant() {
-                        Ok(Self::Geq(y, x))
-                    }
-                    // trivial case: u0 <= y always
-                    else if let Self::Constant(Value::UInt(0)) = *x {
-                        Ok(Self::True())
-                    }
-                    else {
-                        Ok(Self::Leq(x, y))
-                    }
-                }
-                else {
-                    Ok(op)
-                }
+                Ok(Self::Or(vec![Box::new(Self::Equals(vec![x.clone(), y.clone()])), Box::new(Self::Less(x, y))]))
             },
             Self::Less(x, y) => {
-                // TODO: term-gathering
                 let op = Self::simplify_native_2args("<", x, y, |x, y| Self::Less(x, y))?;
                 if let Self::Less(x, y) = op {
-                    // put constants on the right hand side
-                    if x.is_constant() && !y.is_constant() {
-                        Ok(Self::Greater(y, x))
-                    }
                     // trivial case: x < u0 never
-                    else if let Self::Constant(Value::UInt(0)) = *y {
-                        Ok(Self::False())
+                    if let Self::Constant(Value::UInt(0)) = *y {
+                        return Ok(Self::False())
                     }
-                    else {
-                        Ok(Self::Less(x, y))
-                    }
+                    let (new_x, new_y) = Self::gather_comparator_terms(x, y)?;
+                    Ok(Self::Less(new_x, new_y))
                 }
                 else {
                     Ok(op)
@@ -8329,21 +8699,33 @@ impl Symbex {
                         let mut var_stmts = vec![];
                         let mut map_stmts = vec![];
                         for (var_name, var_val) in cont.var_state.iter() {
-                            var_stmts.push(Box::new(SymOp::Equals(vec![Box::new(SymOp::FetchVar(var_name.clone())), Box::new(var_val.clone())])));
+                            var_stmts.push(SymOp::Equals(vec![Box::new(SymOp::FetchVar(var_name.clone())), Box::new(var_val.clone())]));
                         }
                         for (map_name, map_state) in cont.map_state.iter() {
                             for (key_op, val_op) in map_state.iter() {
-                                map_stmts.push(Box::new(SymOp::Equals(vec![Box::new(SymOp::FetchEntry(map_name.clone(), Box::new(key_op.clone()))), Box::new(val_op.clone())])));
+                                map_stmts.push(SymOp::Equals(vec![Box::new(SymOp::FetchEntry(map_name.clone(), Box::new(key_op.clone()))), Box::new(SymOp::ConsSome(Box::new(val_op.clone())))]));
                             }
                         }
-                        let full_predicate = SymOp::And(vec![
-                            Box::new(cont.predicate.clone().as_symop()),
-                            Box::new(SymOp::And(map_stmts)),
-                            Box::new(SymOp::And(var_stmts))
-                        ]).simplify()?;
+                        for (map_name, tombstones) in cont.map_tombstones.iter() {
+                            for key_op in tombstones.iter() {
+                                map_stmts.push(SymOp::IsNone(Box::new(SymOp::FetchEntry(map_name.clone(), Box::new(key_op.clone())))));
+                            }
+                        }
+                       
+                        let mut full_predicate = cont.predicate.clone().as_symop();
+                        for map_stmt in map_stmts.into_iter() {
+                            full_predicate = full_predicate.and(map_stmt);
+                        }
+                        for var_stmt in var_stmts.into_iter() {
+                            full_predicate = full_predicate.and(var_stmt);
+                        }
 
-                        info!("Full predicate:\n{}", &full_predicate);
-                        info!("Invariant:\n{}", &rewritten_inv);
+                        trace!("Constructed full predicate:\n{}", &full_predicate);
+
+                        full_predicate = full_predicate.simplify()?;
+
+                        debug!("Full predicate:\n{}", &full_predicate);
+                        debug!("Invariant:\n{}", &rewritten_inv);
 
                         let implies = SymOp::Or(vec![
                             Box::new(SymOp::Not(Box::new(full_predicate))),
@@ -8352,7 +8734,7 @@ impl Symbex {
                         .simplify()?
                         .try_as_predicate()?;
 
-                        info!("Implication:\n{}", &implies.clone().as_symop());
+                        debug!("Implication:\n{}", &implies.clone().as_symop());
 
                         if implies != Predicate::True {
                             failed.push(cont.clone());

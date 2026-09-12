@@ -700,7 +700,7 @@ fn test_command_trait_contract_call() {
         (if (is-eq op OP_ADD)
             (contract-call? calc add a b)
             (err ERR_NO_SUCH_OP)))
-    ", vec![]))
+    "), vec![])
     .unwrap()
     .skip_causally_independent(false)
     .skip_pure(false) 
