@@ -1681,10 +1681,10 @@ impl SymOp {
     fn check_add_sub_unsigned(adds: &[Box<SymOp>], subs: &[Box<SymOp>]) -> Option<bool> {
         let mut unsigned = None;
         for i in 0..adds.len() {
-            if adds[i] == Box::new(SymOp::Constant(Value::UInt(0))) {
+            if *adds[i] == SymOp::Constant(Value::UInt(0)) {
                 unsigned = Some(true);
             }
-            else if adds[i] == Box::new(SymOp::Constant(Value::Int(0))) {
+            else if *adds[i] == SymOp::Constant(Value::Int(0)) {
                 unsigned = Some(false);
             }
             else if let Some(s) = adds[i].is_unsigned() {
@@ -1696,10 +1696,10 @@ impl SymOp {
         }
 
         for i in 0..subs.len() {
-            if subs[i] == Box::new(SymOp::Constant(Value::UInt(0))) {
+            if *subs[i] == SymOp::Constant(Value::UInt(0)) {
                 unsigned = Some(true);
             }
-            else if subs[i] == Box::new(SymOp::Constant(Value::Int(0))) {
+            else if *subs[i] == SymOp::Constant(Value::Int(0)) {
                 unsigned = Some(false);
             }
             else if let Some(s) = subs[i].is_unsigned() {
@@ -1720,10 +1720,10 @@ impl SymOp {
         let mut filtered_adds = vec![];
         let unsigned = Self::check_add_sub_unsigned(&adds, &subs);
         for i in 0..adds.len() {
-            if adds[i] == Box::new(SymOp::Constant(Value::UInt(0))) {
+            if *adds[i] == SymOp::Constant(Value::UInt(0)) {
                 continue;
             }
-            if adds[i] == Box::new(SymOp::Constant(Value::Int(0))) {
+            if *adds[i] == SymOp::Constant(Value::Int(0)) {
                 continue;
             }
             filtered_adds.push(adds[i].clone());
@@ -1732,10 +1732,10 @@ impl SymOp {
 
         let mut filtered_subs = vec![];
         for i in 0..subs.len() {
-            if subs[i] == Box::new(SymOp::Constant(Value::UInt(0))) {
+            if *subs[i] == SymOp::Constant(Value::UInt(0)) {
                 continue;
             }
-            if subs[i] == Box::new(SymOp::Constant(Value::Int(0))) {
+            if *subs[i] == SymOp::Constant(Value::Int(0)) {
                 continue;
             }
             filtered_subs.push(subs[i].clone());
@@ -2532,6 +2532,76 @@ impl SymOp {
         }
     }
 
+    /// Compute a maximum sequence length, in order to eliminate impossible or tautological comparisons between
+    /// `(len X)` and a constant
+    fn compute_max_sequence_len(seq_op: &Box<SymOp>) -> Result<usize, Error> {
+        let l = match *seq_op {
+            Self::Constant(v) => {
+                let v = Self::context_free_clarity_eval_mainnet(vec![
+                    SymbolicExpression::atom("len".try_into()?),
+                    SymbolicExpression::literal_value(v)
+                ])?
+                .ok_or_else(|| Error::Bug("Clarity VM evaluated to None".into()))?
+                .expect_u128()?;
+                usize::try_from(v).map_err(|_| Error::Bug("Constant with length greater than usize::MAX".into()))?
+            }
+            Self::ListCons(inner_ops) => {
+                inner_ops.len()
+            }
+            Self::Append(inner_list, new_item) => {
+                let sz = Self::compute_max_sequence_len(inner_list)?;
+                sz + 1
+            }
+            Self::Concat(inner_ops) => {
+                let inner_max_lens : Vec<Result<_, _> = inner_ops
+                    .iter()
+                    .map(|op| Self::compute_max_sequence_len(op))
+                    .collect();
+
+                let mut max = 0;
+                for inner_max_res in inner_max_lens.into_iter() {
+                    max += inner_max_res?;
+                }
+                max
+            },
+            Self::AsMaxLen(_, max_len_op) => {
+                // max_len_op must be a constant
+                let Self::Constant(Value::UInt(v)) = max_len_op else {
+                    return Err(Error::Bug("Clarity VM allowed a non-constant maximum length in `as-max-len?`".into()));
+                };
+                usize::try_from(v).map_err(|_| Error::Bug("Constant with length greater than usize::MAX".into()))?
+            }
+            Self::LoadedDataVariable(_, inner_op) => {
+                Self::compute_max_sequence_len(inner_op)
+            }
+            Self::UnwrapPanic(inner_op) => {
+                Self::compute_max_sequence_len(inner_op)
+            }
+            Self::UnwrapErrPanic(inner_op) => {
+                Self::compute_max_sequence_len(inner_op)
+            }
+            Self::TupleGet(key, tuple_op) => {
+
+            }
+            Self::Hash160(_) => {
+                20
+            }
+            Self::Sha256(_) => {
+                32
+            }
+            Self::Sha512(_) => {
+                32
+            }
+            Self::Sha512Trunc256(_) => {
+                32
+            }
+            Self::Keccak256(_) => {
+                32
+            }
+
+        }
+    }
+
     /// Combine all inner Self::Equals(..) and Self::Not(Self::Equals(..)) statements that share at
     /// least one non-constant term.
     ///
@@ -3225,16 +3295,52 @@ impl SymOp {
                             changed = true;
                         }
                         // (and (x < k) (not (is-eq x (- k 1)))) implies x < k - 1
-                        if let Some(k1) = self.lesser.as_ref() && let Some(k2) = SymOp::value_minus_1(k1) {
+                        if let Some(k1) = self.lesser.as_ref() && let Some(k2) = SymOp::value_minus_1(k1) && k2 == *neq {
                             trace!("(and (x < k) (not (is-eq x (- k 1)))) implies x < k - 1");
                             self.set_lesser(k2);
                             neq_remove.insert(neq.clone());
                             changed = true;
                         }
                         // (and (x > k) (not (is-eq x (+ k 1))) implies x > k + 1
-                        if let Some(k1) = self.greater.as_ref() && let Some(k2) = SymOp::value_plus_1(k1) {
+                        if let Some(k1) = self.greater.as_ref() && let Some(k2) = SymOp::value_plus_1(k1) && k2 == *neq {
                             trace!("(and (x > k) (not (is-eq x (+ k 1))) implies x > k + 1");
                             self.set_greater(k2);
+                            neq_remove.insert(neq.clone());
+                            changed = true;
+                        }
+                        // (and (x < k) (not (is-eq x k))) reduces to just (x < k)
+                        if let Some(k1) = self.lesser.as_ref() && k1 == neq {
+                            trace!("(and (x < k) (not (is-eq x k))) implies just x < k");
+                            neq_remove.insert(neq.clone());
+                            changed = true;
+                        }
+                        // (and (x > k) (not (is-eq x k))) reduces to just (x > k)
+                        if let Some(k1) = self.greater.as_ref() && k1 == neq {
+                            trace!("(and (x > k) (not (is-eq x k))) implies just x > k");
+                            neq_remove.insert(neq.clone());
+                            changed = true;
+                        }
+                        // (and (x < k1) (not (is-eq x k2))) and k2 > k1 implies just x < k1
+                        if let Some(k1) = self.lesser.as_ref() && SymOp::value_greater(neq, k1) == Some(true) {
+                            trace!("(and (x < k1) (not (is-eq x k2))) and k2 > k1 implies just x < k1");
+                            neq_remove.insert(neq.clone());
+                            changed = true;
+                        }
+                        // (and (x <= k1) (not (is-eq x k2))) and k2 > k1 implies just x <= k1
+                        if let Some(k1) = self.leq.as_ref() && SymOp::value_greater(neq, k1) == Some(true) {
+                            trace!("(and (x <= k1) (not (is-eq x k2))) and k2 > k1 implies just x <= k1");
+                            neq_remove.insert(neq.clone());
+                            changed = true;
+                        }
+                        // (and (x > k1) (not (is-eq x k2))) and k2 < k1 implies just x < k1
+                        if let Some(k1) = self.greater.as_ref() && SymOp::value_lesser(neq, k1) == Some(true) {
+                            trace!("(and (x > k1) (not (is-eq x k2))) and k2 < k1 implies just x > k1");
+                            neq_remove.insert(neq.clone());
+                            changed = true;
+                        }
+                        // (and (x >= k1) (not (is-eq x k2))) and k2 < k1 implies just x <= k1
+                        if let Some(k1) = self.geq.as_ref() && SymOp::value_lesser(neq, k1) == Some(true) {
+                            trace!("(and (x >= k1) (not (is-eq x k2))) and k2 < k1 implies just x >= k1");
                             neq_remove.insert(neq.clone());
                             changed = true;
                         }
@@ -4451,7 +4557,6 @@ impl SymOp {
     }
 
     /// Gather terms across an equality operation
-    /// N.B. the "canonical" form here is just to subtract the terms in lexigraphic order
     fn gather_eq_terms(op_sets: Vec<Box<SymOp>>) -> Result<Vec<Box<SymOp>>, Error> {
         if op_sets.len() < 2 {
             return Err(Error::Bug("Equality check between fewer than 2 terms".into()));
@@ -11302,14 +11407,20 @@ impl Symbex {
                                                         if func.arguments.len() != 1 {
                                                             return Err(Error::Bug(format!("Function `{func_name}` takes {} arguments but expected 1 argument", func.arguments.len())));
                                                         }
-                                                        let mut binding_cont = Continuation::from_parent(Rc::new(cont), format!("{function_name}/{func_name}.seq-{seq_i}.binding"), func.body.span.start_line);
-                                                        
+                                                        let mut binding_cont = Continuation::from_parent(Rc::new(cont), format!("{function_name}/{func_name}.seq-{seq_i}.binding"), func.body.span.start_line);                                                        
                                                         binding_cont.bind_symop(&func.arguments[0], SymOp::UnwrapPanic(Box::new(SymOp::ElementAt(Box::new(seq_formula.clone()), Box::new(SymOp::Constant(Value::UInt(seq_i - 1)))))).simplify()?);
 
-                                                        let callee_cont = Continuation::from_caller(Rc::new(binding_cont), format!("{function_name}/{func_name}.seq-{seq_i}.body"), func_name.to_string(), func.body.span.start_line);
-                                                        let body_conts = self.eval(&config, callee_cont, &func.body)?;
-
                                                         let mut return_conts = vec![];
+                                                        let body_conts = match self.eval_shortcircuit_higher_order_contract_function(&config, func_name, binding_cont, func.body.span.start_line)? {
+                                                            Ok(conts) => conts,
+                                                            Err(binding_cont) => {
+                                                                // have to directly evaluate
+                                                                let callee_cont = Continuation::from_caller(Rc::new(binding_cont), format!("{function_name}/{func_name}.seq-{seq_i}.body"), func_name.to_string(), func.body.span.start_line);
+                                                                let body_conts = self.eval(&config, callee_cont, &func.body)?;
+                                                                body_conts
+                                                            }
+                                                        };
+
                                                         for cont in body_conts.into_iter() {
                                                             if cont.panicking {
                                                                 ret.push(cont);
@@ -11630,7 +11741,6 @@ impl Symbex {
                                                         if !descends {
                                                             continue;
                                                         }
-
                                                         // this continuation descends from this
                                                         // particular set of function arguments, so we
                                                         // can evaluate the function on them.
@@ -11642,9 +11752,68 @@ impl Symbex {
                                                             bound.push(arg_name.clone());
                                                         }
 
+                                                        let conts = match self.eval_shortcircuit_higher_order_contract_function(&config, func_name, binding_cont, func.body.span.start_line)? {
+                                                            Ok(conts) => {
+                                                                conts
+                                                                    .into_iter()
+                                                                    .map(|mut c| {
+                                                                        if c.panicking {
+                                                                            return c;
+                                                                        }
+                                                                        let return_formula = c.final_formula.clone();
+
+                                                                        // return value is a list-cons of all
+                                                                        // values up to seq_i
+                                                                        c.final_formula = if let SymOp::ListCons(mut items) = list_cons.clone() {
+                                                                            items.push(Box::new(return_formula.clone()));
+                                                                            SymOp::ListCons(items)
+                                                                        }
+                                                                        else {
+                                                                            unreachable!()
+                                                                        };
+                                                                        for unbind in bound.iter() {
+                                                                            c.unbind(unbind);
+                                                                        }
+                                                                        c
+                                                                    })
+                                                                    .collect()
+                                                            },
+                                                            Err(binding_cont) => {
+                                                                // have to directly evaluate
+                                                                let callee_cont = Continuation::from_caller(Rc::new(binding_cont), format!("{function_name}/{func_name}.seq-{seq_i}.body"), func_name.to_string(), func.body.span.start_line);
+                                                                let body_conts : Vec<_> = self.eval(&config, callee_cont, &func.body)?
+                                                                    .into_iter()
+                                                                    .map(|cont| {
+                                                                        if cont.panicking {
+                                                                            return cont;
+                                                                        }
+                                                                        let mut return_cont = Continuation::from_callee(Rc::new(cont), format!("{function_name}/{func_name}.seq-{seq_i}.return"), func.body.span.start_line);
+                                                                        let return_formula = return_cont.final_formula.clone();
+
+                                                                        // return value is a list-cons of all
+                                                                        // values up to seq_i
+                                                                        return_cont.final_formula = if let SymOp::ListCons(mut items) = list_cons.clone() {
+                                                                            items.push(Box::new(return_formula));
+                                                                            SymOp::ListCons(items)
+                                                                        }
+                                                                        else {
+                                                                            unreachable!()
+                                                                        };
+                                                                        
+                                                                        for unbind in bound.iter() {
+                                                                            return_cont.unbind(unbind);
+                                                                        }
+                                                                        return_cont
+                                                                    })
+                                                                    .collect();
+
+                                                                body_conts
+                                                            }
+                                                        };
+
+                                                        /*
                                                         let callee_cont = Continuation::from_caller(Rc::new(binding_cont), format!("{function_name}/{func_name}.seq-{seq_i}.body"), func_name.to_string(), func.body.span.start_line);
                                                         let conts = self.eval(&config, callee_cont, &func.body)?;
-
                                                         let conts : Vec<_> = conts
                                                             .into_iter()
                                                             .map(|cont| {
@@ -11669,6 +11838,7 @@ impl Symbex {
                                                                 return_cont
                                                             })
                                                             .collect();
+                                                        */
 
                                                         called_conts.extend(conts.into_iter());
                                                     }

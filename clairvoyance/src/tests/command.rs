@@ -584,7 +584,7 @@ fn test_command_halt_unmatched_halt() {
 }
 
 #[test]
-fn test_command_define_formula() {
+fn test_command_define_symbol() {
     let contract_id = default_contract_id();
     let mut symbex = Symbex::from_contract(contract_id.clone(), r#"
         (define-map m uint uint)

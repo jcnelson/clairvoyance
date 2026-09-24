@@ -304,37 +304,37 @@ impl Halt {
 impl fmt::Display for Halt {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         write!(f, "(halt\n")?;
-        write!(f, "  (result {})\n", self.formula)?;
+        write!(f, "   (result\n{}   )\n", self.formula.to_pretty_string(2))?;
         if let Some(cond) = self.condition.as_ref() {
-            write!(f, "  (condition {cond})\n")?;
+            write!(f, "   (condition\n{}   )\n", cond.to_pretty_string(2))?;
         }
         else {
-            write!(f, "  (predicate {})\n", self.predicate)?;
+            write!(f, "   (predicate\n{}   )\n", self.predicate.to_pretty_string(2))?;
         }
         for (var_name, symop) in self.vars.iter() {
-            write!(f, "  (var-write\n    {var_name}\n    {symop})\n")?;
+            write!(f, "   (var-write\n      {var_name}\n{}\n  )\n", symop.to_pretty_string(2))?;
         }
         for (map_name, map_state) in self.map_state.iter() {
             for (key, value) in map_state {
-                write!(f, "  (map-write\n    {map_name}\n      {key}\n      {value})\n")?;
+                write!(f, "   (map-write\n      {map_name}\n{}\n{}\n   )\n", key.to_pretty_string(3), value.to_pretty_string(3))?;
             }
         }
         for (map_name, keys) in self.map_tombstones.iter() {
             for key in keys {
-                write!(f, "  (map-delete\n    {map_name}\n    {key})\n")?;
+                write!(f, "   (map-delete\n      {map_name}\n{}\n   )\n", key.to_pretty_string(2))?;
             }
         }
         for name in self.reachable_var_writes.iter() {
             if self.vars.contains_key(name) {
                 continue;
             }
-            write!(f, "  (reachable-var-write {name})\n")?;
+            write!(f, "   (reachable-var-write {name})\n")?;
         }
         for name in self.reachable_map_writes.iter() {
             if self.map_state.contains_key(name) || self.map_tombstones.contains_key(name) {
                 continue;
             }
-            write!(f, "  (reachable-map-write {name})\n")?;
+            write!(f, "   (reachable-map-write {name})\n")?;
         }
         write!(f, ")")?;
         Ok(())
