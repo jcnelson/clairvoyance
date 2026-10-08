@@ -422,6 +422,11 @@ OR-ing of each constituent halting states.
 These heuristics can be disabled on a per-function or even a pure
 Clarity expression basis via the `explore-all` keyword, among others.
 
+In addition, Clairvoyance offers the `assumption` directive, which allows the
+programmer to define a logical predicate over symbols in a Clarity expression
+(usually a function definition) that must be true for a continuation to be
+considered.  See the keyword reference below for an example.
+
 ## Keyword Reference
 
 Clairvoyance is designed to be used iteratively and incrementally with
@@ -431,6 +436,85 @@ function with them via a `(@clairvoyance ..)` directive so that the behaviors
 the halting states encode can be later checked via `clairvoyance check`.
 
 The keywords supported so far are:
+
+### `assumption`
+
+**Signature**:  `(assumption formula:symop)`
+
+**Usage**:  This keyword defines a logical predicate that will be conjoined
+(i.e. "`and`-ed") with each evaluated continuation's reachability predicate as
+part of a program's evaluation.  All continuations derived from the affected
+continuation will have predicates containing the assumption's logical predicate.
+In particular, this keyword can be used to reduce the search space for halting
+states by proactively declaring certain halting states unreachable.
+
+**Example**:
+
+```clarity
+;; Produces a PoX-5 Bitcoin lockup witness script.
+;;
+;; Due to the `assumption` keyword below, only continuations
+;; in which `unlock-burn-height` are between u970219 and u16777215
+;; will be explored.  All other continuations will be discarded.
+;;
+;; This reduces the search space for this function's halting states.
+;; Normally, the inner function call `(make-script-num unlock-burn-height)` would
+;; produce five halting states (a halting state for an optional 2-byte, 3-byte, 4-byte
+;; and 5-byte Bitcoin script number encoding, plus the `none` result), each of
+;; which would need to be explored.  However, the only realistic values for
+;; `unlock-burn-height` are between the current Bitcoin block height (i.e.
+;; 970219) and a height that is well into the future.  With this `assumption`,
+;; only the 3-byte encoding's halting state will be explored.  This, in turn,
+;; cuts down the number of halting states for `pox5-construct-lockup-script`. 
+;; 
+;; (@clairvoyance
+;;      (explore-pure)
+;;      (explore-causally-independent)
+;;      (assumption (and
+;;          (> (unlock-burn-height uint) u970219)
+;;          (<= (unlock-burn-height uint) u16777215))))
+(define-private (pox5-construct-lockup-script
+        (staker principal)
+        (unlock-burn-height uint)
+        (staker-unlock-bytes (buff 683))
+        (early-unlock-bytes (buff 683))
+    )
+    (ok (unwrap!
+            (as-max-len? (concat
+                0x63           ;; OP_IF
+                (unwrap! (make-script-num unlock-burn-height) (err ERR_WITNESS_INTEGER_RANGE))
+                0xb167         ;; OP_CHECKLOCKTIMEVERIFY, OP_ELSE
+                0x82012088a820 ;; OP_SIZE, <32>, OP_EQUALVERIFY, OP_SHA256, OP_PUSHBYTES_32
+                (sha256 (sha256 (unwrap-panic (to-consensus-buff? staker))))
+                0x88           ;; OP_EQUALVERIFY
+                early-unlock-bytes
+                0x6869         ;; OP_ENDIF, OP_VERIFY
+                staker-unlock-bytes
+            ) u1376)
+        (err ERR_WITNESS_SCRIPT_TOO_BIG))))
+
+;; Convert a uint to a CScriptNum -- an OP_PUSHDATA followed by its little-endian byte representation.
+;; Only works for up to 4-byte numbers.  Uses helper functions `uint8-to-buff`
+;; and `to-script-num`, which are not shown in this example.
+;; 
+;; (@clairvoyance
+;;      (explore-pure)
+;;      (explore-causally-independent))
+(define-private (make-script-num (val uint))
+    (if (<= val u255)
+        (some (concat 0x01 (uint8-to-buff val)))
+    (if (<= val u65535)
+        ;; Due to the `assumption` keyword in `pox5-construct-lockup-script`,
+        ;; this is the only halting state for this function that will be
+        ;; considered when evaluating the call `(make-script-num unlock-block-height)`.
+        (some (concat 0x02 (to-script-num val)))
+    (if (<= val u16777215)
+        (some (concat 0x03 (to-script-num val)))
+    (if (<= val u4294967295)
+        (some (concat 0x04 (to-script-num val)))
+    none)))))
+
+```
 
 ### `define-symbol`
 
