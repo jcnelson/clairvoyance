@@ -19,16 +19,18 @@ use std::io::stdin;
 use std::fs;
 use std::io::Read;
 use std::path::Path;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
+use clarity_types::ClarityName;
 use clarity_types::types::{PrincipalData, StandardPrincipalData, QualifiedContractIdentifier, TraitIdentifier};
 
 pub mod ast;
 pub mod sym;
 
 use crate::core::Error;
-use crate::sym::{Symbex, Continuation};
+use crate::sym::{Symbex, Continuation, FullName};
 use crate::sym::command::Halt;
+use crate::sym::Callgraph;
 
 /// Consume a string and an optional argument (if `has_optarg` is true) from `args`.
 /// `argnames` contains the list of argument names to search for
@@ -161,6 +163,159 @@ pub fn load_contract_tx_sponsor(remaining_args: &mut Vec<String>) -> Result<Opti
     load_standard_principal(remaining_args, &["--contract-tx-sponsor"])
 }
 
+/// Load the dependent contracts
+/// format is `--dep CONTRACT_ID:/PATH/TO/CLARITY/CODE`
+/// Contracts will be instantiated in the order given
+pub fn load_deps(remaining_args: &mut Vec<String>) -> Result<Vec<(QualifiedContractIdentifier, String)>, (i32, String)> {
+    let mut deps = vec![];
+    loop {
+        let contract_id_and_file = consume_arg(remaining_args, &["--dep", "-c"], true);
+        let (contract_id, src) = match contract_id_and_file {
+            Ok(Some(contract_id_and_file)) => {
+                let mut parts = contract_id_and_file.split(":");
+                let Some(contract_id) = parts.next() else {
+                    return Err((1, format!("dependency '{contract_id_and_file}' missing ':' delimiter")));
+                };
+                let Some(src_file) = parts.next() else {
+                    return Err((1, format!("dependency '{contract_id_and_file}' missing source file")));
+                };
+                let Ok(contract_id) = QualifiedContractIdentifier::parse(&contract_id) else {
+                    return Err((1, format!("Invalid dependency contract ID '{contract_id}'")));
+                };
+                let src = match load_from_file_or_stdin(src_file) {
+                    Ok(s) => match str::from_utf8(&s) {
+                        Ok(src) => {
+                            trace!("Loaded {}-byte source code from {}", src.len(), &src_file);
+                            src.to_string()
+                        }
+                        Err(_) => {
+                            return Err((1, format!("Dependency code in '{src_file}' is not UTF-8")));
+                        }
+                    }
+                    Err(e) => {
+                        return Err((1, format!("Failed to load source code from {src_file}: {e:?}")));
+                    }
+                };
+                (contract_id, src)
+            },
+            Ok(None) => {
+                break;
+            }
+            Err(e_str) => {
+                return Err((1, e_str));
+            }
+        };
+        trace!("Dependency: {contract_id}");
+        deps.push((contract_id, src));
+    }
+    Ok(deps)
+}
+
+/// Load concretized traits
+/// format is `--concretized-trait CONTRACT_ID.FUNCTION_NAME.VARIABLE_NAME:TRAIT_IMPL_CONTRACT_ID
+pub fn load_concretized_traits(remaining_args: &mut Vec<String>) -> Result<HashMap<FullName, HashMap<ClarityName, QualifiedContractIdentifier>>, (i32, String)> {
+    let mut concretized_traits : HashMap<FullName, HashMap<ClarityName, QualifiedContractIdentifier>> = HashMap::new();
+    loop {
+        let trait_binding = consume_arg(remaining_args, &["--concretized-trait"], true);
+        match trait_binding {
+            Ok(Some(trait_binding)) => {
+                let mut parts = trait_binding.split(":");
+                let Some(fq_var_name) = parts.next() else {
+                    return Err((1, format!("Failed to parse fully-qualified variable name from {trait_binding}")));
+                };
+                let Some(impl_contract_id) = parts.next() else {
+                    return Err((1, format!("Failed to parse trait implementation contract from {trait_binding}")));
+                };
+                if parts.next().is_some() {
+                    return Err((1, format!("Invalid value {trait_binding}: too many `:` separators")));
+                };
+
+                let Ok(impl_contract_id) = QualifiedContractIdentifier::parse(&impl_contract_id) else {
+                    return Err((1, format!("Invalid contract ID {impl_contract_id}")));
+                };
+
+                // parse contract, function, variable
+                let mut parts = fq_var_name.split(".");
+                let Some(contract_address_str) = parts.next() else {
+                    return Err((1, format!("Missing contract address in {fq_var_name}")));
+                };
+                let Some(contract_name_str) = parts.next() else {
+                    return Err((1, format!("Missing contract name in {fq_var_name}")));
+                };
+                let Some(func_name_str) = parts.next() else {
+                    return Err((1, format!("Missing function name in {fq_var_name}")));
+                };
+                let Some(var_name_str) = parts.next() else {
+                    return Err((1, format!("Missing var name in {fq_var_name}")));
+                };
+
+                let Ok(contract_id) = QualifiedContractIdentifier::parse(&format!("{}.{}", contract_address_str, contract_name_str)) else {
+                    return Err((1, format!("Could not parse `{contract_address_str}.{contract_name_str}`")));
+                };
+                let Ok(func_name) = ClarityName::try_from(func_name_str) else {
+                    return Err((1, format!("Could not parse `{func_name_str}` -- invalid Clarity name")));
+                };
+                let fq_name = FullName(contract_id, func_name);
+                let Ok(var_name) = ClarityName::try_from(var_name_str) else {
+                    return Err((1, format!("Could not parse `{var_name_str}` -- invalid Clarity name")));
+                };
+
+                if let Some(traits) = concretized_traits.get_mut(&fq_name) {
+                    traits.insert(var_name, impl_contract_id);
+                }
+                else {
+                    let mut traits = HashMap::new();
+                    traits.insert(var_name, impl_contract_id);
+                    concretized_traits.insert(fq_name, traits);
+                }
+            }
+            Ok(None) => {
+                break;
+            }
+            Err(e_str) => {
+                return Err((1, e_str));
+            }
+        }
+    }
+    Ok(concretized_traits)
+}
+
+/// Load default concretized traits
+/// format is `--default-trait TRAIT_ID:TRAIT_IMPL_CONTRACT_ID`
+pub fn load_default_concretized_traits(remaining_args: &mut Vec<String>) -> Result<HashMap<TraitIdentifier, QualifiedContractIdentifier>, (i32, String)> {
+    let mut default_traits : HashMap<TraitIdentifier, QualifiedContractIdentifier> = HashMap::new();
+    loop {
+        let trait_binding = consume_arg(remaining_args, &["--default-trait"], true);
+        match trait_binding {
+            Ok(Some(trait_binding)) => {
+                let mut parts = trait_binding.split(":");
+                let Some(trait_id_str) = parts.next() else {
+                    return Err((1, format!("Failed to parse `{trait_binding}`")));
+                };
+                let Some(impl_contract_id) = parts.next() else {
+                    return Err((1, format!("Missing contract name in `{trait_binding}`")));
+                };
+
+                let Ok(trait_id) = TraitIdentifier::parse_fully_qualified(trait_id_str) else {
+                    return Err((1, format!("Failed to parse `{trait_id_str}`")));
+                };
+                let Ok(impl_contract_id) = QualifiedContractIdentifier::parse(&impl_contract_id) else {
+                    return Err((1, format!("Invalid contract ID `{impl_contract_id}`")));
+                };
+
+                default_traits.insert(trait_id, impl_contract_id);
+            }
+            Ok(None) => {
+                break;
+            }
+            Err(e_str) => {
+                return Err((1, e_str));
+            }
+        }
+    }
+    Ok(default_traits)
+}
+
 pub fn usage(msg: &str, code: i32) {
     let args: Vec<_> = env::args().collect();
     if msg.len() > 0 {  
@@ -178,6 +333,7 @@ fn run_symbex_on_functions(mut symbex: Symbex, mut func_names: Vec<String>) -> R
         func_names.extend(contract_funcs.into_iter().map(|fname| fname.to_string()));
     }
 
+    // TODO: only pre-evaluate reachable functions!
     let mut ret = BTreeMap::new();
     for func_name in func_names.iter() {
         let conts = symbex.eval_user_function(&func_name)?;
@@ -186,7 +342,11 @@ fn run_symbex_on_functions(mut symbex: Symbex, mut func_names: Vec<String>) -> R
     Ok(ret)
 }
 
-fn explore(src: &str, function_names: Vec<String>, search_paths: Vec<String>) -> Result<BTreeMap<String, Vec<Continuation>>, Error> {
+fn explore(
+    src: &str,
+    function_names: Vec<String>,
+    search_paths: Vec<String>,
+) -> Result<BTreeMap<String, Vec<Continuation>>, Error> {
     let symbex = Symbex::from_contract_comments(src, search_paths)?
         .check_proofs(false)
         .init()?;
@@ -200,6 +360,18 @@ fn check(src: &str, function_names: Vec<String>, search_paths: Vec<String>) -> R
         .init()?;
 
     run_symbex_on_functions(symbex, function_names)
+}
+
+
+fn callgraph(src: &str, search_paths: Vec<String>, func_name: String) -> Result<(Callgraph, FullName), Error> {
+    let (contract_id, mut symbex) = Symbex::from_contract_comments_ex(src, search_paths)?;
+    symbex = symbex
+        .check_proofs(false)
+        .init()?;
+
+    let fullname = FullName(contract_id, ClarityName::try_from(func_name).map_err(|_| Error::Invalid("Invalid function name {user_function}".into()))?);
+
+    Ok((symbex.callgraph().clone(), fullname))
 }
 
 
@@ -256,7 +428,7 @@ fn cli_explore(argv: &mut Vec<String>) -> (i32, String) {
             return (1, e);
         }
     };
-
+    
     match explore(&src, func_names, search_paths) {
         Ok(conts) => {
             let mut sbuf = "".to_string();
@@ -324,6 +496,55 @@ fn cli_check(argv: &mut Vec<String>) -> (i32, String) {
     }
 }
 
+fn cli_callgraph(argv: &mut Vec<String>) -> (i32, String) {
+    let Some(code_path_or_stdin) = argv.get(0) else {
+        return (1, "Missing code path".into());
+    };
+
+    let src = match load_from_file_or_stdin(code_path_or_stdin) {
+        Ok(s) => match str::from_utf8(&s) {
+            Ok(src) => {
+                trace!("Loaded {}-byte source code from {}", src.len(), &code_path_or_stdin);
+                src.to_string()
+            }
+            Err(_) => {
+                return (1, format!("Code is not UTF-8"));
+            }
+        }
+        Err(e) => {
+            return (1, format!("Failed to load source code from {code_path_or_stdin}: {e:?}"));
+        }
+    };
+    
+    let mut func_name = None;
+    for i in 1..argv.len() {
+        func_name = Some(argv[i].clone());
+        break;
+    }
+    let Some(func_name) = func_name.take() else {
+        return (1, format!("Missing function name"));
+    };
+    
+    let search_paths = match get_code_search_paths(code_path_or_stdin.clone(), argv) {
+        Ok(paths) => paths,
+        Err(e) => {
+            return (1, e);
+        }
+    };
+
+    let (callgraph, fullname) = match callgraph(&src, search_paths, func_name) {
+        Ok(x) => x,
+        Err(e) => {
+            return (2, format!("Failed to compute callgraph:\n{e}"));
+        }
+    };
+
+    let Some(view) = callgraph.view(&fullname) else {
+        return (1, format!("No such function: {fullname}"));
+    };
+    return (0, view.to_string());
+}
+
 pub fn run_subcommand(argv: &mut Vec<String>) -> (i32, String) {
     if argv.len() == 0 {
         return (1, format!("Missing subcommand"));
@@ -336,6 +557,9 @@ pub fn run_subcommand(argv: &mut Vec<String>) -> (i32, String) {
         }
         "sym" => {
             sym::run_cli_sym(argv)
+        }
+        "callgraph" => {
+            cli_callgraph(argv)
         }
         "explore" => {
             cli_explore(argv)

@@ -37,6 +37,7 @@ use clarity_types::types::TupleData;
 use clarity_types::types::signatures::{TypeSignature as TS, ListTypeData, TupleTypeSignature};
 use clarity_types::types::SequenceSubtype;
 use clarity_types::types::StringSubtype;
+use clarity_types::types::BufferLength;
 
 use stacks_common::consts::CHAIN_ID_MAINNET;
 use stacks_common::types::StacksEpochId;
@@ -118,6 +119,7 @@ fn vl(name: &str, ts: TS, len: u32) -> Box<SymOp> { Box::new(SymOp::Variable(sl(
 fn vp(name: &str) -> Box<SymOp> { Box::new(SymOp::Variable(Sym::Principal(name.into()))) }
 fn vsb(name: &str, len: u32) -> Box<SymOp> { Box::new(SymOp::Variable(Sym::Sequence(name.into(), SequenceSubtype::BufferType(len.try_into().unwrap())))) }
 fn vssa(name: &str, len: u32) -> Box<SymOp> { Box::new(SymOp::Variable(Sym::Sequence(name.into(), SequenceSubtype::StringType(StringSubtype::ASCII(len.try_into().unwrap()))))) }
+fn vsl(name: &str, ts: TS, len: u32) -> Box<SymOp> { Box::new(SymOp::Variable(sl(name, ts, len))) }
 
 fn add(ops: Vec<Box<SymOp>>) -> Box<SymOp> { Box::new(SymOp::Add(ops)) }
 fn add2(op1: Box<SymOp>, op2: Box<SymOp>) -> Box<SymOp> { add(vec![op1, op2]) }
@@ -126,6 +128,7 @@ fn sub2(op1: Box<SymOp>, op2: Box<SymOp>) -> Box<SymOp> { sub(vec![op1, op2]) }
 fn mul(ops: Vec<Box<SymOp>>) -> Box<SymOp> { Box::new(SymOp::Multiply(ops)) }
 fn mul2(op1: Box<SymOp>, op2: Box<SymOp>) -> Box<SymOp> { mul(vec![op1, op2]) }
 fn div(ops: Vec<Box<SymOp>>) -> Box<SymOp> { Box::new(SymOp::Divide(ops)) }
+fn div2(op1: Box<SymOp>, op2: Box<SymOp>) -> Box<SymOp> { div(vec![op1, op2]) }
 fn rem(op1: Box<SymOp>, op2: Box<SymOp>) -> Box<SymOp> { Box::new(SymOp::Modulo(op1, op2)) }
 fn pow(base: Box<SymOp>, exp: Box<SymOp>) -> Box<SymOp> { Box::new(SymOp::Power(base, exp)) }
 fn log2(op: Box<SymOp>) -> Box<SymOp> { Box::new(SymOp::Log2(op)) }
@@ -152,10 +155,12 @@ fn is_some(op: Box<SymOp>) -> Box<SymOp> { Box::new(SymOp::IsSome(op)) }
 fn is_none(op: Box<SymOp>) -> Box<SymOp> { Box::new(SymOp::IsNone(op)) }
 fn unwrap_panic(op: Box<SymOp>) -> Box<SymOp> { Box::new(SymOp::UnwrapPanic(op)) }
 fn unwrap_err_panic(op: Box<SymOp>) -> Box<SymOp> { Box::new(SymOp::UnwrapErrPanic(op)) }
+fn to_consensus_buff(op: Box<SymOp>) -> Box<SymOp> { Box::new(SymOp::ToConsensusBuff(op)) }
 fn panic() -> Box<SymOp> { Box::new(SymOp::Panic) }
 fn lcons(items: Vec<Box<SymOp>>) -> Box<SymOp> { Box::new(SymOp::ListCons(items)) }
 fn llen(item: Box<SymOp>) -> Box<SymOp> { Box::new(SymOp::Len(item)) }
 fn elat(seq: Box<SymOp>, index: Box<SymOp>) -> Box<SymOp> { Box::new(SymOp::ElementAt(seq, index)) }
+fn slice(seq: Box<SymOp>, start: Box<SymOp>, end: Box<SymOp>) -> Box<SymOp> { Box::new(SymOp::Slice(seq, start, end)) }
 fn bitand(items: Vec<Box<SymOp>>) -> Box<SymOp> { Box::new(SymOp::BitwiseAnd(items)) }
 fn bitor(items: Vec<Box<SymOp>>) -> Box<SymOp> { Box::new(SymOp::BitwiseOr(items)) }
 fn bitxor(items: Vec<Box<SymOp>>) -> Box<SymOp> { Box::new(SymOp::BitwiseXor(items)) }
@@ -1208,6 +1213,36 @@ fn test_consolidate_and() {
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
     assert_eq!(simplified, Ok(*f()));
+
+    // (and
+    //      (is-eq (+ (/ (* (len (keys (list 9 (buff 33)))) u2) u3) u1) u0)
+    //      (is-eq (len (keys (list 9 (buff 33)))) u8)
+    // )
+    // 
+    // is a contradiction
+    let symop = and(vec![
+        eq(add2(div2(mul2(llen(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9)), cu(2)), cu(3)), cu(1)), cu(0)),
+        eq(llen(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9)), cu(8))
+    ]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*f()));
+
+    //  (and
+    //      (is-eq (len (keys (list 9 (buff 33)))) u9)
+    //      (not (is-eq (+ (/ (* (len (keys (list 9 (buff 33)))) u2) u3) u1) u0))
+    //  )
+    //
+    //  reduces to
+    //
+    //  (is-eq (len (keys (list 9 (buff 33)))) u9)
+    let symop = and(vec![
+        eq(llen(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9)), cu(9)),
+        not(eq(add2(div2(mul2(llen(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9)), cu(2)), cu(3)), cu(1)), cu(0)))
+    ]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*eq(llen(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9)), cu(9))));
 }
 
 #[test]
@@ -1679,6 +1714,23 @@ fn test_consolidate_is_some() {
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
     assert_eq!(simplified, Ok(*cb(false)));
+    
+    // (is-some (slice? (unwrap-panic (to-consensus-buff? (+ (/ (* (len (keys (list 9 (buff 33)))) u2) u3) u81))) u16 u17))
+    // == true
+    let symop = is_some(
+        slice(
+            unwrap_panic(
+                to_consensus_buff(
+                    add2(div2(mul2(llen(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9)), cu(2)), cu(3)), cu(81))
+                )
+            ),
+            cu(16),
+            cu(17)
+        )
+    );
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*cb(true)));
 }
 
 #[test]
@@ -1850,6 +1902,26 @@ fn test_flatten_multiply() {
     assert_eq!(simplified, Ok(*sub2(add2(mul2(vu("x"), vu("x")), mul2(cu(1), cu(2))), add2(mul2(cu(1), vu("x")), mul2(cu(2), vu("x"))))));
 }
 
+#[test]
+fn test_consolidate_len() {
+    let symop = llen(
+        unwrap_panic(
+            slice(
+                unwrap_panic(
+                    to_consensus_buff(
+                        add2(div2(mul2(llen(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9)), cu(2)), cu(3)), cu(81))
+                    )
+                ),
+                cu(16),
+                cu(17)
+            )
+        )
+    );
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    // this can never fail
+    assert_eq!(simplified, Ok(*cu(1)));
+}
 
 #[test]
 fn test_commutative_cmp() {
@@ -6196,3 +6268,63 @@ fn test_continuation_combination() {
     ]);
 }
 
+#[test]
+fn test_halt_list_len() {
+    let contract_id = default_contract_id();
+    let mut symbex = Symbex::from_contract(contract_id.clone(), r#"
+(define-constant OP_CHECKMULTISIG 0xae)
+
+;; Iterator to build up a multisig script
+(define-private (make-multisig-script-iter
+    (key (buff 33))
+    (script (buff 1376)))
+
+    (unwrap-panic (as-max-len? (concat script 0x21 key) u1376)))
+
+;; Convert an u8 into a (buff 1)
+;; Upper bits are dropped
+(define-private (uint8-to-buff (val uint))
+    (unwrap-panic (as-max-len? (unwrap-panic (slice? (unwrap-panic (to-consensus-buff? val)) u16 u17)) u1)))
+
+;; Convert a value between 0 and 16 (inclusive) to its opcode
+(define-private (uint-to-op (val uint))
+    (if (is-eq val u0)
+        (some 0x00)
+    (if (<= u16 val)
+        none
+        (some (uint8-to-buff (+ u80 val))))))
+ 
+
+;; Create a multisig script out of keys for a cosigner.
+;; It must have at least 2/3 threshold.
+;; (@clairvoyance (explore-all))
+(define-private (make-cosigner-multisig-script (keys (list 9 (buff 33))))
+    (let (
+        (threshold (if (< (len keys) u4)
+            (len keys)
+            (+ u1 (/ (* u2 (len keys)) u3))))
+
+        ;; SAFETY: the list can be no more than 9, so this is always (some ..)
+        (threshold-op (unwrap-panic (uint-to-op threshold)))
+        (total-op (unwrap-panic (uint-to-op (len keys))))
+    )
+    (unwrap-panic
+        (as-max-len? (concat
+            (fold make-multisig-script-iter keys threshold-op)
+            total-op
+            OP_CHECKMULTISIG)
+        u1376))))
+    "#
+    )
+    .unwrap()
+    .skip_causally_independent(false)
+    .skip_pure(false) 
+    .init()
+    .unwrap();
+
+    let termination_states = symbex.eval_user_function("make-cosigner-multisig-script").unwrap();
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+}

@@ -14,6 +14,7 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::sync::Arc;
+use std::collections::HashMap;
 
 use crate::core::DEFAULT_STACKS_EPOCH;
 use crate::core::DEFAULT_CLARITY_VERSION;
@@ -22,6 +23,7 @@ use crate::core::Error;
 use crate::core::BackingStore;
 
 use clarity_types::types::PrincipalData;
+use clarity_types::representations::SymbolicExpression;
 
 use clarity::vm::analysis;
 use clarity::vm::analysis::ContractAnalysis;
@@ -33,7 +35,7 @@ use clarity::vm::contexts::ContractContext;
 use clarity::vm::eval_all;
 use clarity::vm::errors::ClarityEvalError;
 use clarity::vm::costs::LimitedCostTracker;
-use clarity::vm::time_tracker::TimeTracker;
+use clarity::vm::resource_limiter::ResourceLimiter;
 
 use stacks_common::consts::CHAIN_ID_MAINNET;
 
@@ -74,7 +76,7 @@ pub fn make_contract_analysis_from_ast(
         DEFAULT_STACKS_EPOCH,
         DEFAULT_CLARITY_VERSION,
         true,
-        TimeTracker::unlimited()
+        ResourceLimiter::unlimited()
     ) {
         Ok(analysis) => analysis,
         Err(boxed_error) => {
@@ -124,3 +126,75 @@ pub fn make_contract_context_from_ast(
     context.canonicalize_types(&epoch_id)?;
     Ok(context)
 }
+
+/// Since Clarity's AST parser is buggy when it comes to finding comments, I thought I'd take a
+/// crack of writing my own pre_comment parser.
+/// Returns a map that binds a symbolic expression ID to a list of one or more comments.
+pub fn find_pre_comments(src: &str, syms: &[SymbolicExpression]) -> HashMap<u64, (u32, Vec<String>)> {
+    let src_lines : Vec<&str> = src.split('\n').collect();
+    let mut ret = HashMap::new();
+    for sym in syms.iter() {
+        let id = sym.id;
+        let start_line = sym.span.start_line;
+        if start_line <= 1 {
+            continue;
+        }
+
+        let mut line = start_line - 2;
+        debug!("Find comments starting at line {line}"); 
+        let mut comments = vec![];
+        loop {
+            let src_line = src_lines[usize::try_from(line).expect("BUG: could not convert u32 to usize")];
+            let Some(src_line) = src_line.trim_start().strip_prefix(";; ") else {
+                debug!("Stop find comments starting at line {line}: '{}'", src_line.trim_start()); 
+                break;
+            };
+            comments.push(src_line.to_string());
+            if line == 0 {
+                debug!("Stop find comments starting at line {line}"); 
+                break;
+            }
+            line -= 1;
+        }
+
+        if comments.len() == 0 {
+            continue;
+        }
+
+        comments.reverse();
+        debug!("Got {} comments for symbolic expression {sym} atarting at line {}", comments.len(), line);
+        ret.insert(id, (line, comments));
+    }
+    ret
+}
+
+
+/// Find all "top-level" comment blocks -- i.e. ones that have no indentation
+pub fn find_toplevel_comment_blocks(src: &str) -> Vec<(u32, Vec<String>)> {
+    let mut cur_block = vec![];
+    let mut blocks = vec![];
+    let mut block_id = None;
+    for (lineno, line) in src.split('\n').enumerate() {
+        if let Some(comment_line) = line.strip_prefix(";; ") {
+            if block_id.is_some() {
+                cur_block.push(comment_line.to_string());
+            }
+            else {
+                cur_block = vec![comment_line.to_string()];
+                block_id = Some(u32::try_from(lineno).expect("FATAL: cannot convert usize to u32 lineno"));
+            }
+        }
+        else {
+            if let Some(block_id) = block_id.take() && cur_block.len() > 0 {
+                blocks.push((block_id, cur_block));
+            }
+            block_id = None;
+            cur_block = vec![];
+        }
+    }
+    if let Some(block_id) = block_id.take() && cur_block.len() > 0 {
+        blocks.push((block_id, cur_block));
+    }
+    blocks
+}
+

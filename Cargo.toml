@@ -4,6 +4,9 @@ members = [
     "clairvoyance",
 ]
 
+[workspace.package]
+version = "4.0.3"
+
 # Dependencies we want to keep the same between workspace members
 [workspace.dependencies]
 ed25519-dalek = { version = "2.1.1", default-features = false }

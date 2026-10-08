@@ -35,7 +35,10 @@ use crate::cli::{
     load_tx_sender,
     load_tx_sponsor,
     load_contract_caller,
-    load_contract_tx_sponsor
+    load_contract_tx_sponsor,
+    load_deps,
+    load_concretized_traits,
+    load_default_concretized_traits,
 };
 use stacks_common::address::C32_ADDRESS_VERSION_MAINNET_SINGLESIG;
 
@@ -143,159 +146,6 @@ fn cli_get_callgraph(
         symbex.callgraph().clone(),
         FullName(contract_id, ClarityName::try_from(user_function).map_err(|_| Error::Invalid("Invalid function name {user_function}".into()))?)
     ))
-}
-
-/// Load the dependent contracts
-/// format is `--dep CONTRACT_ID:/PATH/TO/CLARITY/CODE`
-/// Contracts will be instantiated in the order given
-fn load_deps(remaining_args: &mut Vec<String>) -> Result<Vec<(QualifiedContractIdentifier, String)>, (i32, String)> {
-    let mut deps = vec![];
-    loop {
-        let contract_id_and_file = cli::consume_arg(remaining_args, &["--dep", "-c"], true);
-        let (contract_id, src) = match contract_id_and_file {
-            Ok(Some(contract_id_and_file)) => {
-                let mut parts = contract_id_and_file.split(":");
-                let Some(contract_id) = parts.next() else {
-                    return Err((1, format!("dependency '{contract_id_and_file}' missing ':' delimiter")));
-                };
-                let Some(src_file) = parts.next() else {
-                    return Err((1, format!("dependency '{contract_id_and_file}' missing source file")));
-                };
-                let Ok(contract_id) = QualifiedContractIdentifier::parse(&contract_id) else {
-                    return Err((1, format!("Invalid dependency contract ID '{contract_id}'")));
-                };
-                let src = match cli::load_from_file_or_stdin(src_file) {
-                    Ok(s) => match str::from_utf8(&s) {
-                        Ok(src) => {
-                            trace!("Loaded {}-byte source code from {}", src.len(), &src_file);
-                            src.to_string()
-                        }
-                        Err(_) => {
-                            return Err((1, format!("Dependency code in '{src_file}' is not UTF-8")));
-                        }
-                    }
-                    Err(e) => {
-                        return Err((1, format!("Failed to load source code from {src_file}: {e:?}")));
-                    }
-                };
-                (contract_id, src)
-            },
-            Ok(None) => {
-                break;
-            }
-            Err(e_str) => {
-                return Err((1, e_str));
-            }
-        };
-        trace!("Dependency: {contract_id}");
-        deps.push((contract_id, src));
-    }
-    Ok(deps)
-}
-
-/// Load concretized traits
-/// format is `--concretized-trait CONTRACT_ID.FUNCTION_NAME.VARIABLE_NAME:TRAIT_IMPL_CONTRACT_ID
-fn load_concretized_traits(remaining_args: &mut Vec<String>) -> Result<HashMap<FullName, HashMap<ClarityName, QualifiedContractIdentifier>>, (i32, String)> {
-    let mut concretized_traits : HashMap<FullName, HashMap<ClarityName, QualifiedContractIdentifier>> = HashMap::new();
-    loop {
-        let trait_binding = cli::consume_arg(remaining_args, &["--concretized-trait"], true);
-        match trait_binding {
-            Ok(Some(trait_binding)) => {
-                let mut parts = trait_binding.split(":");
-                let Some(fq_var_name) = parts.next() else {
-                    return Err((1, format!("Failed to parse fully-qualified variable name from {trait_binding}")));
-                };
-                let Some(impl_contract_id) = parts.next() else {
-                    return Err((1, format!("Failed to parse trait implementation contract from {trait_binding}")));
-                };
-                if parts.next().is_some() {
-                    return Err((1, format!("Invalid value {trait_binding}: too many `:` separators")));
-                };
-
-                let Ok(impl_contract_id) = QualifiedContractIdentifier::parse(&impl_contract_id) else {
-                    return Err((1, format!("Invalid contract ID {impl_contract_id}")));
-                };
-
-                // parse contract, function, variable
-                let mut parts = fq_var_name.split(".");
-                let Some(contract_address_str) = parts.next() else {
-                    return Err((1, format!("Missing contract address in {fq_var_name}")));
-                };
-                let Some(contract_name_str) = parts.next() else {
-                    return Err((1, format!("Missing contract name in {fq_var_name}")));
-                };
-                let Some(func_name_str) = parts.next() else {
-                    return Err((1, format!("Missing function name in {fq_var_name}")));
-                };
-                let Some(var_name_str) = parts.next() else {
-                    return Err((1, format!("Missing var name in {fq_var_name}")));
-                };
-
-                let Ok(contract_id) = QualifiedContractIdentifier::parse(&format!("{}.{}", contract_address_str, contract_name_str)) else {
-                    return Err((1, format!("Could not parse `{contract_address_str}.{contract_name_str}`")));
-                };
-                let Ok(func_name) = ClarityName::try_from(func_name_str) else {
-                    return Err((1, format!("Could not parse `{func_name_str}` -- invalid Clarity name")));
-                };
-                let fq_name = FullName(contract_id, func_name);
-                let Ok(var_name) = ClarityName::try_from(var_name_str) else {
-                    return Err((1, format!("Could not parse `{var_name_str}` -- invalid Clarity name")));
-                };
-
-                if let Some(traits) = concretized_traits.get_mut(&fq_name) {
-                    traits.insert(var_name, impl_contract_id);
-                }
-                else {
-                    let mut traits = HashMap::new();
-                    traits.insert(var_name, impl_contract_id);
-                    concretized_traits.insert(fq_name, traits);
-                }
-            }
-            Ok(None) => {
-                break;
-            }
-            Err(e_str) => {
-                return Err((1, e_str));
-            }
-        }
-    }
-    Ok(concretized_traits)
-}
-
-/// Load default concretized traits
-/// format is `--default-trait TRAIT_ID:TRAIT_IMPL_CONTRACT_ID`
-fn load_default_concretized_traits(remaining_args: &mut Vec<String>) -> Result<HashMap<TraitIdentifier, QualifiedContractIdentifier>, (i32, String)> {
-    let mut default_traits : HashMap<TraitIdentifier, QualifiedContractIdentifier> = HashMap::new();
-    loop {
-        let trait_binding = cli::consume_arg(remaining_args, &["--default-trait"], true);
-        match trait_binding {
-            Ok(Some(trait_binding)) => {
-                let mut parts = trait_binding.split(":");
-                let Some(trait_id_str) = parts.next() else {
-                    return Err((1, format!("Failed to parse `{trait_binding}`")));
-                };
-                let Some(impl_contract_id) = parts.next() else {
-                    return Err((1, format!("Missing contract name in `{trait_binding}`")));
-                };
-
-                let Ok(trait_id) = TraitIdentifier::parse_fully_qualified(trait_id_str) else {
-                    return Err((1, format!("Failed to parse `{trait_id_str}`")));
-                };
-                let Ok(impl_contract_id) = QualifiedContractIdentifier::parse(&impl_contract_id) else {
-                    return Err((1, format!("Invalid contract ID `{impl_contract_id}`")));
-                };
-
-                default_traits.insert(trait_id, impl_contract_id);
-            }
-            Ok(None) => {
-                break;
-            }
-            Err(e_str) => {
-                return Err((1, e_str));
-            }
-        }
-    }
-    Ok(default_traits)
 }
 
 /// Load the list of functions whose early-return continuations will not be explored

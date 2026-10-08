@@ -392,6 +392,10 @@ pub enum Command {
     /// Sets `skip_pure` to false
     /// Sets `skip_causally_independent_calls` to false
     ExploreAll,
+    /// Sets `skip_pure` to false
+    ExplorePure,
+    /// Sets `skip_causally_independent` to false
+    ExploreCausallyIndependent,
     /// Load and instantiate a dependent smart contract
     Dependency(QualifiedContractIdentifier, String, Option<StandardPrincipalData>),
     /// The contract's deployed ID
@@ -410,6 +414,8 @@ pub enum Command {
     Pause(SymbolicExpression),
     /// Ensure that a given (boolean) invariant holds in all continuations
     Invariant(SymOp),
+    /// A statement about some symbols that is assumed to always be true
+    Assumption(SymOp),
 }
 
 
@@ -446,6 +452,8 @@ impl fmt::Display for Command {
             Self::DropEarlyReturns => write!(f, "(drop-early-returns)"),
             Self::SetResult(op) => write!(f, "(set-result {op})"),
             Self::ExploreAll => write!(f, "(explore-all)"),
+            Self::ExplorePure => write!(f, "(explore-pure)"),
+            Self::ExploreCausallyIndependent => write!(f, "(explore-causally-independent)"),
             Self::Dependency(contract_id, path, sponsor_opt) => {
                 if let Some(sponsor) = sponsor_opt.as_ref() {
                     write!(f, "(dependency {contract_id} u\"{path}\" '{sponsor})")
@@ -462,6 +470,7 @@ impl fmt::Display for Command {
             Self::PrintProducedContinuations => write!(f, "(print-produced-continuations)"),
             Self::Pause(..) => write!(f, "(pause)"),
             Self::Invariant(op) => write!(f, "(invariant {op})"),
+            Self::Assumption(op) => write!(f, "(assumption {op})"),
         }
     }
 }
@@ -470,13 +479,17 @@ impl fmt::Display for Command {
 pub struct CommandContext {
     /// defined formulae names and values, which must be stored in order since they will be applied
     /// in order via rewrite rules.
+    src: String,
+    pre_comments: HashMap<u64, (u32, Vec<String>)>,
     used_names: HashMap<ClarityName, usize>,
     defined_formulae: Vec<(ClarityName, SymOp)>,
 }
 
 impl CommandContext {
-    pub fn new() -> Self {
+    pub fn new(src: &str) -> Self {
         Self {
+            src: src.to_string(),
+            pre_comments: HashMap::new(),
             used_names: HashMap::new(),
             defined_formulae: vec![],
         }
@@ -623,6 +636,18 @@ impl CommandContext {
                 }
                 Ok(Command::ExploreAll)
             }
+            "explore-pure" => {
+                if exprs.len() > 0 {
+                    return Err(Error::new_program_error(format!("`{command_name}` takes 0 arguments, got {}", exprs.len())));
+                }
+                Ok(Command::ExplorePure)
+            }
+            "explore-causally-independent" => {
+                if exprs.len() > 0 {
+                    return Err(Error::new_program_error(format!("`{command_name}` takes 0 arguments, got {}", exprs.len())));
+                }
+                Ok(Command::ExploreCausallyIndependent)
+            }
             "dependency" => {
                 if exprs.len() < 2 || exprs.len() > 3 {
                     return Err(Error::new_program_error(format!("`{command_name}` takes 2-3 arguments, got {}", exprs.len())));
@@ -710,6 +735,13 @@ impl CommandContext {
                 }
                 let symop = self.parse_symop(&exprs[0])?;
                 Ok(Command::Invariant(symop))
+            }
+            "assumption" => {
+                if exprs.len() != 1 {
+                    return Err(Error::new_program_error(format!("`{command_name}` takes 1 argument, got {}", exprs.len())));
+                }
+                let symop = self.parse_symop(&exprs[0])?;
+                Ok(Command::Assumption(symop))
             }
             _ => {
                 Err(Error::NotFound(format!("Unrecognized command '{command_name}'")))
@@ -1391,6 +1423,9 @@ impl SymOp {
                 let (op1, op2) = Self::decode_2ops(opexps)?;
                 Self::GetBitcoinTxOutput(op1, op2)
             }
+            "unconditional-panic" => {
+                Self::Panic
+            }
             x => {
                 return Err(Error::Bug(format!("Unrecognized Clarity function `{x}`")));
             }
@@ -1677,37 +1712,41 @@ impl CommandContext {
         Ok(commands)
     }
 
-    /// Extract and interpret commands from pre-comments.
-    pub fn eval(&mut self, symexp: &SymbolicExpression) -> Result<Vec<Command>, Error> {
-        let mut comments = vec![];
-        let mut start_line : Option<u32> = None;
-        for (command, span) in symexp.pre_comments.iter() {
-            if let Some(sl) = start_line.as_mut() {
-                *sl = (*sl).min(span.start_line);
-            }
-            else {
-                start_line = Some(span.start_line);
-            }
-
-            comments.push(command.clone());
-        }
-        let Some(start_line) = start_line else {
-            return Ok(vec![]);
-        };
-       
-        let comment_buff = comments.join("\n");
+    /// Extract commands from a comment block
+    pub fn eval_comment_block(&mut self, lineno: u32, comments: &[String], symexp_opt: Option<&SymbolicExpression>) -> Result<Vec<Command>, Error> {
+        let comment_buff = comments.to_vec().join("\n");
         if comment_buff.len() > 0 {
-            debug!("Got comments on {symexp}:\n{comment_buff}");
+            debug!("Got comments at line {lineno}:\n{comment_buff}");
         }
 
         let programs = Self::extract_command_programs(&comment_buff);
         
         let mut commands = vec![];
         for program in programs.iter() {
-            let com = self.eval_program(program, start_line, Some(symexp))?;
+            let com = self.eval_program(program, lineno, symexp_opt)?;
             commands.extend(com.into_iter());
         }
         Ok(commands)
+    }
+
+    /// Extract and interpret commands from pre-comments.
+    pub fn eval(&mut self, symexp: &SymbolicExpression) -> Result<Vec<Command>, Error> {
+        let (start_line, comments) = if let Some(comments) = self.pre_comments.get(&symexp.id) {
+            comments.clone()
+        }
+        else {
+            let all_comments = ast::find_pre_comments(&self.src, &[symexp.clone()]);
+            self.pre_comments.extend(all_comments.into_iter());
+            if let Some(comments) = self.pre_comments.get(&symexp.id) {
+                comments.clone()
+            }
+            else {
+                debug!("No comments for {symexp}");
+                return Ok(vec![]);
+            }
+        };
+      
+        self.eval_comment_block(start_line, &comments, Some(symexp))
     }
 }
 

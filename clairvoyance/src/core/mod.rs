@@ -820,7 +820,9 @@ pub enum Error {
     /// Directed to stop
     Stopped,
     /// Invariant failure
-    InvariantFailure(SymbolicExpression, SymOp, Vec<Continuation>)
+    InvariantFailure(SymbolicExpression, SymOp, Vec<Continuation>),
+    /// Assumption failure
+    AssumptionFailure(SymbolicExpression, SymOp),
 }
 
 impl Error {
@@ -868,6 +870,12 @@ impl fmt::Display for Error {
                 for cont in conts.iter() {
                     write!(f, "Violating halting state:\n{}\n", Halt::from(cont.clone()).to_comment_block())?;
                 }
+                Ok(())
+            }
+            Self::AssumptionFailure(exp, assumption) => {
+                write!(f, "All symbolic continuations were found to be incompatible with an assumption\n")?;
+                write!(f, "Current symbolic expression: {exp}\n")?;
+                write!(f, "Assumption: {assumption}\n")?;
                 Ok(())
             }
             x => {

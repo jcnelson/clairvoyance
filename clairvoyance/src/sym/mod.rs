@@ -828,7 +828,7 @@ impl fmt::Display for SymOp {
             Self::Secp256r1Verify(op1, op2, op3) => write!(f, "(secp256r1-verify? {op1} {op2} {op3})"),
             Self::VerifyMerkleProof(op1, op2, op3, op4, op5) => write!(f, "(verify-merkle-proof {op1} {op2} {op3} {op4} {op5})"),
             Self::GetBitcoinTxOutput(op1, op2) => write!(f, "(get-bitcoin-tx-output? {op1} {op2})"),
-            Self::Panic => write!(f, "(unconditional panic detected!)"),
+            Self::Panic => write!(f, "(unconditional-panic)"),
             Self::FunctionCall(name, args) => {
                 let frags : Vec<_> = args.iter().map(|op| op.to_string()).collect();
                 let inner = frags.join(" ");
@@ -957,6 +957,10 @@ impl SymOp {
             Self::LoadedMapEntry(_, _, Some(op)) => op.is_unsigned(),
             _ => None
         }
+    }
+    
+    pub fn is_signed(&self) -> Option<bool> {
+        self.is_unsigned().map(|s| !s)
     }
 
     pub fn is_constant(&self) -> bool {
@@ -2532,56 +2536,614 @@ impl SymOp {
         }
     }
 
+    /// Compute the maximum size of a serialized symbol in `to-consensus-buff?`
+    fn try_compute_max_serialization_len(inner: &Box<SymOp>) -> Result<Option<usize>, Error> {
+        let l = match &**inner {
+            Self::Variable(Sym::Int(..))
+            | Self::Variable(Sym::UInt(..)) => 17,
+            Self::Variable(Sym::Bool(..)) => 1,
+            Self::Variable(Sym::Sequence(_, sequence_subtype)) => match sequence_subtype {
+                SequenceSubtype::ListType(listdata) => {
+                    let sz = 1 + 4;
+                    let item_sz = usize::try_from(listdata.get_list_item_type().max_serialized_size()?).map_err(|_| Error::Bug("Failed to convert list length to usize".into()))?;
+                    item_sz * usize::try_from(listdata.get_max_len()).map_err(|_| Error::Bug("Failed to convert max list len to usize".into()))? + sz
+                },
+                SequenceSubtype::BufferType(len) => {
+                    1 + usize::try_from(u32::from(len)).map_err(|_| Error::Bug("Failed to convert u32 to usize".into()))?
+                }
+                SequenceSubtype::StringType(StringSubtype::ASCII(len)) => {
+                    1 + usize::try_from(u32::from(len)).map_err(|_| Error::Bug("Failed to convert u32 to usize".into()))?
+                }
+                SequenceSubtype::StringType(StringSubtype::UTF8(len)) => {
+                    1 + usize::try_from(u32::from(len)).map_err(|_| Error::Bug("Failed to convert u32 to usize".into()))?
+                }
+            }
+            Self::Variable(Sym::Principal(..)) => 1 + 21 + 1 + 128,  // type(1) + addr(21) + name-length(1) + name(128)
+            Self::Variable(Sym::Tuple(_, tts)) => {
+                let mut sz : usize = 1 + 5;
+                let type_map = tts.get_type_map();
+                for (key, value) in type_map.iter() {
+                    sz += usize::from(key.len() + 1);
+                    sz += usize::try_from(value.max_serialized_size()?).map_err(|_| Error::Bug("Failed to convert u32 to usize".into()))?;
+                }
+                sz
+            }
+            Self::Variable(Sym::Optional(_, ts)) => 1 + usize::try_from(ts.max_serialized_size()?).map_err(|_| Error::Bug("Failed to convert u32 to usize".into()))?,
+            Self::Variable(Sym::Response(_, ok_ts, err_ts)) => {
+                let ok_sz = ok_ts.max_serialized_size()?;
+                let err_sz = err_ts.max_serialized_size()?;
+                1 + usize::try_from(ok_sz.max(err_sz)).map_err(|_| Error::Bug("failed to convert u32 to usize".into()))?
+            }
+            Self::Variable(Sym::Callable(..))
+            | Self::Variable(Sym::TraitReference(..)) => 1 + 21 + 1 + 128, // type(1) + address(21) + name-length(1) + name(128),
+            
+            // anything that becomes an int or a unit has length 17
+            Self::Add(..)
+            | Self::Subtract(..)
+            | Self::Multiply(..)
+            | Self::Divide(..)
+            | Self::ToInt(..)
+            | Self::ToUInt(..)
+            | Self::Modulo(..)
+            | Self::Sqrti(..)
+            | Self::Power(..)
+            | Self::Log2(..)
+            | Self::Len(..) 
+            | Self::BuffToIntLe(..)
+            | Self::BuffToIntBe(..)
+            | Self::BuffToUIntLe(..)
+            | Self::BuffToUIntBe(..) 
+            | Self::GetTokenBalance(..)
+            | Self::GetTokenSupply(..)
+            | Self::GetStxBalance(..)
+            | Self::BitwiseAnd(..)
+            | Self::BitwiseOr(..)
+            | Self::BitwiseXor(..)
+            | Self::BitwiseNot(..)
+            | Self::BitwiseLShift(..)
+            | Self::BitwiseRShift(..)  => 17,
+
+            // anything that becomes a bool has length 1
+            Self::And(..)
+            | Self::Or(..)
+            | Self::Not(..)
+            | Self::Greater(..)
+            | Self::Geq(..)
+            | Self::Equals(..)
+            | Self::Leq(..)
+            | Self::Less(..) 
+            | Self::IsStandard(..)
+            | Self::IsOkay(..)
+            | Self::IsErr(..)
+            | Self::IsSome(..)
+            | Self::IsNone(..) => 1,
+
+            // anything that returns (optional uint) has max length 18
+            Self::IndexOf(..)
+            | Self::StringToInt(..)
+            | Self::StringToUInt(..) => 18,
+
+            // anything that returns (response bool uint) has max length 18
+            Self::MintToken(..)
+            | Self::MintNft(..)
+            | Self::TransferToken(..)
+            | Self::TransferNft(..)
+            | Self::BurnToken(..)
+            | Self::BurnNft(..)
+            | Self::StxTransfer(..)
+            | Self::StxTransferMemo(..)
+            | Self::StxBurn(..) => 18,
+
+            // anything that returns stacks account
+            //  {
+            //      locked: uint,
+            //      unlocked: uint,
+            //      unlock-height: uint
+            //  }
+            Self::StxGetAccount(..) => {
+                1 +
+                4 +
+                1 +
+                "locked".len() +
+                17 +
+                1 +
+                "unlocked".len() +
+                17 +
+                1 + 
+                "unlock-height".len() +
+                17
+            },
+
+            // anything that returns principal
+            Self::ContractOf(..) => 1 + 21 + 1 + 128,
+
+            // anything that returns (response principal uint)
+            Self::PrincipalOf(..) => 1 + 1 + 21 + 1 + 128,
+
+            // get-burn-block-info? returns PoX info, which has maximally
+            // sized type 
+            // (optional {
+            //      addrs: (list 2 {
+            //          version: (buff 1),
+            //          hashbytes: (buff 32),
+            //      }),
+            //      payout: uint
+            //  })
+            Self::GetBurnBlockInfo(..) => {
+                1 +
+                1 +
+                4 + 
+                1 +
+                "addrs".len() + 
+                1 + 
+                4 + 
+                1 +
+                "version".len() + 
+                1 + 
+                1 + 
+                1 +
+                "hashbytes".len() +
+                1 + 
+                32 +
+                1 +
+                "payout".len() +
+                17
+            }
+
+            // this returns at worst (some (buff 32))
+            Self::GetStacksBlockInfo(..)
+            | Self::GetTenureInfo(..)
+            | Self::ContractHash(..) => 34,
+
+            // this is maximally sized, minus 1 for the type byte
+            Self::ToAscii(..) => 1048571 - 1,
+
+            // anything that returns (optional principal) has a max length of 1 + max
+            // principal
+            Self::GetNftOwner(..) => 1 + 1 + 21 + 1 + 128,
+
+            // anything that returns
+            // (response
+            //      { version: (buff 1), hashbytes: (buff 20), name: (optional (string-ascii 128)) }
+            //      { version: (buff 1), hashbytes: (buff 20), name: (optional (string-ascii 128)) })
+            //
+            Self::PrincipalDestruct(..) => {
+                1 +
+                4 +
+                "version".len() +
+                2 +
+                "hashbytes".len() +
+                21 + 
+                "name".len() +
+                1 +
+                128
+            }
+
+            // anything that returns
+            // (response
+            //      principal
+            //      { error_code: uint, value: (optional principal) })
+            Self::PrincipalConstruct(..) => {
+                1 +
+                1 +
+                4 +
+                "error_code".len() +
+                17 +
+                "value".len() +
+                1 +
+                (1 + 21 + 129)
+            }
+            _ => {
+                return Ok(None);
+            }
+        };
+        Ok(Some(l))
+    }
+    
+    /// Compute the minimum size of a serialized symbol in `to-consensus-buff?`
+    fn try_compute_min_serialization_len(inner: &Box<SymOp>) -> Result<Option<usize>, Error> {
+        let l = match &**inner {
+            Self::Variable(Sym::Int(..)) => 17,
+            Self::Variable(Sym::UInt(..)) => 17,
+            Self::Variable(Sym::Bool(..)) => 1,
+            Self::Variable(Sym::Sequence(..)) => 5,
+            Self::Variable(Sym::Principal(..)) => 22,
+            Self::Variable(Sym::Tuple(_, tts)) => 5 + tts.get_type_map().len() * 3,  // type(1) + len(4) + (type(1) + key(1) + value(1))*LEN
+            Self::Variable(Sym::Optional(..)) => 1,      // TODO: refine based on type signature
+            Self::Variable(Sym::Response(..)) => 2,
+            Self::Variable(Sym::Callable(..))
+            | Self::Variable(Sym::TraitReference(..)) => 1 + 21 + 1 + 5, // type(1) + address(21) + name-length(1) + name(5)
+            
+            // anything that becomes an int or a unit has length 17
+            Self::Add(..)
+            | Self::Subtract(..)
+            | Self::Multiply(..)
+            | Self::Divide(..)
+            | Self::ToInt(..)
+            | Self::ToUInt(..)
+            | Self::Modulo(..)
+            | Self::Sqrti(..)
+            | Self::Power(..)
+            | Self::Log2(..)
+            | Self::Len(..) 
+            | Self::BuffToIntLe(..)
+            | Self::BuffToIntBe(..)
+            | Self::BuffToUIntLe(..)
+            | Self::BuffToUIntBe(..) 
+            | Self::GetTokenBalance(..)
+            | Self::GetTokenSupply(..)
+            | Self::GetStxBalance(..)
+            | Self::BitwiseAnd(..)
+            | Self::BitwiseOr(..)
+            | Self::BitwiseXor(..)
+            | Self::BitwiseNot(..)
+            | Self::BitwiseLShift(..)
+            | Self::BitwiseRShift(..) => 17,
+
+            // anything that becomes a bool has length 1
+            Self::And(..)
+            | Self::Or(..)
+            | Self::Not(..)
+            | Self::Greater(..)
+            | Self::Geq(..)
+            | Self::Equals(..)
+            | Self::Leq(..)
+            | Self::Less(..) 
+            | Self::IsStandard(..)
+            | Self::IsOkay(..)
+            | Self::IsErr(..)
+            | Self::IsSome(..)
+            | Self::IsNone(..) => 1,
+
+            // anything that returns (optional uint) has min length 1
+            Self::IndexOf(..)
+            | Self::StringToInt(..)
+            | Self::StringToUInt(..) => 1,
+
+            // anything that returns (response bool uint) has min length 2
+            Self::MintToken(..)
+            | Self::MintNft(..)
+            | Self::TransferToken(..)
+            | Self::TransferNft(..)
+            | Self::BurnToken(..)
+            | Self::BurnNft(..)
+            | Self::StxTransfer(..)
+            | Self::StxTransferMemo(..)
+            | Self::StxBurn(..) => 2,
+
+            // anything that returns stacks account
+            //  {
+            //      locked: uint,
+            //      unlocked: uint,
+            //      unlock-height: uint
+            //  }
+            Self::StxGetAccount(..) => {
+                1 +
+                4 +
+                1 +
+                "locked".len() +
+                17 +
+                1 +
+                "unlocked".len() +
+                17 +
+                1 + 
+                "unlock-height".len() +
+                17
+            },
+
+            // anything that returns principal
+            Self::ContractOf(..) => 1 + 21 + 1 + 5,
+
+            // anything that returns (response principal uint)
+            Self::PrincipalOf(..) => 1 + 17,
+
+            // this returns at worst none
+            Self::GetBurnBlockInfo(..) 
+            | Self::GetStacksBlockInfo(..)
+            | Self::GetTenureInfo(..)
+            | Self::ContractHash(..) => 2,
+
+            Self::ToAscii(..) => 1,
+
+            // anything that returns (optional principal) has a min length of 1 + max
+            // principal
+            Self::GetNftOwner(..) => 1 + 1 + 21 + 1 + 5,
+
+            // anything that returns
+            // (response
+            //      { version: (buff 1), hashbytes: (buff 20), name: (optional (string-ascii 128)) }
+            //      { version: (buff 1), hashbytes: (buff 20), name: (optional (string-ascii 128)) })
+            //
+            Self::PrincipalDestruct(..) => {
+                1 +
+                4 +
+                "version".len() +
+                2 +
+                "hashbytes".len() +
+                21 + 
+                "name".len() +
+                1 +
+                5
+            }
+
+            // anything that returns
+            // (response
+            //      principal
+            //      { error_code: uint, value: (optional principal) })
+            Self::PrincipalConstruct(..) => {
+                1 +
+                1 +
+                4 +
+                1 +
+                (1 + 21 + 1 + 5)
+            }
+            _ => {
+                return Ok(None)
+            }
+        };
+        Ok(Some(l))
+    }
+
     /// Compute a maximum sequence length, in order to eliminate impossible or tautological comparisons between
-    /// `(len X)` and a constant
-    fn compute_max_sequence_len(seq_op: &Box<SymOp>) -> Result<usize, Error> {
-        let l = match *seq_op {
+    /// `(len X)` and a constant.
+    /// `seq_op` must be simplified already
+    fn try_compute_max_sequence_len(seq_op: &Box<SymOp>) -> Result<Option<usize>, Error> {
+        trace!("try_compute_max_sequence_len({})", seq_op);
+        let l = match &**seq_op {
             Self::Constant(v) => {
                 let v = Self::context_free_clarity_eval_mainnet(vec![
                     SymbolicExpression::atom("len".try_into()?),
-                    SymbolicExpression::literal_value(v)
+                    SymbolicExpression::literal_value(v.clone())
                 ])?
                 .ok_or_else(|| Error::Bug("Clarity VM evaluated to None".into()))?
                 .expect_u128()?;
                 usize::try_from(v).map_err(|_| Error::Bug("Constant with length greater than usize::MAX".into()))?
             }
+            Self::Variable(Sym::Sequence(_name, subtype)) => {
+                match subtype {
+                   SequenceSubtype::BufferType(v) => {
+                       usize::try_from(u32::from(v)).map_err(|_| Error::Bug("Buffer with length greater than usize::MAX".into()))?
+                    },
+                    SequenceSubtype::ListType(listdata) => {
+                       let (_, max_len) = listdata.clone().destruct(); 
+                       usize::try_from(max_len).map_err(|_| Error::Bug("List with length greater than usize::MAX".into()))?
+                    }
+                    SequenceSubtype::StringType(StringSubtype::ASCII(len)) => {
+                        usize::try_from(u32::from(len)).map_err(|_| Error::Bug("String-ASCII with length greater than usize::MAX".into()))?
+                    }
+                    SequenceSubtype::StringType(StringSubtype::UTF8(len)) => {
+                        usize::try_from(u32::from(len)).map_err(|_| Error::Bug("String-UTF8 with length greater than usize::MAX".into()))?
+                    }
+                }
+            }
             Self::ListCons(inner_ops) => {
                 inner_ops.len()
             }
-            Self::Append(inner_list, new_item) => {
-                let sz = Self::compute_max_sequence_len(inner_list)?;
+            Self::Append(inner_list, _) => {
+                let Some(sz) = Self::try_compute_max_sequence_len(&inner_list)? else {
+                    return Ok(None);
+                };
                 sz + 1
             }
             Self::Concat(inner_ops) => {
-                let inner_max_lens : Vec<Result<_, _> = inner_ops
+                let inner_max_lens : Vec<Result<_, _>> = inner_ops
                     .iter()
-                    .map(|op| Self::compute_max_sequence_len(op))
+                    .map(|op| Self::try_compute_max_sequence_len(op))
                     .collect();
 
                 let mut max = 0;
                 for inner_max_res in inner_max_lens.into_iter() {
-                    max += inner_max_res?;
+                    if let Some(inner_max) = inner_max_res? {
+                        max += inner_max;
+                    }
+                    else {
+                        return Ok(None);
+                    }
                 }
                 max
             },
-            Self::AsMaxLen(_, max_len_op) => {
-                // max_len_op must be a constant
-                let Self::Constant(Value::UInt(v)) = max_len_op else {
-                    return Err(Error::Bug("Clarity VM allowed a non-constant maximum length in `as-max-len?`".into()));
-                };
-                usize::try_from(v).map_err(|_| Error::Bug("Constant with length greater than usize::MAX".into()))?
-            }
             Self::LoadedDataVariable(_, inner_op) => {
-                Self::compute_max_sequence_len(inner_op)
+                if let Some(l) = Self::try_compute_max_sequence_len(&inner_op)? {
+                    l
+                }
+                else {
+                    return Ok(None);
+                }
+            }
+            Self::IntToAscii(_) => {
+                // (len "-340282366920938463463374607431768211456")
+                40
+            }
+            Self::IntToUtf8(_) => {
+                // (len "-340282366920938463463374607431768211456")
+                40
             }
             Self::UnwrapPanic(inner_op) => {
-                Self::compute_max_sequence_len(inner_op)
+                // some formulae can return (some X) or (ok X), where X is a
+                // sequence.  Infer X's length.
+                match &**inner_op {
+                    Self::AsMaxLen(_, max_len_op) => {
+                        // max_len_op must be a constant
+                        let Self::Constant(Value::UInt(v)) = &**max_len_op else {
+                            return Err(Error::Bug("Clarity VM allowed a non-constant maximum length in `as-max-len?`".into()));
+                        };
+                        usize::try_from(*v).map_err(|_| Error::Bug("Constant with length greater than usize::MAX".into()))?
+                    }
+                    Self::ElementAt(list_op, _) => {
+                        if let Self::Variable(Sym::Sequence(_, subtype)) = &**list_op {
+                            // list_op is known to be a sequence variable, so we can
+                            // deduce its maximum length.
+                            if let SequenceSubtype::ListType(listdata) = subtype {
+                                let (inner_ts, _) = listdata.clone().destruct();
+                                if let TypeSignature::SequenceType(seq_type) = inner_ts {
+                                    // list_op is a list of lists
+                                    // The maximum length of element-at is the maximum
+                                    // length of a list element.
+                                    match seq_type {
+                                        SequenceSubtype::BufferType(v) => {
+                                            usize::try_from(u32::from(v)).map_err(|_| Error::Bug("Buffer with length greater than usize::MAX".into()))?
+                                        }
+                                        SequenceSubtype::ListType(listdata) => {
+                                            let (_, max_len) = listdata.clone().destruct();
+                                            usize::try_from(max_len).map_err(|_| Error::Bug("List with length greater than usize::MAX".into()))?
+
+                                        },
+                                        SequenceSubtype::StringType(StringSubtype::ASCII(len)) => {
+                                            usize::try_from(u32::from(len)).map_err(|_| Error::Bug("String-ASCII with length greater than usize::MAX".into()))?
+                                        }
+                                        SequenceSubtype::StringType(StringSubtype::UTF8(len)) => {
+                                            usize::try_from(u32::from(len)).map_err(|_| Error::Bug("String-UTF8 with length greater than usize::MAX".into()))?
+                                        }
+                                    }
+                                }
+                                else {
+                                    // list_op is some other sequence, but all
+                                    // elements will have length 1
+                                    1
+                                }
+                            }
+                            else {
+                                // shouldn't be reachable since this'd be taking the length of
+                                // something that isn't a sequence
+                                return Err(Error::Bug("Tried to compute the length of an element of a list that is not a sequence".into()));
+                            }
+                        }
+                        else {
+                            // we don't know what list_op is
+                            if let Some(l) = Self::try_compute_max_sequence_len(&list_op)? {
+                                l
+                            }
+                            else {
+                                return Ok(None);
+                            }
+                        }
+                    }
+                    Self::LoadedMapEntry(_, _, Some(value_op)) => {
+                        if let Some(l) = Self::try_compute_max_sequence_len(&value_op)? {
+                            l
+                        }
+                        else {
+                            return Ok(None);
+                        }
+                    },
+                    Self::Secp256k1Recover(..) => {
+                        33
+                    }
+                    Self::GetBurnBlockInfo(..)
+                    | Self::GetTenureInfo(..)
+                    | Self::GetStacksBlockInfo(..)
+                    | Self::ContractHash(..) => {
+                        32
+                    }
+                    Self::UnwrapPanic(inner) => {
+                        if let Some(l) = Self::try_compute_max_sequence_len(&inner)? {
+                            l
+                        } else {
+                            return Ok(None);
+                        }
+                    }
+                    Self::UnwrapErrPanic(inner) => {
+                        if let Some(l) = Self::try_compute_max_sequence_len(&inner)? {
+                            l
+                        } else {
+                            return Ok(None);
+                        }
+                    }
+                    Self::ConsOkay(inner) => {
+                        if let Some(l) = Self::try_compute_max_sequence_len(&inner)? {
+                            l
+                        } else {
+                            return Ok(None);
+                        }
+                    }
+                    Self::ConsSome(inner) => {
+                        if let Some(l) = Self::try_compute_max_sequence_len(&inner)? {
+                            l
+                        } else {
+                            return Ok(None);
+                        }
+                    }
+                    Self::ToConsensusBuff(inner) => {
+                        if let Some(l) = Self::try_compute_max_serialization_len(inner)? {
+                            l
+                        }
+                        else {
+                            return Ok(None);
+                        }
+                    }
+                    Self::FromConsensusBuff(ts, _) => {
+                        // if this deserializes to something for which `(len ..)` is defined, then
+                        // get it.
+                        match &ts {
+                            TypeSignature::SequenceType(SequenceSubtype::ListType(listdata)) => {
+                                usize::try_from(listdata.get_max_len()).map_err(|_| Error::Bug("List has size that exceeds usize::MAX".into()))?
+                            }
+                            TypeSignature::SequenceType(SequenceSubtype::BufferType(v)) => {
+                                usize::try_from(u32::from(v)).map_err(|_| Error::Bug("Buffer with length greater than usize::MAX".into()))?
+                            }
+                            TypeSignature::SequenceType(SequenceSubtype::StringType(StringSubtype::ASCII(len))) => {
+                                usize::try_from(u32::from(len)).map_err(|_| Error::Bug("String-ASCII with length greater than usize::MAX".into()))?
+                            }
+                            TypeSignature::SequenceType(SequenceSubtype::StringType(StringSubtype::UTF8(len))) => {
+                                usize::try_from(u32::from(len)).map_err(|_| Error::Bug("String-UTF8 with length greater than usize::MAX".into()))?
+                            }
+                            _ => {
+                                // shouldn't happen since we can't take the length of this
+                                return Err(Error::Bug("Tried to take the length of a from-consensus-buff that deserializes to something that isn't a sequence".into()));
+                            }
+                        }
+                    }
+                    Self::Slice(seq_op, start, end) => {
+                        let Ok(sym_diff) = Self::Subtract(vec![end.clone(), start.clone()]).simplify() else {
+                            return Ok(None);
+                        };
+                        let Some(min_len) = Self::try_compute_min_sequence_len(seq_op)? else {
+                            return Ok(None);
+                        };
+                        let min_len_u128 = u128::try_from(min_len).map_err(|_| Error::Bug("usize to u128 failed".into()))?;
+                        let Ok(is_leq) = Self::Leq(Box::new(Self::Constant(Value::UInt(min_len_u128))), end.clone()).simplify() else {
+                            return Ok(None);
+                        };
+                        if let Self::Constant(Value::UInt(diff)) = sym_diff && is_leq == Self::True() {
+                            usize::try_from(diff).map_err(|_| Error::Bug("could not convert slice length to usize".into()))?
+                        }
+                        else {
+                            // this will panic, or we won't know if it will work
+                            return Ok(None);
+                        }
+                    }
+                    Self::ReplaceAt(seq, ..) => {
+                        if let Some(l) = Self::try_compute_max_sequence_len(seq)? {
+                            l
+                        } else {
+                            return Ok(None);
+                        }
+                    }
+                    Self::ToAscii(..) => 1048571,
+                    _ => {
+                        if let Some(l) = Self::try_compute_max_sequence_len(inner_op)? {
+                            l
+                        } else {
+                            return Ok(None);
+                        }
+                    }
+                }
             }
             Self::UnwrapErrPanic(inner_op) => {
-                Self::compute_max_sequence_len(inner_op)
-            }
-            Self::TupleGet(key, tuple_op) => {
-
+                let l_opt = match &**inner_op {
+                    Self::ConsError(inner) => {
+                        Self::try_compute_max_sequence_len(inner)?
+                    },
+                    _ => {
+                        Self::try_compute_max_sequence_len(inner_op)?
+                    }
+                };
+                if let Some(l) = l_opt {
+                    l
+                }
+                else {
+                    return Ok(None);
+                }
             }
             Self::Hash160(_) => {
                 20
@@ -2598,8 +3160,385 @@ impl SymOp {
             Self::Keccak256(_) => {
                 32
             }
+            _ => {
+                return Ok(None);
+            }
+        };
+        Ok(Some(l))
+    }
+    
+    /// Compute a minimum sequence length, in order to eliminate impossible or tautological comparisons between
+    /// `(len X)` and a constant.
+    /// `seq_op` must be simplified already
+    fn try_compute_min_sequence_len(seq_op: &Box<SymOp>) -> Result<Option<usize>, Error> {
+        trace!("try_compute_min_sequence_len({})", seq_op);
+        let l = match &**seq_op {
+            Self::Constant(v) => {
+                let v = Self::context_free_clarity_eval_mainnet(vec![
+                    SymbolicExpression::atom("len".try_into()?),
+                    SymbolicExpression::literal_value(v.clone())
+                ])?
+                .ok_or_else(|| Error::Bug("Clarity VM evaluated to None".into()))?
+                .expect_u128()?;
+                usize::try_from(v).map_err(|_| Error::Bug("Constant with length greater than usize::MAX".into()))?
+            }
+            Self::Variable(Sym::Sequence(_name, _subtype)) => 0,
+            Self::ListCons(inner_ops) => inner_ops.len(),
+            Self::Append(..) => 1,
+            Self::Concat(inner_ops) => {
+                let inner_min_lens : Vec<Result<_, _>> = inner_ops
+                    .iter()
+                    .map(|op| Self::try_compute_min_sequence_len(op))
+                    .collect();
 
-        }
+                let mut min = 0;
+                for (i, inner_min_res) in inner_min_lens.into_iter().enumerate() {
+                    if let Some(inner_min) = inner_min_res? {
+                        min += inner_min;
+                    }
+                    else {
+                        trace!("No min_len for concat item #{i}");
+                        return Ok(None);
+                    }
+                }
+                min
+            },
+            Self::LoadedDataVariable(_name, inner_op) => {
+                if let Some(l) = Self::try_compute_min_sequence_len(&inner_op)? {
+                    l
+                }
+                else {
+                    trace!("No min_len found for loaded data variable {_name}");
+                    return Ok(None);
+                }
+            }
+            Self::IntToAscii(_) => {
+                // (len "0")
+                1
+            }
+            Self::IntToUtf8(_) => {
+                // (len "0")
+                1
+            }
+            Self::UnwrapPanic(inner_op) => {
+                // some formulae can return (some X) or (ok X), where X is a
+                // sequence.  Infer X's length.
+                match &**inner_op {
+                    Self::AsMaxLen(_, max_len_op) => {
+                        // max_len_op must be a constant
+                        let Self::Constant(Value::UInt(v)) = &**max_len_op else {
+                            return Err(Error::Bug("Clarity VM allowed a non-constant maximum length in `as-max-len?`".into()));
+                        };
+                        usize::try_from(*v).map_err(|_| Error::Bug("Constant with length greater than usize::MAX".into()))?
+                    }
+                    Self::ElementAt(_list_op, _) => 0,
+                    Self::LoadedMapEntry(_, _, Some(_)) => 0,
+                    Self::Secp256k1Recover(..) => {
+                        33
+                    }
+                    Self::GetBurnBlockInfo(..) 
+                    | Self::GetStacksBlockInfo(..)
+                    | Self::GetTenureInfo(..) => {
+                        // (some uint)
+                        17
+                    }
+                    Self::ContractHash(..) => {
+                        // (err uint)
+                        18
+                    }
+                    Self::UnwrapPanic(inner) => {
+                        if let Some(l) = Self::try_compute_min_sequence_len(&inner)? {
+                            l
+                        } else {
+                            trace!("No min_len found for inner unwrap-panic");
+                            return Ok(None);
+                        }
+                    }
+                    Self::UnwrapErrPanic(inner) => {
+                        if let Some(l) = Self::try_compute_min_sequence_len(&inner)? {
+                            l
+                        } else {
+                            trace!("No min_len found for inner unwrap-err-panic");
+                            return Ok(None);
+                        }
+                    }
+                    Self::ConsOkay(inner) => {
+                        if let Some(l) = Self::try_compute_min_sequence_len(&inner)? {
+                            l
+                        } else {
+                            trace!("No min_len found for inner cons-okay");
+                            return Ok(None);
+                        }
+                    }
+                    Self::ConsSome(inner) => {
+                        if let Some(l) = Self::try_compute_min_sequence_len(&inner)? {
+                            l
+                        } else {
+                            trace!("No min_len found for inner cons-some");
+                            return Ok(None);
+                        }
+                    }
+                    Self::FromConsensusBuff(_ts, _) => 0,
+                    Self::ToConsensusBuff(inner) => {
+                        if let Some(l) = Self::try_compute_min_serialization_len(inner)? {
+                            l
+                        }
+                        else {
+                            return Ok(None);
+                        }
+                    }
+                    Self::Slice(seq_op, start, end) => {
+                        let Ok(sym_diff) = Self::Subtract(vec![end.clone(), start.clone()]).simplify() else {
+                            return Ok(None);
+                        };
+                        let Some(min_len) = Self::try_compute_min_sequence_len(seq_op)? else {
+                            return Ok(None);
+                        };
+                        let min_len_u128 = u128::try_from(min_len).map_err(|_| Error::Bug("usize to u128 failed".into()))?;
+                        let Ok(is_leq) = Self::Leq(Box::new(Self::Constant(Value::UInt(min_len_u128))), end.clone()).simplify() else {
+                            return Ok(None);
+                        };
+                        if let Self::Constant(Value::UInt(diff)) = sym_diff && is_leq == Self::True() {
+                            usize::try_from(diff).map_err(|_| Error::Bug("could not convert slice length to usize".into()))?
+                        }
+                        else {
+                            // this will panic, or we won't know if it will work
+                            trace!("No min_len found for inner slice?");
+                            return Ok(None);
+                        }
+                    }
+                    Self::ReplaceAt(_seq, ..) => 0,
+                    Self::ToAscii(..) => 1,
+                    _ => {
+                        if let Some(l) = Self::try_compute_min_sequence_len(inner_op)? {
+                            l
+                        } else {
+                            trace!("No min_len found for inner to-ascii?");
+                            return Ok(None);
+                        }
+                    }
+                }
+            }
+            Self::UnwrapErrPanic(inner_op) => {
+                let l_opt = match &**inner_op {
+                    Self::ConsError(inner) => {
+                        Self::try_compute_min_sequence_len(inner)?
+                    },
+                    _ => {
+                        Self::try_compute_min_sequence_len(inner_op)?
+                    }
+                };
+                if let Some(l) = l_opt {
+                    l
+                }
+                else {
+                    trace!("No min_len found for unwrap-err-panic");
+                    return Ok(None);
+                }
+            }
+            Self::Hash160(_) => {
+                20
+            }
+            Self::Sha256(_) => {
+                32
+            }
+            Self::Sha512(_) => {
+                32
+            }
+            Self::Sha512Trunc256(_) => {
+                32
+            }
+            Self::Keccak256(_) => {
+                32
+            }
+            _ => {
+                trace!("No min_len found");
+                return Ok(None);
+            }
+        };
+        trace!("try_compute_min_sequence_len({seq_op}): {l}");
+        Ok(Some(l))
+    }
+
+    /// Try to determine whether or not (some X) is symbolically always or never true.
+    /// op must be simplified.
+    fn try_compute_is_some(op: &Box<SymOp>) -> Result<Option<bool>, Error> {
+        trace!("try_compute_is_some({op})");
+        let b = match &**op {
+            Self::Constant(v) => {
+                Self::context_free_clarity_eval_mainnet(vec![
+                    SymbolicExpression::atom("is-some".try_into()?),
+                    SymbolicExpression::literal_value(v.clone())
+                ])?
+                .ok_or_else(|| Error::Bug("Clarity VM evaluated to None".into()))?
+                .expect_bool()?
+            }
+            Self::LoadedDataVariable(_, inner) => {
+                if let Some(b) = Self::try_compute_is_some(inner)? {
+                    b
+                }
+                else {
+                    return Ok(None)
+                }
+            }
+            Self::AsMaxLen(seq_op, len_op) => {
+                let Self::Constant(Value::UInt(v_u128)) = &**len_op else {
+                    return Err(Error::Bug("Clarity VM allowed a non-constant maximum length in `as-max-len?`".into()));
+                };
+                let new_len = usize::try_from(*v_u128).map_err(|_| Error::Bug("u128 to usize failed".into()))?;
+
+                if let Some(min_len) = Self::try_compute_min_sequence_len(seq_op)? && min_len > new_len {
+                    // this will never work
+                    false
+                }
+                else if let Some(max_len) = Self::try_compute_max_sequence_len(seq_op)? && max_len < new_len {
+                    // this will always work
+                    true
+                }
+                else {
+                    return Ok(None);
+                }
+            }
+            Self::ElementAt(seq_op, idx_op) => {
+                let Self::Constant(Value::UInt(i_u128)) = &**idx_op else {
+                    return Ok(None);
+                };
+                let i = usize::try_from(*i_u128).map_err(|_| Error::Bug("u128 to usize failed".into()))?;
+                if let Some(min_len) = Self::try_compute_min_sequence_len(seq_op)? && i < min_len {
+                    // this will always work
+                    true
+                }
+                else if let Some(max_len) = Self::try_compute_max_sequence_len(seq_op)? && i > max_len {
+                    // this will never work
+                    false
+                }
+                else {
+                    return Ok(None);
+                }
+            }
+            Self::IndexOf(_seq_op, _needle_op) => {
+                // TODO: need a theory about the domain of symbols from which _seq_op can be drawn,
+                // and a lemma that _needle_op is always in this domain
+                return Ok(None);
+            }
+            Self::StringToInt(_str_op) => {
+                // TODO: need a theory about whether or not _str_op evaluates to a string composed
+                // solely of numbers and `-`, as well as whether or not it's small enough to fit
+                // into an i128
+                return Ok(None);
+            }
+            Self::StringToUInt(_str_op) => {
+                // TODO: need a theory about whether or not _str_op evaluates to a string composed
+                // solely of numbers, as well as whether or not it's small enough to fit
+                // into a u128
+                return Ok(None);
+            }
+            Self::LoadedMapEntry(_, _, Some(_inner)) => true,
+            Self::GetBurnBlockInfo(_field, _height_sym) => {
+                // TODO: need to consider the block height
+                return Ok(None);
+            }
+            Self::UnwrapPanic(inner) => {
+                if let Some(b) = Self::try_compute_is_some(inner)? {
+                    b
+                }
+                else {
+                    return Ok(None);
+                }
+            }
+            Self::UnwrapErrPanic(inner) => {
+                if let Some(b) = Self::try_compute_is_some(inner)? {
+                    b
+                }
+                else {
+                    return Ok(None);
+                }
+            }
+            Self::ConsSome(..) => true,
+            Self::GetNftOwner(_name, _owner) => {
+                // TODO: need to consider continuation state
+                return Ok(None);
+            }
+            Self::Slice(seq_op, start, end) => {
+                let Some(min_len) = Self::try_compute_min_sequence_len(seq_op)? else {
+                    return Ok(None);
+                };
+                trace!("try_compute_is_some: slice seq_op min_len is {min_len}");
+                let min_len_u128 = u128::try_from(min_len).map_err(|_| Error::Bug("usize to u128 failed".into()))?;
+                let Ok(is_end_before_min) = Self::Leq(Box::new(Self::Constant(Value::UInt(min_len_u128))), end.clone()).simplify() else {
+                    return Ok(None);
+                };
+                let Some(max_len) = Self::try_compute_max_sequence_len(seq_op)? else {
+                    return Ok(None);
+                };
+                trace!("try_compute_is_some: slice seq_op max_len is {min_len}");
+                let max_len_u128 = u128::try_from(max_len).map_err(|_| Error::Bug("usize to u128 failed".into()))?;
+                let Ok(is_start_after_max) = Self::Leq(Box::new(Self::Constant(Value::UInt(max_len_u128))), start.clone()).simplify() else {
+                    return Ok(None);
+                };
+                trace!("try_compute_is_some: slice seq_op is_end_before_min = {is_end_before_min}, is_start_after_max = {is_start_after_max}");
+                if is_end_before_min == Self::True() {
+                    true
+                }
+                else if is_start_after_max == Self::True() {
+                    false
+                }
+                else {
+                    return Ok(None);
+                }
+            }
+            Self::ToConsensusBuff(inner) => {
+                if let Some(len) = Self::try_compute_max_serialization_len(inner)? && len < 1024 * 1024 {
+                    true
+                }
+                else if let Some(len) = Self::try_compute_min_serialization_len(inner)? && len >= 1024 * 1024 {
+                    false
+                }
+                else {
+                    return Ok(None);
+                }
+            }
+            Self::FromConsensusBuff(_ts, _inner) => {
+                // TODO: need a theory about whether or not the inner symbolic expression
+                // represents parsable data.  For example, if X has type (buff 16), then (concat 0x01 X) would always decode to a uint.
+                return Ok(None);
+            }
+            Self::ReplaceAt(seq_op, index_op, _elem_op) => {
+                let Some(min_len) = Self::try_compute_min_sequence_len(seq_op)? else {
+                    return Ok(None);
+                };
+                let min_len_u128 = u128::try_from(min_len).map_err(|_| Error::Bug("usize to u128 failed".into()))?;
+                let Some(max_len) = Self::try_compute_min_sequence_len(seq_op)? else {
+                    return Ok(None);
+                };
+                let max_len_u128 = u128::try_from(max_len).map_err(|_| Error::Bug("usize to u128 failed".into()))?;
+
+                let idx_leq_min = Self::Leq(index_op.clone(), Box::new(Self::Constant(Value::UInt(min_len_u128)))).simplify()?;
+                let idx_geq_max = Self::Geq(index_op.clone(), Box::new(Self::Constant(Value::UInt(max_len_u128)))).simplify()?;
+                if idx_leq_min == Self::True() {
+                    true
+                }
+                else if idx_geq_max == Self::True() {
+                    false
+                }
+                else {
+                    return Ok(None);
+                }
+            }
+            Self::GetStacksBlockInfo(_name, _height) => {
+                // TODO: need height
+                return Ok(None);
+            }
+            Self::GetTenureInfo(_name, _height) => {
+                // TODO: need height
+                return Ok(None);
+            }
+            _ => {
+                return Ok(None);
+            }
+        };
+        trace!("try_compute_is_some({op}) = {b}");
+        Ok(Some(b))
     }
 
     /// Combine all inner Self::Equals(..) and Self::Not(Self::Equals(..)) statements that share at
@@ -3767,6 +4706,63 @@ impl SymOp {
         Ok(ops)
     }
 
+    /// Remove redundant (not (is-eq X Y)) if we have (< X Y) or (< Y X) in the same conjunction
+    fn and_remove_redundant_eq(ops: Vec<Box<SymOp>>) -> Result<Vec<Box<SymOp>>, Error> {
+        let mut neqs = vec![];
+        let mut lt = HashMap::new();
+        let mut new_ops = vec![];
+        for op in ops.clone().into_iter() {
+            if let Self::Not(inner_op) = *op {
+                if let Self::Equals(inner) = *inner_op {
+                    let mut neq = HashSet::new();
+                    for i in 0..inner.len() {
+                        for j in 0..inner.len() {
+                            if i == j {
+                                continue;
+                            }
+                            neq.insert(*inner[i].clone());
+                            neq.insert(*inner[j].clone());
+                        }
+                    }
+                    neqs.push(neq);
+                }
+                else {
+                    new_ops.push(Box::new(Self::Not(inner_op)));
+                }
+            }
+            else if let Self::Less(lterm, rterm) = *op {
+                new_ops.push(Box::new(Self::Less(lterm.clone(), rterm.clone())));
+                lt.insert(*lterm, *rterm);
+            }
+            else if let Self::Greater(lterm, rterm) = *op {
+                new_ops.push(Box::new(Self::Greater(lterm.clone(), rterm.clone())));
+                lt.insert(*rterm, *lterm);
+            }
+            else {
+                new_ops.push(op);
+            }
+        }
+
+        for (lterm, rterm) in lt.into_iter() {
+            for neq in neqs.iter_mut() {
+                if neq.contains(&lterm) && neq.contains(&rterm) {
+                    // have (< lterm rterm) and (not (is-eq lterm rterm))
+                    neq.remove(&lterm);
+                    neq.remove(&rterm);
+                }
+            }
+        }
+
+        for neq in neqs.into_iter() {
+            assert!(neq.len() != 1);
+            if neq.len() >= 2 {
+                let neq_list : Vec<_> = neq.into_iter().map(|op| Box::new(op)).collect();
+                new_ops.push(Box::new(Self::Not(Box::new(Self::Equals(neq_list)))));
+            }
+        }
+
+        Ok(new_ops)
+    }
 
     /// Identify conflicting cons tests and eliminate contradictions
     /// i.e. is-some/is-none, is-ok/is-err
@@ -4219,6 +5215,15 @@ impl SymOp {
         
         trace!("simplify_and: and_equals_redundant: consolidated_ops = {}", consolidated_ops.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
 
+        // remove (and (not (is-eq X Y)) (< X Y)) and (and (not (is-eq X Y)) (< Y X)) not-equal terms
+        let consolidated_ops = Self::and_remove_redundant_eq(consolidated_ops)?;
+
+        trace!("simplify_and: and_remove_redundant_eq: consolidated_ops = {}", consolidated_ops.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
+
+        if consolidated_ops.len() == 1 {
+            return Ok(*consolidated_ops[0].clone());
+        }
+
         // eliminate and-cons contradictions 
         let consolidated_ops = match Self::and_cons_contradiction(consolidated_ops)? {
             Self::And(ops) => ops,
@@ -4228,6 +5233,11 @@ impl SymOp {
         };
         
         trace!("simplify_and: and_cons_contradiction: consolidated_ops = {}", consolidated_ops.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
+        
+        // reduce positity checks
+        let consolidated_ops = Self::simplify_positivity_check(consolidated_ops)?;
+        
+        trace!("simplify_and: simplify_positivity_check = {}", consolidated_ops.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
 
         // and contradiction
         let consolidated_ops = match Self::contradiction_and(consolidated_ops)? {
@@ -4252,7 +5262,8 @@ impl SymOp {
         // remove pure duplicates and simplfiy
         let simplified = Self::dedup_readonly_booleans(consolidated_ops)?;
         
-        trace!("simplify_and: dedup_readonly_booleans: simplified = {simplified:?}");
+        trace!("simplify_and: dedup_readonly_booleans: simplified = {}", simplified.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
+
 
         // constant elimination
         let simplified = Self::simplify_assoc_variadic(
@@ -4266,7 +5277,12 @@ impl SymOp {
             return Ok(simplified);
         };
         
-        trace!("simplify_and: simplify_assoc_variadic: simplified = {simplified:?}");
+        trace!("simplify_and: simplify_assoc_variadic: simplified = {}", simplified.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
+
+        // substitution
+        let simplified = Self::check_substitution_consistency(simplified)?;
+
+        trace!("simplify_and: check_substitution_consistency = {}", simplified.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
 
         // domination: False && X == False
         for op in simplified.iter() {
@@ -4278,7 +5294,8 @@ impl SymOp {
         // identity: True && X == X
         let mut simplified : Vec<_> = simplified.into_iter().filter(|s| if let Self::Constant(Value::Bool(true)) = **s { false } else { true }).collect();
         
-        trace!("simplify_and: domination: simplified = {simplified:?}");
+        trace!("simplify_and: domination: simplified = {}", simplified.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
+
 
         // if they were all true, then simplified would be empty
         if simplified.len() == 0 {
@@ -4286,12 +5303,14 @@ impl SymOp {
         }
         else if simplified.len() == 1 {
             // lift out
-            trace!("simplify_and: simplified = {simplified:?}");
+            trace!("simplify_and: simplified = {}", simplified.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
+
             let Some(inner) = simplified.pop() else { return Err(Error::Bug("unreachable -- simplify_and simplified.len() == 1 but pop failed".into())); };
             return Ok(*inner);
         }
 
-        trace!("simplify_and: simplified = {simplified:?}");
+        trace!("simplify_and: simplified = {}", simplified.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
+
         Ok(Self::And(simplified))
     }
 
@@ -4369,6 +5388,11 @@ impl SymOp {
         let Self::Or(consolidated_ops) = consolidated_ops else {
             return Ok(consolidated_ops);
         };
+        
+        // reduce positity checks
+        let consolidated_ops = Self::simplify_positivity_check(consolidated_ops)?;
+        
+        trace!("simplify_or: simplify_positivity_check = {}", consolidated_ops.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
 
         // domination: True || X == True
         for op in consolidated_ops.iter() {
@@ -4434,7 +5458,7 @@ impl SymOp {
 
     /// fold and propagate constants for a Not(..)
     fn simplify_not(op: Box<SymOp>) -> Result<SymOp, Error> {
-        match *op {
+        match op.simplify()? {
             Self::Constant(x) => {
                 let v = Self::context_free_clarity_eval_mainnet(vec![
                     SymbolicExpression::atom("not".try_into()?),
@@ -4707,8 +5731,294 @@ impl SymOp {
         }
         Ok(new_ops)
     }
+    
+    fn substitute_symop_in_list(ops: Vec<Box<SymOp>>, needle: SymOp, replacement: SymOp) -> Vec<Box<SymOp>> {
+        let mut new = vec![];
+        for op in ops.into_iter() {
+            let new_op = op.substitute_symop(needle.clone(), replacement.clone());
+            new.push(new_op);
+        }
+        new
+    }
 
-    // fold and propagate constants for an Equals(..)
+    /// Substitute one symbolic expression with another
+    fn substitute_symop(self, needle: SymOp, replacement: SymOp) -> Box<SymOp> {
+        trace!("Try substitute '{needle}' with '{replacement}' in '{self}'");
+        if self == needle {
+            return Box::new(replacement);
+        }
+        let op = match self {
+            Self::Constant(v) => Self::Constant(v),
+            Self::Variable(sym) => Self::Variable(sym),
+            Self::LoadedDataVariable(name, op) => Self::LoadedDataVariable(name, op.substitute_symop(needle, replacement)),
+            Self::Add(ops) => Self::Add(Self::substitute_symop_in_list(ops, needle, replacement)),
+            Self::Subtract(ops) => Self::Subtract(Self::substitute_symop_in_list(ops, needle, replacement)),
+            Self::Multiply(ops) => Self::Multiply(Self::substitute_symop_in_list(ops, needle, replacement)),
+            Self::Divide(ops) => Self::Divide(Self::substitute_symop_in_list(ops, needle, replacement)),
+            Self::ToInt(op) => Self::ToInt(op.substitute_symop(needle, replacement)),
+            Self::ToUInt(op) => Self::ToUInt(op.substitute_symop(needle, replacement)),
+            Self::Modulo(op1, op2) => Self::Modulo(op1.substitute_symop(needle.clone(), replacement.clone()), op2.substitute_symop(needle.clone(), replacement.clone())),
+            Self::Power(base_op, exp_op) => Self::Power(base_op.substitute_symop(needle.clone(), replacement.clone()), exp_op.substitute_symop(needle.clone(), replacement.clone())),
+            Self::Sqrti(op) => Self::Sqrti(op.substitute_symop(needle, replacement)),
+            Self::Log2(op) => Self::Log2(op.substitute_symop(needle, replacement)),
+            Self::And(ops) => Self::And(Self::substitute_symop_in_list(ops, needle, replacement)),
+            Self::Or(ops) => Self::Or(Self::substitute_symop_in_list(ops, needle, replacement)),
+            Self::Not(op) => Self::Not(op.substitute_symop(needle, replacement)),
+            Self::Greater(x, y) => Self::Greater(x.substitute_symop(needle.clone(), replacement.clone()), y.substitute_symop(needle.clone(), replacement.clone())),
+            Self::Geq(x, y) => Self::Geq(x.substitute_symop(needle.clone(), replacement.clone()), y.substitute_symop(needle.clone(), replacement.clone())),
+            Self::Equals(ops) => Self::Equals(Self::substitute_symop_in_list(ops, needle, replacement)),
+            Self::Leq(x, y) => Self::Leq(x.substitute_symop(needle.clone(), replacement.clone()), y.substitute_symop(needle.clone(), replacement.clone())),
+            Self::Less(x, y) => Self::Less(x.substitute_symop(needle.clone(), replacement.clone()), y.substitute_symop(needle.clone(), replacement.clone())),
+            Self::Append(list_op, val_op) => Self::Append(list_op.substitute_symop(needle.clone(), replacement.clone()), val_op.substitute_symop(needle.clone(), replacement.clone())),
+            Self::Concat(ops) => Self::Concat(Self::substitute_symop_in_list(ops, needle, replacement)),
+            Self::AsMaxLen(op1, op2) => Self::AsMaxLen(op1.substitute_symop(needle.clone(), replacement.clone()), op2.substitute_symop(needle.clone(), replacement.clone())),
+            Self::Len(op) => Self::Len(op.substitute_symop(needle, replacement)),
+            Self::ElementAt(op1, op2) => Self::ElementAt(op1.substitute_symop(needle.clone(), replacement.clone()), op2.substitute_symop(needle.clone(), replacement.clone())),
+            Self::IndexOf(op1, op2) => Self::IndexOf(op1.substitute_symop(needle.clone(), replacement.clone()), op2.substitute_symop(needle.clone(), replacement.clone())),
+            Self::BuffToIntLe(op) => Self::BuffToIntLe(op.substitute_symop(needle, replacement)),
+            Self::BuffToUIntLe(op) => Self::BuffToUIntLe(op.substitute_symop(needle, replacement)),
+            Self::BuffToIntBe(op) => Self::BuffToIntBe(op.substitute_symop(needle, replacement)),
+            Self::BuffToUIntBe(op) => Self::BuffToUIntBe(op.substitute_symop(needle, replacement)),
+            Self::IsStandard(op) => Self::IsStandard(op.substitute_symop(needle, replacement)),
+            Self::PrincipalDestruct(op) => Self::PrincipalDestruct(op.substitute_symop(needle, replacement)),
+            Self::PrincipalConstruct(op1, op2, op3_opt) => {
+                let new_op3_opt = if let Some(op3) = op3_opt {
+                    Some(op3.substitute_symop(needle.clone(), replacement.clone()))
+                }
+                else {
+                    None
+                };
+                Self::PrincipalConstruct(op1.substitute_symop(needle.clone(), replacement.clone()), op2.substitute_symop(needle.clone(), replacement.clone()), new_op3_opt)
+            },
+            Self::StringToInt(op) => Self::StringToInt(op.substitute_symop(needle, replacement)),
+            Self::StringToUInt(op) => Self::StringToUInt(op.substitute_symop(needle, replacement)),
+            Self::IntToAscii(op) => Self::IntToAscii(op.substitute_symop(needle, replacement)),
+            Self::IntToUtf8(op) => Self::IntToUtf8(op.substitute_symop(needle, replacement)),
+            Self::ListCons(ops) => Self::ListCons(Self::substitute_symop_in_list(ops, needle, replacement)),
+            Self::FetchVar(name) => Self::FetchVar(name),
+            Self::SetVar(name, op) => Self::SetVar(name, op.substitute_symop(needle, replacement)),
+            Self::FetchEntry(name, op) => Self::FetchEntry(name, op.substitute_symop(needle, replacement)),
+            Self::LoadedMapEntry(name, key_op, value_op_opt) => {
+                let new_value_op_opt = if let Some(op) = value_op_opt {
+                    Some(op.substitute_symop(needle.clone(), replacement.clone()))
+                }
+                else {
+                    None
+                };
+                Self::LoadedMapEntry(name, key_op.substitute_symop(needle, replacement), new_value_op_opt)
+            }
+            Self::SetEntry(name, op1, op2) => Self::SetEntry(name, op1.substitute_symop(needle.clone(), replacement.clone()), op2.substitute_symop(needle.clone(), replacement.clone())),
+            Self::InsertEntry(name, op1, op2) => Self::InsertEntry(name, op1.substitute_symop(needle.clone(), replacement.clone()), op2.substitute_symop(needle.clone(), replacement.clone())),
+            Self::DeleteEntry(name, op) => Self::DeleteEntry(name, op.substitute_symop(needle, replacement)),
+            Self::TupleCons(fields) => {
+                let mut new_fields = vec![];
+                for (key, value) in fields.into_iter() {
+                    let new_value = value.substitute_symop(needle.clone(), replacement.clone());
+                    new_fields.push((key, new_value));
+                }
+                Self::TupleCons(new_fields)
+            }
+            Self::TupleGet(name, op) => Self::TupleGet(name, op.substitute_symop(needle, replacement)),
+            Self::TupleMerge(op1, op2) => Self::TupleMerge(op1.substitute_symop(needle.clone(), replacement.clone()), op2.substitute_symop(needle.clone(), replacement.clone())),
+            Self::Hash160(op) => Self::Hash160(op.substitute_symop(needle, replacement)),
+            Self::Sha256(op) => Self::Sha256(op.substitute_symop(needle, replacement)),
+            Self::Sha512(op) => Self::Sha512(op.substitute_symop(needle, replacement)),
+            Self::Sha512Trunc256(op) => Self::Sha512Trunc256(op.substitute_symop(needle, replacement)),
+            Self::Keccak256(op) => Self::Keccak256(op.substitute_symop(needle, replacement)),
+            Self::Secp256k1Recover(op1, op2) => Self::Secp256k1Recover(op1.substitute_symop(needle.clone(), replacement.clone()), op2.substitute_symop(needle.clone(), replacement.clone())),
+            Self::Secp256k1Verify(op1, op2, op3) => Self::Secp256k1Verify(op1.substitute_symop(needle.clone(), replacement.clone()), op2.substitute_symop(needle.clone(), replacement.clone()), op3.substitute_symop(needle.clone(), replacement.clone())),
+            Self::ContractOf(op1) => Self::ContractOf(op1.substitute_symop(needle, replacement)),
+            Self::PrincipalOf(op1) => Self::PrincipalOf(op1.substitute_symop(needle, replacement)),
+            Self::GetBurnBlockInfo(prop, op) => Self::GetBurnBlockInfo(prop, op.substitute_symop(needle, replacement)),
+            Self::IsOkay(op) => Self::IsOkay(op.substitute_symop(needle, replacement)),
+            Self::IsErr(op) => Self::IsErr(op.substitute_symop(needle, replacement)),
+            Self::IsSome(op) => Self::IsSome(op.substitute_symop(needle, replacement)),
+            Self::IsNone(op) => Self::IsNone(op.substitute_symop(needle, replacement)),
+            Self::UnwrapPanic(op) => Self::UnwrapPanic(op.substitute_symop(needle, replacement)),
+            Self::UnwrapErrPanic(op) => Self::UnwrapErrPanic(op.substitute_symop(needle, replacement)),
+            Self::ConsError(op) => Self::ConsError(op.substitute_symop(needle, replacement)),
+            Self::ConsOkay(op) => Self::ConsOkay(op.substitute_symop(needle, replacement)),
+            Self::ConsSome(op) => Self::ConsSome(op.substitute_symop(needle, replacement)),
+            Self::GetTokenBalance(name, op) => Self::GetTokenBalance(name, op.substitute_symop(needle, replacement)),
+            Self::GetNftOwner(name, op) => Self::GetNftOwner(name, op.substitute_symop(needle, replacement)),
+            Self::TransferToken(name, op1, op2, op3) => Self::TransferToken(name, op1.substitute_symop(needle.clone(), replacement.clone()), op2.substitute_symop(needle.clone(), replacement.clone()), op3.substitute_symop(needle.clone(), replacement.clone())),
+            Self::TransferNft(name, op1, op2, op3) => Self::TransferNft(name, op1.substitute_symop(needle.clone(), replacement.clone()), op2.substitute_symop(needle.clone(), replacement.clone()), op3.substitute_symop(needle.clone(), replacement.clone())),
+            Self::MintToken(name, op1, op2) => Self::MintToken(name, op1.substitute_symop(needle.clone(), replacement.clone()), op2.substitute_symop(needle.clone(), replacement.clone())),
+            Self::MintNft(name, op1, op2) => Self::MintNft(name, op1.substitute_symop(needle.clone(), replacement.clone()), op2.substitute_symop(needle.clone(), replacement.clone())),
+            Self::GetTokenSupply(name) => Self::GetTokenSupply(name),
+            Self::BurnToken(name, op) => Self::BurnToken(name, op.substitute_symop(needle, replacement)),
+            Self::BurnNft(name, op1, op2) => Self::BurnNft(name, op1.substitute_symop(needle.clone(), replacement.clone()), op2.substitute_symop(needle.clone(), replacement.clone())),
+            Self::GetStxBalance(op) => Self::GetStxBalance(op.substitute_symop(needle, replacement)),
+            Self::StxTransfer(op1, op2, op3) => Self::StxTransfer(op1.substitute_symop(needle.clone(), replacement.clone()), op2.substitute_symop(needle.clone(), replacement.clone()), op3.substitute_symop(needle.clone(), replacement.clone())),
+            Self::StxTransferMemo(op1, op2, op3, op4) => Self::StxTransferMemo(op1.substitute_symop(needle.clone(), replacement.clone()), op2.substitute_symop(needle.clone(), replacement.clone()), op3.substitute_symop(needle.clone(), replacement.clone()), op4.substitute_symop(needle.clone(), replacement.clone())),
+            Self::StxBurn(op1) => Self::StxBurn(op1.substitute_symop(needle, replacement)),
+            Self::StxGetAccount(op1) => Self::StxGetAccount(op1.substitute_symop(needle, replacement)),
+            Self::BitwiseAnd(ops) => Self::BitwiseAnd(Self::substitute_symop_in_list(ops, needle, replacement)),
+            Self::BitwiseOr(ops) => Self::BitwiseOr(Self::substitute_symop_in_list(ops, needle, replacement)),
+            Self::BitwiseXor(ops) => Self::BitwiseXor(Self::substitute_symop_in_list(ops, needle, replacement)),
+            Self::BitwiseNot(op) => Self::BitwiseNot(op.substitute_symop(needle, replacement)),
+            Self::BitwiseLShift(op1, op2) => Self::BitwiseLShift(op1.substitute_symop(needle.clone(), replacement.clone()), op2.substitute_symop(needle.clone(), replacement.clone())),
+            Self::BitwiseRShift(op1, op2) => Self::BitwiseRShift(op1.substitute_symop(needle.clone(), replacement.clone()), op2.substitute_symop(needle.clone(), replacement.clone())),
+            Self::Slice(op1, op2, op3) => Self::Slice(op1.substitute_symop(needle.clone(), replacement.clone()), op2.substitute_symop(needle.clone(), replacement.clone()), op3.substitute_symop(needle.clone(), replacement.clone())),
+            Self::ToConsensusBuff(op) => Self::ToConsensusBuff(op.substitute_symop(needle, replacement)),
+            Self::FromConsensusBuff(ts, op) => Self::FromConsensusBuff(ts, op.substitute_symop(needle, replacement)),
+            Self::ReplaceAt(op1, op2, op3) => Self::ReplaceAt(op1.substitute_symop(needle.clone(), replacement.clone()), op2.substitute_symop(needle.clone(), replacement.clone()), op3.substitute_symop(needle.clone(), replacement.clone())),
+            Self::GetStacksBlockInfo(name, op) => Self::GetStacksBlockInfo(name, op.substitute_symop(needle, replacement)),
+            Self::GetTenureInfo(name, op) => Self::GetTenureInfo(name, op.substitute_symop(needle, replacement)),
+            Self::ContractHash(op) => Self::ContractHash(op.substitute_symop(needle, replacement)),
+            Self::ToAscii(op) => Self::ToAscii(op.substitute_symop(needle, replacement)),
+            Self::RestrictAssets(op1, op2, op3) => Self::RestrictAssets(op1.substitute_symop(needle.clone(), replacement.clone()), op2.substitute_symop(needle.clone(), replacement.clone()), op3.substitute_symop(needle.clone(), replacement.clone())),
+            Self::AsContractSafe(op1, op2) => Self::AsContractSafe(op1.substitute_symop(needle.clone(), replacement.clone()), op2.substitute_symop(needle.clone(), replacement.clone())),
+            Self::AllowanceWithStx(op) => Self::AllowanceWithStx(op.substitute_symop(needle, replacement)),
+            Self::AllowanceWithFt(op1, name, op2) => Self::AllowanceWithFt(op1.substitute_symop(needle.clone(), replacement.clone()), name, op2.substitute_symop(needle.clone(), replacement.clone())),
+            Self::AllowanceWithNft(op1, name, op2) => Self::AllowanceWithNft(op1.substitute_symop(needle.clone(), replacement.clone()), name, op2.substitute_symop(needle.clone(), replacement.clone())),
+            Self::AllowanceWithStacking(op) => Self::AllowanceWithStacking(op.substitute_symop(needle, replacement)),
+            Self::AllowanceAll => Self::AllowanceAll,
+            Self::Secp256r1Verify(op1, op2, op3) => Self::Secp256r1Verify(op1.substitute_symop(needle.clone(), replacement.clone()), op2.substitute_symop(needle.clone(), replacement.clone()), op3.substitute_symop(needle.clone(), replacement.clone())),
+            Self::VerifyMerkleProof(op1, op2, op3, op4, op5) => Self::VerifyMerkleProof(
+                op1.substitute_symop(needle.clone(), replacement.clone()),
+                op2.substitute_symop(needle.clone(), replacement.clone()),
+                op3.substitute_symop(needle.clone(), replacement.clone()),
+                op4.substitute_symop(needle.clone(), replacement.clone()),
+                op5.substitute_symop(needle.clone(), replacement.clone()),
+            ),
+            Self::GetBitcoinTxOutput(op1, op2) => Self::GetBitcoinTxOutput(
+                op1.substitute_symop(needle.clone(), replacement.clone()),
+                op2.substitute_symop(needle.clone(), replacement.clone()),
+            ),
+            Self::Panic => Self::Panic,
+            Self::FunctionCall(name, args) => {
+                let mut new_args = vec![];
+                for arg in args.into_iter() {
+                    let new_arg = arg.substitute_symop(needle.clone(), replacement.clone());
+                    new_args.push(new_arg);
+                }
+                Self::FunctionCall(name, new_args)
+            }
+        };
+        Box::new(op)
+    }
+
+    /// Check consistency under substitution.
+    /// If we have (and (is-eq (X Y)) Z), then substitute X for Y in Z and see if it simplifies.
+    /// `ops` must already have been simplified.
+    fn check_substitution_consistency(ops: Vec<Box<SymOp>>) -> Result<Vec<Box<SymOp>>, Error> {
+        let mut equivalences = vec![];
+        for (i, op) in ops.clone().into_iter().enumerate() {
+            if let Self::Equals(inners) = *op {
+                let set : HashSet<SymOp> = inners
+                    .into_iter()
+                    .map(|op| *op)
+                    .collect();
+
+                equivalences.push((i, set));
+            }
+        }
+        let mut new_ops = vec![];
+        for (i, op) in ops.into_iter().enumerate() {
+            let mut replaced = false;
+            for (j, equiv) in equivalences.iter() {
+                if replaced {
+                    break;
+                }
+                if i == *j {
+                    continue;
+                }
+                for eq_needle in equiv.iter() {
+                    if replaced {
+                        break;
+                    }
+                    for eq_replacement in equiv.iter() {
+                        if replaced {
+                            break;
+                        }
+                        if eq_needle == eq_replacement {
+                            continue;
+                        }
+                        let new_op = op.clone().substitute_symop(eq_needle.clone(), eq_replacement.clone());
+                        if new_op == op {
+                            continue;
+                        }
+                        trace!("Substituted {eq_needle} with {eq_replacement} to create {new_op} from {op}");
+                        let new_op = new_op.simplify()?;
+                        if new_op == SymOp::True() || new_op == SymOp::False() {
+                            replaced = true;
+                            new_ops.push(Box::new(new_op));
+                            break;
+                        }
+                    }
+                }
+            }
+            if !replaced {
+                new_ops.push(op);
+            }
+        }
+        Ok(new_ops)
+    }
+
+    /// Simplify positivity checks on equality
+    /// Reduce (> X u0) to true if X is positive
+    /// Reduce (< X 0) to false if X is positive
+    fn simplify_positivity_check(ops: Vec<Box<SymOp>>) -> Result<Vec<Box<SymOp>>, Error> {
+        let mut new_ops = vec![];
+        for op in ops.into_iter() {
+            if let Self::Equals(inner) = *op {
+                // are we comparing to 0 or u0?
+                let has_zero = inner.iter().find(|o|
+                    ***o == Self::Constant(Value::UInt(0))
+                    || ***o == Self::Constant(Value::Int(0))
+                ).is_some();
+
+                // do we have a positive term?
+                let has_positive = inner.iter().find(|o| 
+                    Self::try_deduce_positive(o) == Ok(Some(true))
+                ).is_some();
+
+                if has_zero && has_positive {
+                    new_ops.push(Box::new(Self::False()));
+                }
+                else {
+                    new_ops.push(Box::new(Self::Equals(inner)));
+                }
+            }
+            else if let Self::Less(lterm, rterm) = *op {
+                if (*lterm == Self::Constant(Value::UInt(0)) || *lterm == Self::Constant(Value::Int(0)))
+                    && Self::try_deduce_positive(&rterm)? == Some(true)
+                {
+                    new_ops.push(Box::new(Self::True()))
+                }
+                else if (*rterm == Self::Constant(Value::UInt(0)) || *rterm == Self::Constant(Value::Int(0)))
+                    && Self::try_deduce_positive(&lterm)? == Some(true)
+                {
+                    new_ops.push(Box::new(Self::False()))
+                }
+                else {
+                    new_ops.push(Box::new(Self::Less(lterm, rterm)));
+                }
+            }
+            else if let Self::Greater(lterm, rterm) = *op {
+                if (*lterm == Self::Constant(Value::UInt(0)) || *lterm == Self::Constant(Value::Int(0)))
+                    && Self::try_deduce_positive(&rterm)? == Some(true)
+                {
+                    new_ops.push(Box::new(Self::False()))
+                }
+                else if (*rterm == Self::Constant(Value::UInt(0)) || *rterm == Self::Constant(Value::Int(0)))
+                    && Self::try_deduce_positive(&lterm)? == Some(true)
+                {
+                    new_ops.push(Box::new(Self::True()))
+                }
+                else {
+                    new_ops.push(Box::new(Self::Greater(lterm, rterm)));
+                }
+            }
+            else {
+                new_ops.push(op);
+            }
+        }
+        Ok(new_ops)
+    }
+
+    /// fold and propagate constants for an Equals(..)
     fn simplify_equals(ops: Vec<Box<SymOp>>) -> Result<SymOp, Error> {
         let mut consolidated_ops = vec![];
         for op in ops.into_iter() {
@@ -4718,6 +6028,13 @@ impl SymOp {
 
         // remove pure duplicates and simplify
         let simplified = Self::dedup_readonly_booleans(consolidated_ops)?;
+        
+        trace!("simplify_equals: dedup_readonly_booleans = {}", simplified.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
+
+        // reduce positity checks
+        let simplified = Self::simplify_positivity_check(simplified)?;
+        
+        trace!("simplify_equals: simplify_positivity_check = {}", simplified.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
 
         // if dedup'ing left us with only one entry, then this is True
         if simplified.len() == 1 {
@@ -4739,7 +6056,184 @@ impl SymOp {
         
         Ok(Self::Equals(simplified))
     }
-    
+   
+    /// Try to deduce if a symbol is greater than 0.
+    /// op must be simplified
+    fn try_deduce_positive(op: &SymOp) -> Result<Option<bool>, Error> {
+        match op {
+            Self::Constant(Value::UInt(x)) => {
+                return Ok(Some(*x > 0));
+            }
+            Self::LoadedDataVariable(_, op) => {
+                return Self::try_deduce_positive(op);
+            }
+            Self::Add(inner) => {
+                let mut is_unsigned = false;
+                for inn in inner.iter() {
+                    if inn.is_unsigned() == Some(true) {
+                        is_unsigned = true;
+                        break;
+                    }
+                }
+                if !is_unsigned {
+                    // can't deduce anything about a sum of signed symbols
+                    return Ok(None);
+                }
+
+                // if any term is positive, then the sum is positive
+                let mut all_non_positive = true;
+                for inn in inner.iter() {
+                    match Self::try_deduce_positive(inn)? {
+                        Some(true) => {
+                            return Ok(Some(true));
+                        }
+                        None => {
+                            // can't conclude this
+                            all_non_positive = false;
+                        }
+                        Some(false) => {
+                            continue;
+                        }
+                    }
+                }
+
+                if all_non_positive {
+                    // all terms are definitely not positive
+                    return Ok(Some(false))
+                }
+
+                return Ok(None);
+            }
+            Self::Multiply(inner) => {
+                // TODO: test for even number of negatives
+                let mut all_positive = None;
+                for inn in inner.iter() {
+                    match Self::try_deduce_positive(inn)? {
+                        Some(true) => {
+                            if all_positive.is_none() {
+                                all_positive = Some(true);
+                            }
+                        }
+                        Some(false) => {
+                            all_positive = Some(false);
+                            break;
+                        }
+                        None => {
+                            all_positive = Some(false);
+                        }
+                    }
+                }
+                
+                if all_positive == Some(true) {
+                    // a product of positive terms is positive
+                    return Ok(Some(true));
+                }
+
+                return Ok(None);
+            }
+            Self::Divide(inner) => {
+                // quotient is positive if all members are positive or an even number are negative,
+                // and (/ inner[0] inner[1] ... inner[k]) is positive for all 0 <= k < inner.len()
+                //
+                // TODO: Test for even negatives
+                for inn in inner.iter() {
+                    if Self::try_deduce_positive(inn)? != Some(true) {
+                        return Ok(None);
+                    }
+                }
+                if inner.len() == 2 {
+                    return Ok(Some(true));
+                }
+
+                let mut i = 2;
+                let mut product = vec![inner[1].clone()];
+                while i < inner.len() {
+                    // (> (/ inner[0] inner[1] ... inner[k]) u0)
+                    // implies (> inner[0] (* inner[1] inner[2] ... inner[k]))
+                    // implies (> (- inner[0] (* inner[1] inner[2] ... inner[k])) u0)
+                    let Ok(sub) = Self::Subtract(vec![inner[0].clone(), if product.len() == 1 { product[0].clone() } else { Box::new(Self::Multiply(product.clone())) }]).simplify() else {
+                        return Ok(None);
+                    };
+                    if Self::try_deduce_positive(&Box::new(sub))? != Some(true) {
+                        return Ok(None);
+                    }
+                    product.push(inner[i].clone());
+                    i += 1;
+                }
+                return Ok(Some(true))
+            }
+            Self::Modulo(num_op, _den_op) => {
+                // modulus is positive if the numerator is positive
+                return Self::try_deduce_positive(num_op);
+            }
+            Self::Power(..) => {
+                // pow is defined only for unsigned integers
+                return Ok(Some(true));
+            }
+            Self::Sqrti(op) => {
+                // this is positive unless op is 0, which is to say,
+                // this is positive if op is positive
+                return Self::try_deduce_positive(op);
+            }
+            Self::Log2(op) => {
+                // this is positive if op > 1, which is to to say, if (op - 1) > 0
+                let sub = if op.is_unsigned() == Some(true) {
+                    Self::Subtract(vec![op.clone(), Box::new(Self::Constant(Value::UInt(1)))])
+                }
+                else if op.is_signed() == Some(true) {
+                    Self::Subtract(vec![op.clone(), Box::new(Self::Constant(Value::Int(1)))])
+                }
+                else {
+                    return Ok(None);
+                };
+                let Ok(sub) = sub.simplify() else {
+                    return Ok(None);
+                };
+                return Self::try_deduce_positive(&Box::new(sub));
+            }
+            Self::Len(seq_op) => {
+                if let Some(min_len) = Self::try_compute_min_sequence_len(seq_op)? && min_len > 0 {
+                    return Ok(Some(true));
+                }
+                return Ok(None);
+            }
+            Self::BuffToIntLe(_bytes_op) => {
+                // TODO: need a theory to inspect sign bit
+                return Ok(None);
+            }
+            Self::BuffToIntBe(_bytes_op) => {
+                // TODO: need a theory to inspect sign bit
+                return Ok(None);
+            }
+            Self::BuffToUIntLe(_bytes_op) => {
+                // TODO: need a theory to inspect sign bit
+                return Ok(None);
+            }
+            Self::BuffToUIntBe(_bytes_op) => {
+                // TODO: need a theory to inspect sign bit
+                return Ok(None);
+            }
+            Self::LoadedMapEntry(_, _, Some(op)) => {
+                return Self::try_deduce_positive(op);
+            }
+            Self::GetTokenBalance(_name, _owner_op) => {
+                // TODO: inspect continuation 
+                return Ok(None);
+            }
+            Self::GetTokenSupply(_name) => {
+                // TODO: inspect continuation
+                return Ok(None);
+            }
+            Self::GetStxBalance(_owner_op) => {
+                // TODO: inspect continuation
+                return Ok(None);
+            }
+            _ => {
+                return Ok(None);
+            }
+        }
+    }
+
     /// Evaluate a list of symbolic expressions without concern to any surrounding context (e.g.
     /// no access to the DB or globals, and without concern to the calling contract or whether or
     /// not we're on mainnet)
@@ -5288,6 +6782,31 @@ impl SymOp {
                         return Ok(Self::False())
                     }
                     let (new_x, new_y) = Self::gather_comparator_terms(x, y)?;
+
+                    // special case -- if comparing (len ..) to a constant, see if we can
+                    // immediately reduce to True or False based on the minimum and maximum
+                    // possible sequence lengths (if they can be deduced)
+                    match (&*new_x, &*new_y) {
+                        (Self::Constant(Value::UInt(v)), Self::Len(s)) => {
+                            if let Some(min_len) = Self::try_compute_min_sequence_len(s)? && *v < u128::try_from(min_len).map_err(|_| Error::Bug("usize does not fit into u128".into()))? {
+                                return Ok(Self::True());
+                            }
+                            if let Some(max_len) = Self::try_compute_max_sequence_len(s)? && *v >= u128::try_from(max_len).map_err(|_| Error::Bug("usize does not fit into u128".into()))? {
+                                return Ok(Self::False());
+                            }
+                        }
+                        (Self::Len(s), Self::Constant(Value::UInt(v))) => {
+                            if let Some(max_len) = Self::try_compute_max_sequence_len(s)? && u128::try_from(max_len).map_err(|_| Error::Bug("usize does not fit into u128".into()))? < *v {
+                                return Ok(Self::True());
+                            }
+                            if let Some(min_len) = Self::try_compute_min_sequence_len(s)? && u128::try_from(min_len).map_err(|_| Error::Bug("usize does not fit into u128".into()))? >= *v {
+
+                                return Ok(Self::False());
+                            }
+                        }
+                        (_, _) => {}
+                    }
+
                     Ok(Self::Less(new_x, new_y))
                 }
                 else {
@@ -5391,7 +6910,24 @@ impl SymOp {
                         Ok(Self::Constant(v))
                     }
                     z => {
-                        Ok(Self::Len(Box::new(z)))
+                        let op = Box::new(z);
+                        trace!("Compute min/max len of {op}");
+                        let Some(min_len) = Self::try_compute_min_sequence_len(&op)? else {
+                            trace!("No min_len computed for {op}");
+                            return Ok(Self::Len(op));
+                        };
+                        trace!("simplify (len {op}): min_len = {min_len}");
+                        let Some(max_len) = Self::try_compute_max_sequence_len(&op)? else {
+                            trace!("No max_len computed for {op}");
+                            return Ok(Self::Len(op));
+                        };
+                        trace!("simplify (len {op}): max_len = {max_len}");
+                        if min_len == max_len {
+                            Ok(Self::Constant(Value::UInt(u128::try_from(min_len).map_err(|_| Error::Bug("Cannot convert len to u128".into()))?)))
+                        }
+                        else {
+                            Ok(Self::Len(op))
+                        }
                     }
                 }
             },
@@ -5639,7 +7175,18 @@ impl SymOp {
                         Ok(Self::True())
                     }
                     op => {
-                        Self::simplify_native_1arg("is-some", Box::new(op), |x| Self::IsSome(x))
+                        let op = Self::simplify_native_1arg("is-some", Box::new(op), |x| Self::IsSome(x))?;
+                        if let Self::IsSome(inner) = &op {
+                            if let Some(b) = Self::try_compute_is_some(inner)? {
+                                Ok(Self::Constant(Value::Bool(b)))
+                            }
+                            else {
+                                Ok(op)
+                            }
+                        }
+                        else {
+                            Ok(op)
+                        }
                     }
                 }
             }
@@ -6762,7 +8309,7 @@ impl Continuation {
     /// by binding all of the parent's symbols into its formulae, maps, data-vars, and predicates.
     /// It's as if the parent has called the function represented by the free continuation, but
     /// skipping the needless work of re-evaluating every possible continuation of the function.
-    pub fn from_evaluated(free: &Continuation, function_path: String, parent: Rc<Continuation>) -> Result<Self, Error> {
+    pub fn from_evaluated(config: &SymbexConfig, free: &Continuation, function_path: String, parent: Rc<Continuation>) -> Result<Self, Error> {
         assert!(!parent.panicking, "BUG: tried to continue from a panic");
 
         assert_eq!(free.bound_formulae.len(), 0);
@@ -6902,7 +8449,7 @@ impl Continuation {
         let mut var_accesses = parent.var_accesses.clone();
         var_accesses.extend(free.var_accesses.clone().into_iter());
 
-        let cont = Self {
+        let mut cont = Self {
             id: next_cont_id(),
             function_path: Some(function_path),
             current_line: free.current_line.clone(),
@@ -6936,6 +8483,9 @@ impl Continuation {
         debug!("Parent continuation\n{}", parent);
         debug!("Free continuation\n{}", free);
         debug!("Evaluated continuation\n{}", &cont);
+        
+        Symbex::apply_assumptions(&config.assumptions, &mut cont)?;
+        debug!("Evaluated continuation with assumptions\n{}", &cont);
         Ok(cont)
     }
 
@@ -8227,33 +9777,53 @@ impl Callgraph {
     /// Returns None if the function is not known.
     /// Functions are returned in post-order traversal -- the "furthest away" functions are first
     pub fn reachable_from(&self, func_name: &FullName) -> Result<Vec<FullName>, Error> {
-        let mut reachable = vec![];
-        let mut reachable_set = HashSet::new();
+        let mut reachable_depth = HashMap::new();
         let mut frontier = VecDeque::new();
         if !self.reachable.contains_key(func_name) {
             return Err(Error::NotFound(format!("{func_name}")));
         };
 
-        frontier.push_back(func_name.clone());
-        while let Some(func_name) = frontier.pop_front() {
+        frontier.push_back((0, func_name.clone()));
+        while let Some((depth, func_name)) = frontier.pop_front() {
             let Some(node) = self.reachable.get(&func_name) else {
                 return Err(Error::Bug(format!("Unknown function {func_name}")));
             };
 
             for c in node.callable.iter() {
-                if reachable_set.contains(c.call_name()) {
-                    continue;
+                let fq_name = c.call_name().clone();
+
+                if let Some(existing_depth) = reachable_depth.get(&fq_name) {
+                    if *existing_depth < depth + 1 {
+                        frontier.push_back((depth + 1, fq_name));
+                    }
                 }
-                frontier.push_back(c.call_name().clone());
+                else {
+                    frontier.push_back((depth + 1, fq_name));
+                }
             }
-            if !reachable_set.contains(&func_name) {
-                reachable.push(func_name.clone());
+
+            if let Some(existing_depth) = reachable_depth.get_mut(&func_name) {
+                if *existing_depth < depth {
+                    *existing_depth = depth;
+                }
             }
-            reachable_set.insert(func_name.clone());
+            else {
+                reachable_depth.insert(func_name.clone(), depth);
+            }
         }
-        reachable.reverse();
-        let _ = reachable.pop();
-        Ok(reachable)
+        let mut reachable_depths : Vec<_> = reachable_depth
+            .into_iter()
+            .map(|(name, depth)| (depth, name))
+            .collect();
+
+        // order by deepest-first
+        reachable_depths.sort();
+        reachable_depths.reverse();
+        let mut reachable_names : Vec<_> = reachable_depths.into_iter().map(|(_, name)| name).collect();
+
+        // last item is the given func_name
+        let _ = reachable_names.pop();
+        Ok(reachable_names)
     }
 
     /// Get a callgraph node
@@ -8372,11 +9942,12 @@ pub struct SymContract {
     symbols: Vec<SymbolicExpression>,
     contract_context: ContractContext,
     function_symexps: HashMap<ClarityName, SymbolicExpression>,
+    src: String,
 }
 
 impl SymContract {
-    fn extract_function_symexps(exprs: &[SymbolicExpression]) -> HashMap<ClarityName, SymbolicExpression> {
-        let mut ret = HashMap::new();
+    fn extract_function_symexps(exprs: &[SymbolicExpression]) -> Vec<(ClarityName, SymbolicExpression)> {
+        let mut ret = vec![];
         for expr in exprs {
             let Some(lv) = expr.match_list() else {
                 continue;
@@ -8408,19 +9979,26 @@ impl SymContract {
             let Some(func_name) = func_name_expr.match_atom() else {
                 continue;
             };
-            ret.insert(func_name.clone(), expr.clone());
+            ret.push((func_name.clone(), expr.clone()));
         }
         ret
     }
 
-    pub fn new(id: QualifiedContractIdentifier, typemap: TypeMap, symbols: Vec<SymbolicExpression>, contract_context: ContractContext) -> Self {
+    pub fn new(id: QualifiedContractIdentifier, typemap: TypeMap, symbols: Vec<SymbolicExpression>, contract_context: ContractContext, src: &str) -> Self {
         let function_symexps = Self::extract_function_symexps(&symbols);
+        let function_symexps_len = function_symexps.len();
+        let function_symexps_table : HashMap<_, _> = function_symexps.into_iter().collect();
+        if function_symexps_len != function_symexps_table.len() {
+            panic!("BUG: duplicate function symexp");
+        }
+
         Self {
             id,
             typemap,
             symbols,
             contract_context,
-            function_symexps
+            function_symexps: function_symexps_table,
+            src: src.to_string(),
         }
     }
 
@@ -8438,7 +10016,8 @@ pub struct SymbexConfig {
     skip_pure_calls: bool,
     skip_causally_independent_calls: bool,
     combine_continuations: bool,
-    check_proofs: bool
+    check_proofs: bool,
+    assumptions: Vec<SymOp>,
 }
 
 impl SymbexConfig {
@@ -8451,6 +10030,7 @@ impl SymbexConfig {
             skip_causally_independent_calls: symbex.skip_causally_independent_calls,
             combine_continuations: symbex.combine_continuations,
             check_proofs: symbex.check_proofs,
+            assumptions: vec![],
         }
     }
 
@@ -8462,8 +10042,18 @@ impl SymbexConfig {
             skip_pure_calls: true,
             skip_causally_independent_calls: true,
             combine_continuations: true,
-            check_proofs: true
+            check_proofs: true,
+            assumptions: vec![],
         }
+    }
+
+    pub fn merge_parent(&self, parent_config: &SymbexConfig) -> SymbexConfig {
+        let mut new_config = self.clone();
+        new_config.drop_early_returns.extend(parent_config.drop_early_returns.clone().into_iter());
+        new_config.skip_function_calls.extend(parent_config.skip_function_calls.clone().into_iter());
+        new_config.skip_contract_calls.extend(parent_config.skip_contract_calls.clone().into_iter());
+        new_config.assumptions.extend(parent_config.assumptions.clone().into_iter());
+        new_config
     }
 }
 
@@ -8501,8 +10091,9 @@ pub struct Symbex {
     /// drop early-return continuations from the given functions
     drop_early_returns: HashSet<FullName>,
     /// cache of evaluated function calls, with all function arguments unbound.
-    /// Maps the SymbolicExpression ID to the set of halting continuations
-    evaluated_functions: HashMap<FullName, Vec<Continuation>>,
+    /// Maps the fully-qualified function name to the set of halting continuations and the
+    /// function's evaluation configuration
+    evaluated_functions: HashMap<FullName, (SymbexConfig, Vec<Continuation>)>,
     /// combine continuations that have the same halting states and final formulae
     combine_continuations: bool,
     /// whether or not to abort on proof failure
@@ -8540,6 +10131,11 @@ impl Symbex {
     pub fn symbols(&self, contract_id: &QualifiedContractIdentifier) -> Result<&[SymbolicExpression], Error> {
         self.contracts.get(contract_id).map(|sc| sc.symbols.as_slice()).ok_or_else(|| Error::NotFound(format!("No such contract {contract_id}")))
     }
+    
+    /// Get a ref to a contract's source code
+    pub fn contract_source(&self, contract_id: &QualifiedContractIdentifier) -> Result<&str, Error> {
+        self.contracts.get(contract_id).map(|sc| sc.src.as_str()).ok_or_else(|| Error::NotFound(format!("No such contract {contract_id}")))
+    }
 
     /// Get a ref to the callgraph
     pub fn callgraph(&self) -> &Callgraph {
@@ -8574,13 +10170,14 @@ impl Symbex {
            .into_iter()
            .map(|mut c| {
                let p = c.predicate.clone();
-               match p.simplify() {
+               match p.clone().simplify() {
                    Ok(p) => {
                        trace!("Continuation {} simplified predicate = {p}, old predicate = {}", c.id, &c.predicate);
                        c.predicate = p.clone();
                    }
                    Err(e) => {
-                       panic!("failed to simplify predicate: {e:?}");
+                       let pc = p.as_symop();
+                       panic!("failed to simplify predicate {pc}: {e:?}");
                    }
                }
                let f = c.final_formula.clone();
@@ -8758,14 +10355,10 @@ impl Symbex {
     /// Apply all (@clairvoyance ..) commands for a symbolic expression and its computed
     /// continuations
     fn run_post_commands(&mut self, config: &SymbexConfig, body: &SymbolicExpression, mut original_cont: Continuation, continuations: &mut Vec<Continuation>) -> Result<(), Error> {
-        if !config.check_proofs {
-            return Ok(());
-        }
-
-        let mut command_context = CommandContext::new();
+        let mut command_context = CommandContext::new(self.contract_source(&original_cont.get_current_contract_id())?);
         let commands = command_context.eval(body)?;
         if commands.len() > 0 {
-            debug!("Commands on {body}:");
+            debug!("Post-commands on {body}:");
             for cmd in commands.iter() {
                 debug!("\n{cmd}");
             }
@@ -8779,6 +10372,9 @@ impl Symbex {
         for command in commands.into_iter() {
             match command {
                 Command::Halt(halt) => {
+                    if !config.check_proofs {
+                        continue;
+                    }
                     halts.push(halt);
                 }
                 Command::DropEarlyReturns => {
@@ -8791,6 +10387,9 @@ impl Symbex {
                     original_cont.final_formula = res;
                 }
                 Command::Invariant(inv) => {
+                    if !config.check_proofs {
+                        continue;
+                    }
                     let mut failed = vec![];
                     for cont in continuations.iter() {
                         // see if this continuation's predicate implies the invariant
@@ -8849,6 +10448,19 @@ impl Symbex {
                         return Err(Error::InvariantFailure(body.clone(), inv, failed));
                     }
                 }
+                Command::Assumption(assumption) => {
+                    let mut retain = vec![];
+                    for mut cont in continuations.drain(..) {
+                        if Self::apply_assumptions(&[assumption.clone()], &mut cont)? {
+                            retain.push(cont);
+                        }
+                    }
+                    continuations.clear();
+                    continuations.extend(retain.into_iter());
+                    if continuations.len() == 0 {
+                        return Err(Error::AssumptionFailure(body.clone(), assumption));
+                    }
+                }
                 Command::PrintProducedContinuations => {
                     eprintln!("=========== Begin produced continuations for {body}");
                     for (i, cont) in continuations.iter().enumerate() {
@@ -8891,6 +10503,7 @@ impl Symbex {
         new_config.skip_causally_independent_calls = parent_config.skip_causally_independent_calls;
         new_config.combine_continuations = parent_config.combine_continuations;
         new_config.check_proofs = parent_config.check_proofs;
+        new_config.assumptions = parent_config.assumptions.clone();
         new_config
     }
 
@@ -8931,10 +10544,10 @@ impl Symbex {
     /// Apply all (@clairvoyance ..) directives for a symbolic expression on this symbolic
     /// executor instance which apply prior to computing its continuations.
     fn run_pre_commands(&mut self, parent_config: &SymbexConfig, continuation: &Continuation, body: &SymbolicExpression) -> Result<SymbexConfig, Error> {
-        let mut command_context = CommandContext::new();
+        let mut command_context = CommandContext::new(self.contract_source(&continuation.get_current_contract_id())?);
         let commands = command_context.eval(body)?;
         if commands.len() > 0 {
-            debug!("Commands on {body}:");
+            debug!("Pre-commands on {body}:");
             for cmd in commands.iter() {
                 debug!("\n{cmd}");
             }
@@ -8992,6 +10605,12 @@ impl Symbex {
                     config.skip_pure_calls = false;
                     config.skip_causally_independent_calls = false;
                 }
+                Command::ExplorePure => {
+                    config.skip_pure_calls = false;
+                }
+                Command::ExploreCausallyIndependent => {
+                    config.skip_causally_independent_calls = false;
+                }
                 Command::PrintLn(expr) => {
                     let bound_formulae = continuation.get_bound_formulae();
                     let mut rewritten_expr = expr.clone();
@@ -9025,6 +10644,9 @@ impl Symbex {
                             }
                         }
                     };
+                }
+                Command::Assumption(assumption) => {
+                    config.assumptions.push(assumption);
                 }
                 _ => {
                     continue;
@@ -9180,11 +10802,13 @@ impl Symbex {
     /// arguments to symbols in `binding_cont`.
     /// In the latter case, `arg_symbols_opt` should be None, and the caller should have already
     /// bound all arguments to symbols prior to calling.
-    fn try_eval_causally_independent_contract_function(&mut self, config: &SymbexConfig, function_base_name: &ClarityName, binding_cont: Continuation, arg_symbols_opt: Option<&[SymbolicExpression]>, start_line: u32) -> Result<Result<Vec<Continuation>, Continuation>, Error> {
+    fn try_eval_causally_independent_contract_function(&mut self, parent_config: &SymbexConfig, function_base_name: &ClarityName, binding_cont: Continuation, arg_symbols_opt: Option<&[SymbolicExpression]>, start_line: u32) -> Result<Result<Vec<Continuation>, Continuation>, Error> {
         let cur_contract = binding_cont.get_current_contract_id();
         let parent_func = binding_cont.function_path.clone().unwrap_or("".to_string());
         let function_name = format!("{parent_func}/{}", &function_base_name);
         let fq_name = FullName(cur_contract.clone(), function_base_name.clone());
+        let func_config = self.evaluated_functions.get(&fq_name).ok_or_else(|| Error::Bug(format!("Function not pre-evaluated: {fq_name}")))?.0.clone();
+        let config = func_config.merge_parent(parent_config);
 
         // can we skip this, or shorten our consideration?
         let is_pure = self.callgraph().is_pure(&fq_name)?;
@@ -9202,6 +10826,7 @@ impl Symbex {
             if !is_root && is_causally_independent && config.skip_causally_independent_calls {
                 debug!("Will not evaluate function {fq_name} from continuation {}, since it is causally independent", binding_cont.id);
             }
+            debug!("config for {fq_name}: {config:?}");
 
             // skip this; treat this function call as a symbol
             let skip_conts = if let Some(arg_symbols) = arg_symbols_opt {
@@ -9222,7 +10847,7 @@ impl Symbex {
                                 next_skip_cont_set.push(vec![(skip_cont, args)]);
                                 continue;
                             }
-                            let next_conts = self.eval(config, Continuation::from_parent(Rc::new(skip_cont), format!("{function_name}.skipped/arg[{i}]"), arg.span.start_line), arg)?;
+                            let next_conts = self.eval(&config, Continuation::from_parent(Rc::new(skip_cont), format!("{function_name}.skipped/arg[{i}]"), arg.span.start_line), arg)?;
                             let next_conts_and_args : Vec<_> = next_conts
                                 .into_iter()
                                 .map(|cont| {
@@ -9268,7 +10893,7 @@ impl Symbex {
                     final_conts.push(final_cont);
                 }
             }
-            return Ok(Ok(self.reduce_continuations(config, final_conts)));
+            return Ok(Ok(self.reduce_continuations(&config, final_conts)));
         }
         else {
             return Ok(Err(binding_cont))
@@ -9284,7 +10909,7 @@ impl Symbex {
     /// is None, then the argument names for this function must already be bound in `binding_cont`
     /// (or this call will error out)
     /// * `start_line` is the line number of the callsite.
-    fn eval_precomputed_contract_function(&mut self, config: &SymbexConfig, function_base_name: &ClarityName, binding_cont: Continuation, arg_symbols_opt: Option<&[SymbolicExpression]>, start_line: u32) -> Result<Vec<Continuation>, Error> {
+    fn eval_precomputed_contract_function(&mut self, parent_config: &SymbexConfig, function_base_name: &ClarityName, binding_cont: Continuation, arg_symbols_opt: Option<&[SymbolicExpression]>, start_line: u32) -> Result<Vec<Continuation>, Error> {
         let cur_contract = binding_cont.get_current_contract_id();
         let parent_func = binding_cont.function_path.clone().unwrap_or("".to_string());
         let function_name = format!("{parent_func}/{}", &function_base_name);
@@ -9293,6 +10918,8 @@ impl Symbex {
         let Some(func) = self.contract_context(&cur_contract)?.functions.get(function_base_name).cloned() else {
             return Err(Error::NotFound(format!("No such function {function_base_name} in {cur_contract}")));
         };
+        let func_config = self.evaluated_functions.get(&fq_name).ok_or_else(|| Error::Bug(format!("Function not pre-evaluated: {fq_name}")))?.0.clone();
+        let config = func_config.merge_parent(parent_config);
 
         // going to evaluate a pre-evaluated function.
         // bind each bound formula in this continuation to the simplified
@@ -9311,7 +10938,7 @@ impl Symbex {
                             final_conts.push(evaled_cont);
                             continue;
                         }
-                        let next_conts = self.eval(config, Continuation::from_parent(Rc::new(evaled_cont), format!("{function_name}.evaled/arg[{i}]"), arg.span.start_line), arg)?;
+                        let next_conts = self.eval(&parent_config, Continuation::from_parent(Rc::new(evaled_cont), format!("{function_name}.evaled/arg[{i}]"), arg.span.start_line), arg)?;
                         let next_conts_and_args : Vec<_> = next_conts
                             .into_iter()
                             .map(|cont| {
@@ -9360,18 +10987,21 @@ impl Symbex {
                 let binding_cont_id = binding_cont.id;
                 let binding_cont_rc = Rc::new(binding_cont);
                 let mut pushed = 0;
-                let Some(precomputed_conts) = self.evaluated_functions.get(&fq_name) else {
+                let mut unreachable = 0;
+                let Some((_precomputed_config, precomputed_conts)) = self.evaluated_functions.get(&fq_name) else {
                     return Err(Error::Bug(format!("No precomputed continuations for {fq_name}")));
                 };
                 for cont in precomputed_conts.iter() {
-                    let eval_cont = Continuation::from_evaluated(cont, format!("{function_name}.evaled"), binding_cont_rc.clone())?;
+                    let eval_cont = Continuation::from_evaluated(&config, cont, format!("{function_name}.evaled"), binding_cont_rc.clone())?;
                     if eval_cont.panicking {
                         debug!("Continuation {} (id {}) panics", eval_cont.get_function_path(), eval_cont.id);
                         final_conts.push(eval_cont);
+                        pushed += 1;
                         continue;
                     }
                     if eval_cont.predicate == Predicate::False {
                         debug!("Continuation {} (id {}) is unreachable", eval_cont.get_function_path(), eval_cont.id);
+                        unreachable += 1;
                         continue;
                     }
 
@@ -9390,17 +11020,27 @@ impl Symbex {
                     pushed += 1;
                 }
                 if pushed == 0 {
-                    // all continuations are read-independent of the
-                    // binding continuation, so we can skip
-                    debug!("All continuations of {fq_name} are read-independent of continuation {}", binding_cont_id);
-                    let mut final_cont = Continuation::from_parent(binding_cont_rc, format!("{function_name}.eval-skipped/return"), start_line);
-                    final_cont.add_reachable_storage_accesses(&fq_name, &self.callgraph())?;
-                    final_cont.final_formula = SymOp::FunctionCall(fq_name.clone(), args);
-                    final_conts.push(final_cont);
+                    if unreachable > 0 {
+                        debug!("All continuations of {fq_name} are unreachable from continuation {binding_cont_id}");
+                        let mut final_cont = Continuation::from_parent(binding_cont_rc, format!("{function_name}.eval-skipped/return"), start_line);
+                        final_cont.add_reachable_storage_accesses(&fq_name, &self.callgraph())?;
+                        final_cont.final_formula = SymOp::FunctionCall(fq_name.clone(), args);
+                        final_cont.predicate = Predicate::False;
+                        final_conts.push(final_cont);
+                    }
+                    else {
+                        // all continuations are read-independent of the
+                        // binding continuation, so we can skip
+                        debug!("All continuations of {fq_name} are read-independent of continuation {}", binding_cont_id);
+                        let mut final_cont = Continuation::from_parent(binding_cont_rc, format!("{function_name}.eval-skipped/return"), start_line);
+                        final_cont.add_reachable_storage_accesses(&fq_name, &self.callgraph())?;
+                        final_cont.final_formula = SymOp::FunctionCall(fq_name.clone(), args);
+                        final_conts.push(final_cont);
+                    }
                 }
             }
         }
-        Ok(self.reduce_continuations(config, final_conts))
+        Ok(self.reduce_continuations(&config, final_conts))
     }
     
     /// Call a function within a contract
@@ -9486,12 +11126,72 @@ impl Symbex {
         Ok(sym_opt)
     }
 
+    fn apply_assumptions(assumptions: &[SymOp], cont: &mut Continuation) -> Result<bool, Error> {
+        for assumption in assumptions.iter() {
+            // see if this continuation's predicate implies the invariant
+            let bound_formulae = cont.get_bound_formulae();
+            let mut rewritten_assumption = assumption.clone();
+            for (sym_id, symop) in bound_formulae.into_iter() {
+                rewritten_assumption = *rewritten_assumption.bind_symbol(sym_id, symop);
+            }
+
+            // merge predicate with statements about maps and vars
+            let mut var_stmts = vec![];
+            let mut map_stmts = vec![];
+            for (var_name, var_val) in cont.var_state.iter() {
+                var_stmts.push(SymOp::Equals(vec![Box::new(SymOp::FetchVar(var_name.clone())), Box::new(var_val.clone())]));
+            }
+            for (map_name, map_state) in cont.map_state.iter() {
+                for (key_op, val_op) in map_state.iter() {
+                    map_stmts.push(SymOp::Equals(vec![Box::new(SymOp::FetchEntry(map_name.clone(), Box::new(key_op.clone()))), Box::new(SymOp::ConsSome(Box::new(val_op.clone())))]));
+                }
+            }
+            for (map_name, tombstones) in cont.map_tombstones.iter() {
+                for key_op in tombstones.iter() {
+                    map_stmts.push(SymOp::IsNone(Box::new(SymOp::FetchEntry(map_name.clone(), Box::new(key_op.clone())))));
+                }
+            }
+           
+            let mut full_predicate = cont.predicate.clone().as_symop();
+            for map_stmt in map_stmts.into_iter() {
+                full_predicate = full_predicate.and(map_stmt);
+            }
+            for var_stmt in var_stmts.into_iter() {
+                full_predicate = full_predicate.and(var_stmt);
+            }
+
+            trace!("Constructed full predicate:\n{}", &full_predicate);
+
+            full_predicate = full_predicate.simplify()?;
+
+            debug!("Full predicate:\n{}", &full_predicate);
+            debug!("Assumption:\n{}", &rewritten_assumption);
+
+            let assumed = SymOp::And(vec![Box::new(full_predicate.clone()), Box::new(rewritten_assumption)])
+                .simplify()?
+                .try_as_predicate()?;
+
+            debug!("Full predicate with assumption:\n{}", &assumed.clone().as_symop());
+
+            if assumed == Predicate::False {
+                cont.predicate = Predicate::False;
+                debug!("Assumption {assumption} does not hold with {full_predicate}");
+                return Ok(false);
+            }
+            cont.predicate = assumed;
+        }
+        Ok(true)
+    }
+
     pub fn eval(&mut self, parent_config: &SymbexConfig, mut continuation: Continuation, body: &SymbolicExpression) -> Result<Vec<Continuation>, Error> {
         if continuation.halted() {
             return Ok(vec![continuation]);
         }
         let original_continuation = continuation.clone();
         let config = self.run_pre_commands(parent_config, &continuation, body)?;
+        if !Self::apply_assumptions(&config.assumptions, &mut continuation)? {
+            return Ok(vec![continuation]);
+        }
 
         trace!("Simplify continuation {} predicate {}", continuation.id, &continuation.predicate);
         let pred = continuation.predicate.clone().simplify()?;
@@ -10819,7 +12519,7 @@ impl Symbex {
                                 "get-tenure-info?" => {
                                     todo!()
                                 }
-                                "contract-hash?" => {
+                                "contract-hash" => {
                                     todo!()
                                 }
                                 "to-ascii?" => {
@@ -11811,35 +13511,6 @@ impl Symbex {
                                                             }
                                                         };
 
-                                                        /*
-                                                        let callee_cont = Continuation::from_caller(Rc::new(binding_cont), format!("{function_name}/{func_name}.seq-{seq_i}.body"), func_name.to_string(), func.body.span.start_line);
-                                                        let conts = self.eval(&config, callee_cont, &func.body)?;
-                                                        let conts : Vec<_> = conts
-                                                            .into_iter()
-                                                            .map(|cont| {
-                                                                if cont.panicking {
-                                                                    return cont;
-                                                                }
-                                                                let mut return_cont = Continuation::from_callee(Rc::new(cont), format!("{function_name}/{func_name}.seq-{seq_i}.return"), func.body.span.start_line);
-                                                                let return_formula = return_cont.final_formula.clone();
-
-                                                                // return value is a list-cons of all
-                                                                // values up to seq_i
-                                                                return_cont.final_formula = if let SymOp::ListCons(mut items) = list_cons.clone() {
-                                                                    items.push(Box::new(return_formula));
-                                                                    SymOp::ListCons(items)
-                                                                }
-                                                                else {
-                                                                    unreachable!()
-                                                                };
-                                                                for unbind in bound.iter() {
-                                                                    return_cont.unbind(unbind);
-                                                                }
-                                                                return_cont
-                                                            })
-                                                            .collect();
-                                                        */
-
                                                         called_conts.extend(conts.into_iter());
                                                     }
 
@@ -12388,15 +14059,20 @@ impl Symbex {
         Ok(self.reduce_continuations(&config, bound_conts))
     }
     
+    pub fn from_contract_comments(code: &str, search_paths: Vec<String>) -> Result<Symbex, Error> {
+        Self::from_contract_comments_ex(code, search_paths)
+            .map(|(_, symbex)| symbex)
+    }
+    
     /// Apply all (@clairvoyance ..) directives for a symbolic expression on this symbolic
     /// executor instance which apply prior any evaluation
-    pub fn from_contract_comments(code: &str, mut search_paths: Vec<String>) -> Result<Symbex, Error> {
+    pub fn from_contract_comments_ex(code: &str, mut search_paths: Vec<String>) -> Result<(QualifiedContractIdentifier, Symbex), Error> {
         // first, parse and analyze this contract in a throw-away datastore
-        let default_contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "clairvoyance".try_into().unwrap());
+        let default_contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "clairvoyance-default-contract-name".try_into().unwrap());
         let ast = ast::parse_ast(&default_contract_id, &code)?;
 
         // walk through top-level comments
-        let mut command_context = CommandContext::new();
+        let mut command_context = CommandContext::new(code);
 
         let mut trait_concretizations = vec![];
         let mut default_traits = vec![];
@@ -12405,19 +14081,22 @@ impl Symbex {
         let mut contract_sponsor = None;
         
         let function_symexps = SymContract::extract_function_symexps(&ast.expressions);
-        search_paths.push("".to_string());
+        search_paths.push(".".to_string());
+
+        let comment_blocks = ast::find_toplevel_comment_blocks(code);
 
         // commands in all top-level expressions
-        for toplevel_body in ast.expressions.iter() {
-            let commands = command_context.eval(toplevel_body)?;
+        for (lineno, comment_block) in comment_blocks.iter() {
+            let commands = command_context.eval_comment_block(*lineno, &comment_block, None)?;
             if commands.len() > 0 {
-                debug!("Commands on top-level {toplevel_body}:");
+                debug!("Commands on top-level comment block at line {lineno}:");
                 for cmd in commands.iter() {
                     debug!("\n{cmd}");
                 }
                 debug!("End of commands");
             }
             else {
+                debug!("No comments on top-level comment block at line {lineno}");
                 continue;
             }
 
@@ -12445,6 +14124,7 @@ impl Symbex {
                             };
 
                             found = true;
+                            debug!("Add contract dependency {contract_id} at '{code}'");
                             deps.push((contract_id.clone(), code.to_string(), sponsor_opt));
                             break;
                         }
@@ -12465,6 +14145,7 @@ impl Symbex {
                         if contract_id.is_some() {
                             return Err(Error::new_program_error(format!("`(contract-id ..)` directive used more than once")));
                         }
+                        debug!("Set contract ID to {deployed_id}");
                         contract_id = Some(deployed_id);
                     }
                     _ => {
@@ -12488,6 +14169,7 @@ impl Symbex {
                 debug!("End of commands");
             }
             else {
+                debug!("No comments on function {body}");
                 continue;
             }
 
@@ -12505,7 +14187,7 @@ impl Symbex {
         }
 
         let this_idx = deps.len();
-        deps.push((contract_id, code.to_string(), contract_sponsor.clone()));
+        deps.push((contract_id.clone(), code.to_string(), contract_sponsor.clone()));
         let mut symbex = Symbex::from_contracts(deps, this_idx)?
             .with_tx_sponsor(contract_sponsor);
 
@@ -12516,7 +14198,7 @@ impl Symbex {
             symbex = symbex.default_trait(trait_id, contract_id);
         }
 
-        Ok(symbex)
+        Ok((contract_id, symbex))
     }
 
     pub fn from_contract(contract_id: QualifiedContractIdentifier, code: &str) -> Result<Self, Error> {
@@ -12551,7 +14233,7 @@ impl Symbex {
             let Some(typemap) = analysis.type_map.take() else {
                 return Err(Error::Bug("No typemap computed".into()));
             };
-            let sym_contract = SymContract::new(contract_id.clone(), typemap, ast.expressions, contract_context);
+            let sym_contract = SymContract::new(contract_id.clone(), typemap, ast.expressions, contract_context, &code);
             contract_state.insert(contract_id, sym_contract);
         }
 
@@ -12689,13 +14371,18 @@ impl Symbex {
         }
 
         let contract_funcs = self.callgraph().get_contract_functions(&self.contract_context(&self.target_contract)?.contract_identifier);
+        for contract_func in contract_funcs.iter() {
+            debug!("Will evaluate function '{contract_func}'");
+        }
+
         for contract_func in contract_funcs.into_iter() {
             if self.evaluated_functions.contains_key(&contract_func) {
                 continue;
             }
 
             debug!("Evaluating function '{contract_func}'");
-            let conts : Vec<_> = self.eval_user_function(contract_func.name().as_str())?
+            let (func_config, conts) = self.eval_user_function_ex(contract_func.name().as_str())?;
+            let conts : Vec<_> = conts
                 .into_iter()
                 .map(|cont| cont.rollup())
                 .collect();
@@ -12703,8 +14390,9 @@ impl Symbex {
             for cont in conts.iter() {
                 debug!("Computed continuation for function '{contract_func}'\n{cont}");
                 debug!("Trace:\n{}", cont.clone().trace());
+                debug!("Config:\n{:?}", &func_config);
             }
-            self.evaluated_functions.insert(contract_func, conts);
+            self.evaluated_functions.insert(contract_func, (func_config, conts));
         }
 
         debug!("Evaluating top-level symbols");
@@ -12728,7 +14416,7 @@ impl Symbex {
     /// Symbolically evaluate a user function.
     /// Each argument will be bound to a SymOp::Variable of the appropriate type.
     /// `function_name` may be a FullName
-    pub fn eval_user_function(&mut self, function_name: &str) -> Result<Vec<Continuation>, Error> {
+    pub fn eval_user_function_ex(&mut self, function_name: &str) -> Result<(SymbexConfig, Vec<Continuation>), Error> {
         self.do_init()?;
         let config = SymbexConfig::new(self);
 
@@ -12748,13 +14436,17 @@ impl Symbex {
         };
 
         let reachable_funcs = self.callgraph().reachable_from(&fq_name)?;
+        for contract_func in reachable_funcs.iter() {
+            debug!("Will evaluate function '{contract_func}'");
+        }
         for reachable_func in reachable_funcs.into_iter() {
             if self.evaluated_functions.contains_key(&reachable_func) {
                 continue;
             }
             
             debug!("Evaluating reachable function '{reachable_func}' in {}", &self.target_contract);
-            let conts : Vec<_> = self.inner_eval_user_function(&config, &reachable_func)?
+            let (func_config, conts) = self.inner_eval_user_function(&config, &reachable_func)?;
+            let conts : Vec<_> = conts
                 .into_iter()
                 .filter(|c| !c.panicking)
                 .map(|c| c.rollup())
@@ -12763,16 +14455,25 @@ impl Symbex {
             for cont in conts.iter() {
                 debug!("Computed continuation for function '{reachable_func}'\n{cont}");
                 debug!("Trace:\n{}", cont.clone().trace());
+                debug!("Config:\n{:?}", &func_config);
             }
 
-            self.evaluated_functions.insert(reachable_func, conts);
+            self.evaluated_functions.insert(reachable_func, (func_config, conts));
         }
 
         debug!("Evaluating function '{fq_name}'");
         self.inner_eval_user_function(&config, &fq_name)
     }
+    
+    /// Symbolically evaluate a user function.
+    /// Each argument will be bound to a SymOp::Variable of the appropriate type.
+    /// `function_name` may be a FullName
+    pub fn eval_user_function(&mut self, function_name: &str) -> Result<Vec<Continuation>, Error> {
+        let (_, conts) = self.eval_user_function_ex(function_name)?;
+        Ok(conts)
+    }
 
-    fn inner_eval_user_function(&mut self, config: &SymbexConfig, fq_function_name: &FullName) -> Result<Vec<Continuation>, Error> {
+    fn inner_eval_user_function(&mut self, config: &SymbexConfig, fq_function_name: &FullName) -> Result<(SymbexConfig, Vec<Continuation>), Error> {
         let contract_id = fq_function_name.contract_id();
         let function_name = fq_function_name.name().as_str();
 
@@ -12852,9 +14553,9 @@ impl Symbex {
             }
         }
 
-        let mut conts = self.reduce_continuations(&config, conts);
-        self.run_post_commands(&config, &func_def, original_cont, &mut conts)?;
-        Ok(conts)
+        let mut conts = self.reduce_continuations(&func_config, conts);
+        self.run_post_commands(&func_config, &func_def, original_cont, &mut conts)?;
+        Ok((func_config, conts))
     }
 }
 
