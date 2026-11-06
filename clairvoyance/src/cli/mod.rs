@@ -24,12 +24,14 @@ use std::collections::{BTreeMap, HashMap};
 use clarity_types::ClarityName;
 use clarity_types::types::{PrincipalData, StandardPrincipalData, QualifiedContractIdentifier, TraitIdentifier};
 
+use stacks_common::address::C32_ADDRESS_VERSION_MAINNET_SINGLESIG;
+
 pub mod ast;
 pub mod sym;
 
 use crate::core::Error;
-use crate::sym::{Symbex, Continuation, FullName};
-use crate::sym::command::Halt;
+use crate::sym::{Symbex, Continuation, FullName, SymOp};
+use crate::sym::command::{CommandContext, Halt};
 use crate::sym::Callgraph;
 
 /// Consume a string and an optional argument (if `has_optarg` is true) from `args`.
@@ -333,7 +335,6 @@ fn run_symbex_on_functions(mut symbex: Symbex, mut func_names: Vec<String>) -> R
         func_names.extend(contract_funcs.into_iter().map(|fname| fname.to_string()));
     }
 
-    // TODO: only pre-evaluate reachable functions!
     let mut ret = BTreeMap::new();
     for func_name in func_names.iter() {
         let conts = symbex.eval_user_function(&func_name)?;
@@ -362,7 +363,6 @@ fn check(src: &str, function_names: Vec<String>, search_paths: Vec<String>) -> R
     run_symbex_on_functions(symbex, function_names)
 }
 
-
 fn callgraph(src: &str, search_paths: Vec<String>, func_name: String) -> Result<(Callgraph, FullName), Error> {
     let (contract_id, mut symbex) = Symbex::from_contract_comments_ex(src, search_paths)?;
     symbex = symbex
@@ -373,7 +373,6 @@ fn callgraph(src: &str, search_paths: Vec<String>, func_name: String) -> Result<
 
     Ok((symbex.callgraph().clone(), fullname))
 }
-
 
 fn get_code_search_paths(code_path_or_stdin: String, argv: &mut Vec<String>) -> Result<Vec<String>, String> { 
     let mut search_paths = vec![];
@@ -452,7 +451,6 @@ fn cli_explore(argv: &mut Vec<String>) -> (i32, String) {
         }
     }
 }
-
 
 fn cli_check(argv: &mut Vec<String>) -> (i32, String) {
     let Some(code_path_or_stdin) = argv.get(0) else {
@@ -545,6 +543,61 @@ fn cli_callgraph(argv: &mut Vec<String>) -> (i32, String) {
     return (0, view.to_string());
 }
 
+fn simplify(contract_id: &QualifiedContractIdentifier, src: &str) -> Result<Vec<SymOp>, Error> {
+    let mut ctx = CommandContext::toplevel(src);
+    let ast = crate::core::ast::parse_ast(contract_id, src)?;
+
+    let mut symops = vec![];
+    for expr in ast.expressions.iter() {
+        // load up things like `define-type`
+        let _ = ctx.eval(expr)?;
+        let symop = ctx.parse_symop(expr)?.simplify()?;
+        symops.push(symop);
+    }
+
+    Ok(symops)
+}
+
+fn cli_simplify(argv: &mut Vec<String>) -> (i32, String) {
+    let Some(code_path_or_stdin) = argv.get(0) else {
+        return (1, "Missing code path".into());
+    };
+
+    let src = match load_from_file_or_stdin(code_path_or_stdin) {
+        Ok(s) => match str::from_utf8(&s) {
+            Ok(src) => {
+                trace!("Loaded {}-byte source code from {}", src.len(), &code_path_or_stdin);
+                src.to_string()
+            }
+            Err(_) => {
+                return (1, format!("Code is not UTF-8"));
+            }
+        }
+        Err(e) => {
+            return (1, format!("Failed to load source code from {code_path_or_stdin}: {e:?}"));
+        }
+    };
+
+    let default_contract_id = QualifiedContractIdentifier::new(StandardPrincipalData::new(C32_ADDRESS_VERSION_MAINNET_SINGLESIG, [0x11; 20]).unwrap(), "clairvoyance-default-contract-name".try_into().unwrap());
+
+    let contract_id = match load_contract_id(argv) {
+        Ok(cidopt) => cidopt.unwrap_or(default_contract_id),
+        Err(x) => {
+            return x;
+        }
+    };
+
+    let symops = match simplify(&contract_id, &src) {
+        Ok(symops) => symops,
+        Err(e) => {
+            return (2, format!("Failed to simplify: {:?}", &e));
+        }
+    };
+
+    let symop_strs : Vec<_> = symops.into_iter().map(|s| s.to_pretty_string(0)).collect();
+    (0, symop_strs.join("\n"))
+}
+
 pub fn run_subcommand(argv: &mut Vec<String>) -> (i32, String) {
     if argv.len() == 0 {
         return (1, format!("Missing subcommand"));
@@ -566,6 +619,9 @@ pub fn run_subcommand(argv: &mut Vec<String>) -> (i32, String) {
         }
         "check" => {
             cli_check(argv)
+        }
+        "simplify" => {
+            cli_simplify(argv)
         }
         _ => {
             return (1, format!("Unrecognized subcommand '{subcommand}'"))

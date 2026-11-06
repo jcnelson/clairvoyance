@@ -156,7 +156,7 @@ fn test_eval_program() {
                     (condition (is-eq (len (items (list 5 uint))) u0)))
             "#,
             Ok(vec![
-                Halt::new(
+                Halt::new_with_condition(
                    *ok(fq_map_get(&QualifiedContractIdentifier::parse("SP8H248H248H248H248H248H248H248H24ARTQ82.contract").unwrap(), "m", vu("modulus"))),
                    eq(llen(vl("items", TS::UIntType, 5)), cu(0)).try_as_predicate().unwrap()
                 ).into()
@@ -168,8 +168,8 @@ fn test_eval_program() {
         )
     ];
 
-    let mut ctx = CommandContext::new();
     for (prog, expected_events) in tests.into_iter() {
+        let mut ctx = CommandContext::toplevel(prog);
         match ctx.eval_program(&prog, 0, None) {
             Ok(events) => {
                 let Ok(expected_events) = expected_events else {
@@ -340,7 +340,8 @@ fn test_symop_from_symbolic_expression() {
 
     for (prog, expected_symop_res) in tests.into_iter() {
         let ast = ast::parse_ast(&contract_id, prog).unwrap();
-        match SymOp::try_from(&ast.expressions[0]) {
+        let ctx = CommandContext::toplevel("");
+        match SymOp::try_decode(&ast.expressions[0], &ctx) {
             Ok(symop) => {
                 let Ok(expected_symop) = expected_symop_res else {
                     panic!("Evaluating program `{prog}` was supposed to fail (got `{expected_symop_res:?}`)");
@@ -639,6 +640,64 @@ fn test_command_define_symbol() {
 }
 
 #[test]
+fn test_command_define_symbol_globally() {
+    let contract_id = default_contract_id();
+    let mut symbex = Symbex::from_contract(contract_id.clone(), r#"
+        ;;; (@clairvoyance
+        ;;;      (define-symbol map-get-x (map-entry 'SP8H248H248H248H248H248H248H248H24ARTQ82.contract.m (x uint)))
+        ;;;      (define-symbol x-is-even (is-eq (mod (x uint) u2) u0)))
+        ;;; 
+
+        (define-map m uint uint)
+
+        ;; (@clairvoyance
+        ;;      (define-symbol x-is-odd (not (x-is-even bool)))
+        ;;
+        ;;      (halt
+        ;;          (result (ok false))
+        ;;          (condition (and
+        ;;              (x-is-even bool)
+        ;;              (is-some (map-get-x (optional uint))))))
+        ;;
+        ;;      (halt
+        ;;          (result (ok true))
+        ;;          (condition
+        ;;              (and
+        ;;                  (x-is-even bool)
+        ;;                  (is-none (map-get-x (optional uint)))))
+        ;;          (map-write
+        ;;              'SP8H248H248H248H248H248H248H248H24ARTQ82.contract.m
+        ;;              (x uint)
+        ;;              (x uint)))
+        ;;
+        ;;      (halt
+        ;;          (result (err u0))
+        ;;          (condition (x-is-odd bool))))
+        ;;
+        (define-public (set-if-odd (x uint))
+            (if (is-eq (mod x u2) u0)
+                (ok (map-insert m x x))
+                (err u0)))
+        "#,
+    )
+    .unwrap()
+    .init()
+    .unwrap();
+
+    let termination_states = match symbex.eval_user_function("set-if-odd") {
+        Ok(ts) => ts,
+        Err(e) => {
+            error!("symbex.eval_user_function: {e}");
+            panic!()
+        }
+    };
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+}
+
+#[test]
 fn test_command_trait_contract_call() {
     let test_dir = "/tmp/clairvoyance-test/test_command_trait_contract_call/";
     let library_path = format!("{test_dir}/library.clar");
@@ -663,18 +722,18 @@ fn test_command_trait_contract_call() {
     "#).unwrap();
 
     let mut symbex = Symbex::from_contract_comments(&format!("
-    ;; (@clairvoyance
-    ;;
-    ;;      (contract-id 'SP8H248H248H248H248H248H248H248H24ARTQ82.client)
-    ;;
-    ;;      (dependency
-    ;;          'SP8H248H248H248H248H248H248H248H24ARTQ82.library-trait
-    ;;          \"{library_trait_path}\")
-    ;;
-    ;;      (dependency
-    ;;          'SP8H248H248H248H248H248H248H248H24ARTQ82.library
-    ;;          \"{library_path}\")
-    ;; )
+    ;;; (@clairvoyance
+    ;;;
+    ;;;      (contract-id 'SP8H248H248H248H248H248H248H248H24ARTQ82.client)
+    ;;;
+    ;;;      (dependency
+    ;;;          'SP8H248H248H248H248H248H248H248H24ARTQ82.library-trait
+    ;;;          \"{library_trait_path}\")
+    ;;;
+    ;;;      (dependency
+    ;;;          'SP8H248H248H248H248H248H248H248H24ARTQ82.library
+    ;;;          \"{library_path}\")
+    ;;; )
     
     (use-trait calc-trait .library-trait.calc)
 
@@ -724,3 +783,390 @@ fn test_command_trait_contract_call() {
     ]);
 }
 
+#[test]
+fn test_command_define_type() {
+    let contract_id = default_contract_id();
+    let mut symbex = Symbex::from_contract(contract_id.clone(), r#"
+        (define-map m uint uint)
+
+        (define-private (inner-inp
+            (inp {
+                outpoint: { hash: (buff 32), index: uint },
+                scriptSig: (buff 1376),
+                sequence: uint,
+                witness: (list 13 (buff 1376))
+            })
+            (ctx (buff 4096)))
+
+            (unwrap-panic (as-max-len?
+                (concat ctx (unwrap-panic (to-consensus-buff? inp)))
+                u4096)))
+
+        (define-private (inner-outp
+            (outp {
+                value: uint,
+                scriptPubKey: (buff 1376),
+            })
+            (ctx (buff 4096)))
+
+            (unwrap-panic (as-max-len?
+                (concat ctx (unwrap-panic (to-consensus-buff? outp)))
+                u4096)))
+
+
+        ;; (@clairvoyance
+        ;;      (define-type OUT {
+        ;;          scriptPubKey: (buff 1376),
+        ;;          value: uint
+        ;;      })
+        ;;
+        ;;      (define-type OUTS (list 50 OUT))
+        ;;
+        ;;      (define-type IN {
+        ;;          outpoint: { hash: (buff 32), index: uint },
+        ;;          scriptSig: (buff 1376),
+        ;;          sequence: uint,
+        ;;          witness: (list 13 (buff 1376))
+        ;;      })
+        ;;
+        ;;      (define-type INS (list 16 IN))
+        ;;
+        ;;      (assumption (is-eq (len (ins INS)) u1))
+        ;;      (assumption (is-eq (len (outs OUTS)) u1))
+        ;;
+        ;;      (explore-all))
+        ;; )
+        (define-private (inner-check-consumed-utxo
+            (ins (list 16 {
+                outpoint: { hash: (buff 32), index: uint },
+                scriptSig: (buff 1376),
+                sequence: uint,
+                witness: (list 13 (buff 1376)),
+            }))
+            (outs (list 50 {
+                value: uint,
+                scriptPubKey: (buff 1376),
+            }))
+            (signature-hash {
+                version-hash-prevouts-hash-sequence: (buff 68),
+                hash-outputs-locktime-sighash: (buff 40)
+            })
+            (owner principal)
+            (input-index uint)
+            (user-pubkey (buff 33))
+            (cosigner-dag-keys (list 9 (buff 33)))
+            (cur-btc-height uint))
+
+            (let (
+                (all-ins (fold inner-inp ins 0x))
+                (all-outs (fold inner-outp outs 0x))
+            )
+            (ok (concat all-ins all-outs))))
+        "#,
+    )
+    .unwrap()
+    .init()
+    .unwrap();
+
+    let termination_states = match symbex.eval_user_function("inner-check-consumed-utxo") {
+        Ok(ts) => ts,
+        Err(e) => {
+            error!("symbex.eval_user_function: {e}");
+            panic!()
+        }
+    };
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+    let outs_sym = vsl("outs", TS::TupleType(TupleTypeSignature::try_from(vec![
+        (
+            ClarityName::try_from("scriptPubKey").unwrap(),
+            TS::SequenceType(SequenceSubtype::BufferType(1376u32.try_into().unwrap()))
+        ),
+        (
+            ClarityName::try_from("value").unwrap(),
+            TS::UIntType
+        )
+    ]).unwrap()), 50);
+
+
+    let ins_sym = vsl("ins", TS::TupleType(TupleTypeSignature::try_from(vec![
+        (
+            ClarityName::try_from("outpoint").unwrap(),
+            TS::TupleType(TupleTypeSignature::try_from(vec![
+                (
+                    ClarityName::try_from("hash").unwrap(),
+                    TS::SequenceType(SequenceSubtype::BufferType(32u32.try_into().unwrap()))
+                ),
+                (
+                    ClarityName::try_from("index").unwrap(),
+                    TS::UIntType
+                )
+            ]).unwrap())
+        ),
+        (
+            ClarityName::try_from("scriptSig").unwrap(),
+            TS::SequenceType(SequenceSubtype::BufferType(1376u32.try_into().unwrap()))
+        ),
+        (
+            ClarityName::try_from("sequence").unwrap(),
+            TS::UIntType,
+        ),
+        (
+            ClarityName::try_from("witness").unwrap(),
+            TS::SequenceType(SequenceSubtype::ListType(ListTypeData::new_list(
+                TS::SequenceType(SequenceSubtype::BufferType(1376u32.try_into().unwrap())),
+                13
+            ).unwrap()))
+        )
+    ]).unwrap()), 16);
+
+    assert_halts(termination_states, vec![
+        Halt::new_test()
+            .pred(pand(vec![
+                plesser(llen(unwrap_panic(to_consensus_buff(unwrap_panic(elat(ins_sym.clone(), cu(0)))))), cu(4097)),
+                plesser(llen(unwrap_panic(to_consensus_buff(unwrap_panic(elat(outs_sym.clone(), cu(0)))))), cu(4097)),
+                peqs(vec![
+                    llen(ins_sym.clone()),
+                    llen(outs_sym.clone()),
+                    cu(1)
+                ])
+            ]))
+            .formula(ok(concat(vec![
+                unwrap_panic(to_consensus_buff(unwrap_panic(elat(ins_sym.clone(), cu(0))))),
+                unwrap_panic(to_consensus_buff(unwrap_panic(elat(outs_sym.clone(), cu(0)))))
+            ])))
+        ]);
+}
+
+
+#[test]
+fn test_command_define_type_globally() {
+    let mut symbex = Symbex::from_contract_comments(r#"
+        ;;; (@clairvoyance
+        ;;;      (contract-id 'SP8H248H248H248H248H248H248H248H24ARTQ82.contract)
+        ;;;
+        ;;;      (define-type OUT {
+        ;;;          scriptPubKey: (buff 1376),
+        ;;;          value: uint
+        ;;;      })
+        ;;;
+        ;;;      (define-type OUTS (list 50 OUT))
+        ;;;
+        ;;;      (define-type IN {
+        ;;;          outpoint: { hash: (buff 32), index: uint },
+        ;;;          scriptSig: (buff 1376),
+        ;;;          sequence: uint,
+        ;;;          witness: (list 13 (buff 1376))
+        ;;;      }))
+        
+        (define-map m uint uint)
+
+        (define-private (inner-inp
+            (inp {
+                outpoint: { hash: (buff 32), index: uint },
+                scriptSig: (buff 1376),
+                sequence: uint,
+                witness: (list 13 (buff 1376))
+            })
+            (ctx (buff 4096)))
+
+            (unwrap-panic (as-max-len?
+                (concat ctx (unwrap-panic (to-consensus-buff? inp)))
+                u4096)))
+
+        (define-private (inner-outp
+            (outp {
+                value: uint,
+                scriptPubKey: (buff 1376),
+            })
+            (ctx (buff 4096)))
+
+            (unwrap-panic (as-max-len?
+                (concat ctx (unwrap-panic (to-consensus-buff? outp)))
+                u4096)))
+
+
+        ;; (@clairvoyance
+        ;;      (define-type INS (list 16 IN))
+        ;;
+        ;;      (assumption (is-eq (len (ins INS)) u1))
+        ;;      (assumption (is-eq (len (outs OUTS)) u1))
+        ;;
+        ;;      (explore-all))
+        ;; )
+        (define-private (inner-check-consumed-utxo
+            (ins (list 16 {
+                outpoint: { hash: (buff 32), index: uint },
+                scriptSig: (buff 1376),
+                sequence: uint,
+                witness: (list 13 (buff 1376)),
+            }))
+            (outs (list 50 {
+                value: uint,
+                scriptPubKey: (buff 1376),
+            }))
+            (signature-hash {
+                version-hash-prevouts-hash-sequence: (buff 68),
+                hash-outputs-locktime-sighash: (buff 40)
+            })
+            (owner principal)
+            (input-index uint)
+            (user-pubkey (buff 33))
+            (cosigner-dag-keys (list 9 (buff 33)))
+            (cur-btc-height uint))
+
+            (let (
+                (all-ins (fold inner-inp ins 0x))
+                (all-outs (fold inner-outp outs 0x))
+            )
+            (ok (concat all-ins all-outs))))
+        "#,
+        vec![]
+    )
+    .unwrap()
+    .init()
+    .unwrap();
+
+    let termination_states = match symbex.eval_user_function("inner-check-consumed-utxo") {
+        Ok(ts) => ts,
+        Err(e) => {
+            error!("symbex.eval_user_function: {e}");
+            panic!()
+        }
+    };
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+    let outs_sym = vsl("outs", TS::TupleType(TupleTypeSignature::try_from(vec![
+        (
+            ClarityName::try_from("scriptPubKey").unwrap(),
+            TS::SequenceType(SequenceSubtype::BufferType(1376u32.try_into().unwrap()))
+        ),
+        (
+            ClarityName::try_from("value").unwrap(),
+            TS::UIntType
+        )
+    ]).unwrap()), 50);
+
+
+    let ins_sym = vsl("ins", TS::TupleType(TupleTypeSignature::try_from(vec![
+        (
+            ClarityName::try_from("outpoint").unwrap(),
+            TS::TupleType(TupleTypeSignature::try_from(vec![
+                (
+                    ClarityName::try_from("hash").unwrap(),
+                    TS::SequenceType(SequenceSubtype::BufferType(32u32.try_into().unwrap()))
+                ),
+                (
+                    ClarityName::try_from("index").unwrap(),
+                    TS::UIntType
+                )
+            ]).unwrap())
+        ),
+        (
+            ClarityName::try_from("scriptSig").unwrap(),
+            TS::SequenceType(SequenceSubtype::BufferType(1376u32.try_into().unwrap()))
+        ),
+        (
+            ClarityName::try_from("sequence").unwrap(),
+            TS::UIntType,
+        ),
+        (
+            ClarityName::try_from("witness").unwrap(),
+            TS::SequenceType(SequenceSubtype::ListType(ListTypeData::new_list(
+                TS::SequenceType(SequenceSubtype::BufferType(1376u32.try_into().unwrap())),
+                13
+            ).unwrap()))
+        )
+    ]).unwrap()), 16);
+
+    assert_halts(termination_states, vec![
+        Halt::new_test()
+            .pred(pand(vec![
+                plesser(llen(unwrap_panic(to_consensus_buff(unwrap_panic(elat(ins_sym.clone(), cu(0)))))), cu(4097)),
+                plesser(llen(unwrap_panic(to_consensus_buff(unwrap_panic(elat(outs_sym.clone(), cu(0)))))), cu(4097)),
+                peqs(vec![
+                    llen(ins_sym.clone()),
+                    llen(outs_sym.clone()),
+                    cu(1)
+                ])
+            ]))
+            .formula(ok(concat(vec![
+                unwrap_panic(to_consensus_buff(unwrap_panic(elat(ins_sym.clone(), cu(0))))),
+                unwrap_panic(to_consensus_buff(unwrap_panic(elat(outs_sym.clone(), cu(0)))))
+            ])))
+        ]);
+}
+
+#[test]
+fn test_command_always_explore() {
+    let mut symbex = Symbex::from_contract_comments(r#"
+        ;;; (@clairvoyance
+        ;;;      (contract-id 'SP8H248H248H248H248H248H248H248H24ARTQ82.contract))
+
+        (define-private (square-me (x uint))
+            (* x x))
+
+        ;; (@clairvoyance (always-explore 'SP8H248H248H248H248H248H248H248H24ARTQ82.contract.square-me))
+        (define-private (store-squares (x uint) (y uint))
+            (let (
+                (x2 (square-me x))
+                (y2 (square-me y))
+            )
+            (+ x2 y2)))
+        "#,
+        vec![]
+    )
+    .unwrap()
+    .init()
+    .unwrap();
+
+    let termination_states = symbex.eval_user_function("store-squares").unwrap();
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+
+    assert_halts(termination_states, vec![
+        Halt::new_test()
+            .pred(pt())
+            .formula(add2(pow(vu("x"), cu(2)), pow(vu("y"), cu(2))))
+    ]);
+
+    // Try again, but without the always-explore command
+    
+    let mut symbex = Symbex::from_contract_comments(r#"
+        ;;; (@clairvoyance
+        ;;;      (contract-id 'SP8H248H248H248H248H248H248H248H24ARTQ82.contract))
+
+        (define-private (square-me (x uint))
+            (* x x))
+
+        (define-private (store-squares (x uint) (y uint))
+            (let (
+                (x2 (square-me x))
+                (y2 (square-me y))
+            )
+            (+ x2 y2)))
+        "#,
+        vec![]
+    )
+    .unwrap()
+    .init()
+    .unwrap();
+
+    let termination_states = symbex.eval_user_function("store-squares").unwrap();
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+
+    assert_halts(termination_states, vec![
+        Halt::new_test()
+            .pred(pt())
+            .formula(add2(fcall("SP8H248H248H248H248H248H248H248H24ARTQ82.contract.square-me", vec![vu("x")]), fcall("SP8H248H248H248H248H248H248H248H24ARTQ82.contract.square-me", vec![vu("y")])))
+    ]);
+}

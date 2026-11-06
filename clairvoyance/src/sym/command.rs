@@ -106,6 +106,25 @@ impl Halt {
             analyze_write_reachability: false,
         }
     }
+    
+    pub fn new_with_condition(formula: SymOp, condition: Predicate) -> Self {
+        Self {
+            formula: Box::new(formula),
+            predicate: Box::new(Predicate::True),
+            condition: Some(Box::new(condition)),
+            vars: HashMap::new(),
+            map_state: HashMap::new(),
+            map_tombstones: HashMap::new(),
+            reachable_var_reads: HashSet::new(),
+            reachable_var_writes: HashSet::new(),
+            reachable_map_reads: HashSet::new(),
+            reachable_map_writes: HashSet::new(),
+            early_return: false,
+            panicking: false,
+            analyze_write_reachability: false,
+        }
+    }
+
 
     pub fn from_symbolic_expressions(ctx: &CommandContext, exprs: &[SymbolicExpression]) -> Result<Self, Error> {
         let mut formula = None;
@@ -290,7 +309,7 @@ impl Halt {
     }
 
     pub fn to_comment_block(&self) -> String {
-        let halt = format!("{}", self);
+        let halt = self.to_string();
         let mut halt_strs = halt.split("\n");
         let mut halt_with_comments = vec![];
         while let Some(halt_str) = halt_strs.next() {
@@ -306,22 +325,22 @@ impl fmt::Display for Halt {
         write!(f, "(halt\n")?;
         write!(f, "   (result\n{}   )\n", self.formula.to_pretty_string(2))?;
         if let Some(cond) = self.condition.as_ref() {
-            write!(f, "   (condition\n{}   )\n", cond.to_pretty_string(2))?;
+            write!(f, "   (condition\n{}   )\n", cond.clone().compress().as_symop().to_pretty_string(2))?;
         }
         else {
-            write!(f, "   (predicate\n{}   )\n", self.predicate.to_pretty_string(2))?;
+            write!(f, "   (predicate\n{}   )\n", self.predicate.clone().compress().as_symop().to_pretty_string(2))?;
         }
         for (var_name, symop) in self.vars.iter() {
             write!(f, "   (var-write\n      {var_name}\n{}\n  )\n", symop.to_pretty_string(2))?;
         }
         for (map_name, map_state) in self.map_state.iter() {
             for (key, value) in map_state {
-                write!(f, "   (map-write\n      {map_name}\n{}\n{}\n   )\n", key.to_pretty_string(3), value.to_pretty_string(3))?;
+                write!(f, "   (map-write {map_name}\n{}{}   )\n", key.to_pretty_string(3), value.to_pretty_string(3))?;
             }
         }
         for (map_name, keys) in self.map_tombstones.iter() {
             for key in keys {
-                write!(f, "   (map-delete\n      {map_name}\n{}\n   )\n", key.to_pretty_string(2))?;
+                write!(f, "   (map-delete {map_name}\n{}   )\n", key.to_pretty_string(2))?;
             }
         }
         for name in self.reachable_var_writes.iter() {
@@ -368,6 +387,8 @@ pub enum Command {
     /// Define a symbol with the given name.  It will be substituted into subsequent formulae
     /// as-is (a "dumb" macro)
     DefineSymbol(ClarityName, SymOp),
+    /// Define a type alias
+    DefineType(ClarityName, TypeSignature),
     /// Specify a halting state that must be met by a resulting continuation
     Halt(Halt),
     /// Specify a trait concretization for a function definition
@@ -416,6 +437,8 @@ pub enum Command {
     Invariant(SymOp),
     /// A statement about some symbols that is assumed to always be true
     Assumption(SymOp),
+    /// Always explore a function, even if it is pure or acausal
+    AlwaysExplore(FullName),
 }
 
 
@@ -430,6 +453,7 @@ impl fmt::Display for Command {
         match self {
             Self::Test(msg) => write!(f, "(test \"{msg}\")"),
             Self::DefineSymbol(name, op) => write!(f, "(define-symbol {name} {op})"),
+            Self::DefineType(name, ts) => write!(f, "(define-type {name} {ts})"),
             Self::Halt(halt) => write!(f, "{halt}"),
             Self::ConcretizeTrait(var_name, contract) => write!(f, "(concretize-trait {var_name} '{contract})"),
             Self::SkipFunctionCall(name_opt) => {
@@ -471,6 +495,7 @@ impl fmt::Display for Command {
             Self::Pause(..) => write!(f, "(pause)"),
             Self::Invariant(op) => write!(f, "(invariant {op})"),
             Self::Assumption(op) => write!(f, "(assumption {op})"),
+            Self::AlwaysExplore(fqn) => write!(f, "(always-explore {fqn})"),
         }
     }
 }
@@ -481,26 +506,71 @@ pub struct CommandContext {
     /// in order via rewrite rules.
     src: String,
     pre_comments: HashMap<u64, (u32, Vec<String>)>,
-    used_names: HashMap<ClarityName, usize>,
+    used_names: HashSet<ClarityName>,
     defined_formulae: Vec<(ClarityName, SymOp)>,
+    defined_type_exprs: HashMap<ClarityName, SymbolicExpression>,
+    defined_types: HashMap<ClarityName, TypeSignature>,
+    type_reprs: HashMap<String, ClarityName>,
 }
 
 impl CommandContext {
-    pub fn new(src: &str) -> Self {
+    pub fn toplevel(src: &str) -> Self {
         Self {
             src: src.to_string(),
             pre_comments: HashMap::new(),
-            used_names: HashMap::new(),
+            used_names: HashSet::new(),
             defined_formulae: vec![],
+            defined_type_exprs: HashMap::new(),
+            defined_types: HashMap::new(),
+            type_reprs: HashMap::new(),
+        }
+    }
+    
+    pub fn function(global_context: &CommandContext, src: &str) -> Self {
+        Self {
+            src: src.to_string(),
+            pre_comments: HashMap::new(),
+            used_names: global_context.used_names.clone(),
+            defined_formulae: global_context.defined_formulae.clone(),
+            defined_type_exprs: global_context.defined_type_exprs.clone(),
+            defined_types: global_context.defined_types.clone(),
+            type_reprs: global_context.type_reprs.clone(),
         }
     }
 
     pub fn parse_symop(&self, expr: &SymbolicExpression) -> Result<SymOp, Error> {
-        let mut symop = SymOp::try_from(expr)?;
+        let mut symop = SymOp::try_decode(expr, self)?;
+        let mut skips = HashSet::new();
         for (name, op) in self.defined_formulae.iter() {
-            symop = *symop.bind_symbol(name.clone().into(), op.clone());
+            symop = *symop.bind_symbol_with_skips(name.clone().into(), op.clone(), &skips);
+            skips.insert(op.clone());
         }
         Ok(symop)
+    }
+
+    fn type_signature_expression_rewrite(&self, mut expr: SymbolicExpression) -> SymbolicExpression {
+        let new_expr = match expr.expr {
+            SymbolicExpressionType::List(inner) => {
+                let inner = inner.clone();
+                let mut new_inner = vec![];
+                for inner_expr in inner.into_iter() {
+                    let new_expr = self.type_signature_expression_rewrite(inner_expr);
+                    new_inner.push(new_expr);
+                }
+                SymbolicExpressionType::List(new_inner)
+            }
+            SymbolicExpressionType::Atom(name) => {
+                if let Some(replace) = self.defined_type_exprs.get(&name) {
+                    replace.expr.clone()
+                }
+                else {
+                    SymbolicExpressionType::Atom(name)
+                }
+            }
+            e => e
+        };
+        expr.expr = new_expr;
+        expr
     }
 
     fn decode_to_string(string_data: &CharType) -> Result<String, Error> {
@@ -542,7 +612,7 @@ impl CommandContext {
                 if exprs.len() != 1 {
                     return Err(Error::new_program_error(format!("`{command_name}` expects 1 argument, got {}", exprs.len())));
                 }
-                let op = SymOp::try_from(&exprs[0])?;
+                let op = SymOp::try_decode(&exprs[0], self)?;
                 let op_str = format!("{op}");
                 if op_str == "\"force-failure!\"" {
                     return Err(Error::new_program_error(format!("`{command_name}` command forced to fail")));
@@ -550,6 +620,7 @@ impl CommandContext {
                 Ok(Command::Test(format!("{op}")))
             },
             "define-symbol" => {
+                // TODO: make this scopable
                 if exprs.len() != 2 {
                     return Err(Error::new_program_error(format!("`{command_name}` expects 2 arguments, got {}", exprs.len())));
                 }
@@ -558,15 +629,44 @@ impl CommandContext {
                     return Err(Error::new_program_error(format!("`{command_name}` expects an atom as its first argument, got {}", &exprs[0])));
                 };
                 let formula = self.parse_symop(&exprs[1])?;
-                if self.used_names.contains_key(name) {
+                if self.used_names.contains(name) {
                     return Err(Error::new_program_error(format!("Name already used: `{name}` in `(define-symbol {name} {formula})`")));
                 }
 
-                let idx = self.defined_formulae.len();
                 self.defined_formulae.push((name.clone(), formula.clone()));
-                self.used_names.insert(name.clone(), idx);
+                self.used_names.insert(name.clone());
 
                 Ok(Command::DefineSymbol(name.clone(), formula))
+            }
+            "define-type" => {
+                if exprs.len() != 2 {
+                    return Err(Error::new_program_error(format!("`{command_name}` expects 2 arguments, got {}", exprs.len())));
+                }
+
+                let Some(name) = exprs[0].match_atom() else {
+                    return Err(Error::new_program_error(format!("`{command_name}` expects an atom as its first argument, got {}", &exprs[0])));
+                };
+                if self.used_names.contains(name) {
+                    return Err(Error::new_program_error(format!("Name already used: `{name}` in `(define-type {name} ...)")));
+                }
+
+                // rewrite each type alias in this type definition
+                let ts_expr = self.type_signature_expression_rewrite(exprs[1].clone());
+                let Ok(ts) = TypeSignature::parse_type_repr(DEFAULT_STACKS_EPOCH, &ts_expr, &mut ())
+                    .inspect_err(|e| {
+                        warn!("Failed to parse type signature: {e:?}.  Type expression was {ts_expr}");
+                    })
+                else {
+                    return Err(Error::new_program_error(format!("`{command_name}` expects a valid type signature as its second argument, got {}", &ts_expr)));
+                };
+
+                let ts_str = ts_expr.to_string();
+                self.defined_types.insert(name.clone(), ts.clone());
+                self.defined_type_exprs.insert(name.clone(), ts_expr);
+                self.type_reprs.insert(ts_str, name.clone());
+                self.used_names.insert(name.clone());
+
+                Ok(Command::DefineType(name.clone(), ts))
             }
             "halt" => {
                 Ok(Command::Halt(Halt::from_symbolic_expressions(self, exprs)?))
@@ -611,6 +711,13 @@ impl CommandContext {
                 };
                 Ok(Command::SkipContractCall(name_opt))
             }
+            "always-explore" => {
+                if exprs.len() != 1 {
+                    return Err(Error::new_program_error(format!("`{command_name}` takes 1 argument, got {}", exprs.len())));
+                }
+                let fq_name = SymOp::match_fullname(&exprs[0])?;
+                Ok(Command::AlwaysExplore(fq_name.clone()))
+            }
             "stop" => {
                 if exprs.len() > 0 {
                     return Err(Error::new_program_error(format!("`{command_name}` takes 0 arguments, got {}", exprs.len())));
@@ -624,7 +731,7 @@ impl CommandContext {
                 Ok(Command::DropEarlyReturns)
             }
             "set-result" => {
-                if exprs.len() != 2 {
+                if exprs.len() != 1 {
                     return Err(Error::new_program_error(format!("`{command_name}` takes 1 argument, got {}", exprs.len())));
                 }
                 let result = self.parse_symop(&exprs[0])?;
@@ -705,7 +812,7 @@ impl CommandContext {
                 if exprs.len() != 1 {
                     return Err(Error::new_program_error(format!("`{command_name}` takes 1 argument, got {}", exprs.len())));
                 }
-                let expr = SymOp::try_from(&exprs[0])?;
+                let expr = SymOp::try_decode(&exprs[0], self)?;
                 Ok(Command::PrintLn(expr))
             }
             "print-continuation" => {
@@ -755,7 +862,7 @@ impl SymOp {
     /// `(op_name op1 op2 ...)`
     /// Returns Ok(list-of-ops) if the first symbolic expression is an atom matching `expected_name` and has the expected number of ops
     /// Returns Err(..) otherwise.
-    fn decode_symop_ops(min_len: usize, max_len: Option<usize>, symexps: &[SymbolicExpression]) -> Result<Vec<Box<Self>>, Error> {
+    fn decode_symop_ops(min_len: usize, max_len: Option<usize>, symexps: &[SymbolicExpression], ctx: &CommandContext) -> Result<Vec<Box<Self>>, Error> {
         if symexps.len() < min_len {
             return Err(Error::new_program_error(format!("Symbolic expression list `( {} )` has unexpected length {} (expected at least {min_len})", symexps.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(" "), symexps.len())));
         }
@@ -766,22 +873,22 @@ impl SymOp {
 
         let mut ret = vec![];
         for exp in symexps.iter() {
-            let op = SymOp::try_from(exp)?;
+            let op = SymOp::try_decode(exp, ctx)?;
             ret.push(Box::new(op));
         }
         Ok(ret)
     }
 
-    fn decode_1op(symexps: &[SymbolicExpression]) -> Result<Box<Self>, Error> {
-        let mut ops = Self::decode_symop_ops(1, Some(1), symexps)?;
+    fn decode_1op(symexps: &[SymbolicExpression], ctx: &CommandContext) -> Result<Box<Self>, Error> {
+        let mut ops = Self::decode_symop_ops(1, Some(1), symexps, ctx)?;
         let Some(op1) = ops.pop() else {
             return Err(Error::Bug("Did not get 1 op".into()));
         };
         Ok(op1)
     }
 
-    fn decode_2ops(symexps: &[SymbolicExpression]) -> Result<(Box<Self>, Box<Self>), Error> {
-        let mut ops = Self::decode_symop_ops(2, Some(2), symexps)?;
+    fn decode_2ops(symexps: &[SymbolicExpression], ctx: &CommandContext) -> Result<(Box<Self>, Box<Self>), Error> {
+        let mut ops = Self::decode_symop_ops(2, Some(2), symexps, ctx)?;
         let Some(op2) = ops.pop() else {
             return Err(Error::Bug("Did not get op2".into()));
         };
@@ -791,8 +898,8 @@ impl SymOp {
         Ok((op1, op2))
     }
 
-    fn decode_3ops(symexps: &[SymbolicExpression]) -> Result<(Box<Self>, Box<Self>, Box<Self>), Error> {
-        let mut ops = Self::decode_symop_ops(3, Some(3), symexps)?;
+    fn decode_3ops(symexps: &[SymbolicExpression], ctx: &CommandContext) -> Result<(Box<Self>, Box<Self>, Box<Self>), Error> {
+        let mut ops = Self::decode_symop_ops(3, Some(3), symexps, ctx)?;
         let Some(op3) = ops.pop() else {
             return Err(Error::Bug("Did not get op3".into()));
         };
@@ -805,8 +912,8 @@ impl SymOp {
         Ok((op1, op2, op3))
     }
     
-    fn decode_4ops(symexps: &[SymbolicExpression]) -> Result<(Box<Self>, Box<Self>, Box<Self>, Box<Self>), Error> {
-        let mut ops = Self::decode_symop_ops(4, Some(4), symexps)?;
+    fn decode_4ops(symexps: &[SymbolicExpression], ctx: &CommandContext) -> Result<(Box<Self>, Box<Self>, Box<Self>, Box<Self>), Error> {
+        let mut ops = Self::decode_symop_ops(4, Some(4), symexps, ctx)?;
         let Some(op4) = ops.pop() else {
             return Err(Error::Bug("Did not get op4".into()));
         };
@@ -822,8 +929,8 @@ impl SymOp {
         Ok((op1, op2, op3, op4))
     }
 
-    fn decode_5ops(symexps: &[SymbolicExpression]) -> Result<(Box<Self>, Box<Self>, Box<Self>, Box<Self>, Box<Self>), Error> {
-        let mut ops = Self::decode_symop_ops(5, Some(5), symexps)?;
+    fn decode_5ops(symexps: &[SymbolicExpression], ctx: &CommandContext) -> Result<(Box<Self>, Box<Self>, Box<Self>, Box<Self>, Box<Self>), Error> {
+        let mut ops = Self::decode_symop_ops(5, Some(5), symexps, ctx)?;
         let Some(op5) = ops.pop() else {
             return Err(Error::Bug("Did not get op5".into()));
         };
@@ -842,18 +949,18 @@ impl SymOp {
         Ok((op1, op2, op3, op4, op5))
     }
 
-    fn decode_varops(symexps: &[SymbolicExpression]) -> Result<Vec<Box<Self>>, Error> {
-        let ops = Self::decode_symop_ops(2, None, symexps)?;
+    fn decode_varops(symexps: &[SymbolicExpression], ctx: &CommandContext) -> Result<Vec<Box<Self>>, Error> {
+        let ops = Self::decode_symop_ops(2, None, symexps, ctx)?;
         Ok(ops)
     }
     
-    fn decode_varops1(symexps: &[SymbolicExpression]) -> Result<Vec<Box<Self>>, Error> {
-        let ops = Self::decode_symop_ops(1, None, symexps)?;
+    fn decode_varops1(symexps: &[SymbolicExpression], ctx: &CommandContext) -> Result<Vec<Box<Self>>, Error> {
+        let ops = Self::decode_symop_ops(1, None, symexps, ctx)?;
         Ok(ops)
     }
     
-    fn decode_varops0(symexps: &[SymbolicExpression]) -> Result<Vec<Box<Self>>, Error> {
-        let ops = Self::decode_symop_ops(0, None, symexps)?;
+    fn decode_varops0(symexps: &[SymbolicExpression], ctx: &CommandContext) -> Result<Vec<Box<Self>>, Error> {
+        let ops = Self::decode_symop_ops(0, None, symexps, ctx)?;
         Ok(ops)
     }
 
@@ -893,7 +1000,21 @@ impl GetContractSymOps for InterpreterGetContractSymOps {
 }
 
 impl SymOp {
-    fn inner_try_from(symexp: &SymbolicExpression) -> Result<Self, Error> {
+    fn try_decode_type_signature(symexp: &SymbolicExpression, ctx: &CommandContext) -> Result<TypeSignature, Error> {
+        let symexp = ctx.type_signature_expression_rewrite(symexp.clone());
+        if let Ok(ts) = TypeSignature::parse_type_repr(DEFAULT_STACKS_EPOCH, &symexp, &mut ()) {
+            return Ok(ts);
+        };
+        let Some(alias_atom) = symexp.match_atom() else {
+            return Err(Error::new_program_error(format!("Symbolic expresssion `{symexp}` is neither a valid type nor type alias")));
+        };
+        if let Some(ts) = ctx.defined_types.get(alias_atom) {
+            return Ok(ts.clone());
+        }
+        return Err(Error::new_program_error(format!("Symbolic expression `{symexp}` does not describe a valid type or known type alias")));
+    }
+
+    pub fn try_decode(symexp: &SymbolicExpression, ctx: &CommandContext) -> Result<Self, Error> {
         trace!("Decode: `{symexp}`");
         if let Some(value) = symexp.match_literal_value() {
             // constant
@@ -920,7 +1041,7 @@ impl SymOp {
         };
 
         // if `first` is an atom and `second` is a type signature, then this is a symbol
-        if let Ok(ts) = TypeSignature::parse_type_repr(DEFAULT_STACKS_EPOCH, second, &mut ()) {
+        if let Ok(ts) = Self::try_decode_type_signature(second, ctx) {
             let sym = Sym::from_name_and_type_signature(first_name_atom, &ts);
             return Ok(Self::Variable(sym));
         }
@@ -944,17 +1065,17 @@ impl SymOp {
 
                 match first_name {
                     "loaded-var" | "loaded-var-sym" => {
-                        let value = Box::new(Self::try_from(value_symexp)?);
+                        let value = Box::new(Self::try_decode(value_symexp, ctx)?);
                         SymOp::LoadedDataVariable(var_name, value)
                     },
                     "loaded-var-const" => {
-                        let Self::Constant(value) = Self::try_from(value_symexp)? else {
+                        let Self::Constant(value) = Self::try_decode(value_symexp, ctx)? else {
                             return Err(Error::new_program_error(format!("`(loaded-var-const {var_name} x)` where `x` is not a constant (but is `{value_symexp}`) (in {symexp})")));
                         };
                         SymOp::LoadedDataVariable(var_name, Box::new(Self::Constant(value)))
                     },
                     "loaded-var-type" => {
-                        let Ok(ts) = TypeSignature::parse_type_repr(DEFAULT_STACKS_EPOCH, value_symexp, &mut ()) else {
+                        let Ok(ts) = Self::try_decode_type_signature(value_symexp, ctx) else {
                             return Err(Error::new_program_error(format!("`(loaded-var-type {var_name} x)` where `x` is not a type signature (but is `{value_symexp}`) (in {symexp})")));
                         };
                         let local_name = var_name.name().clone();
@@ -965,104 +1086,104 @@ impl SymOp {
                     }
                 }
             }
-            "+" => Self::Add(Self::decode_varops(opexps)?),
-            "-" => Self::Subtract(Self::decode_varops1(opexps)?),
-            "*" => Self::Multiply(Self::decode_varops(opexps)?),
-            "/" => Self::Divide(Self::decode_varops(opexps)?),
+            "+" => Self::Add(Self::decode_varops(opexps, ctx)?),
+            "-" => Self::Subtract(Self::decode_varops1(opexps, ctx)?),
+            "*" => Self::Multiply(Self::decode_varops(opexps, ctx)?),
+            "/" => Self::Divide(Self::decode_varops(opexps, ctx)?),
             "mod" => {
-                let (op1, op2) = Self::decode_2ops(opexps)?;
+                let (op1, op2) = Self::decode_2ops(opexps, ctx)?;
                 Self::Modulo(op1, op2)
             }
             "to-int" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::ToInt(op1)
             }
             "to-uint" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::ToUInt(op1)
             }
             "power" => {
-                let (op1, op2) = Self::decode_2ops(opexps)?;
+                let (op1, op2) = Self::decode_2ops(opexps, ctx)?;
                 Self::Power(op1, op2)
             }
             "sqrti" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::Sqrti(op1)
             }
             "log2" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::Log2(op1)
             }
-            "and" => Self::And(Self::decode_varops(opexps)?),
-            "or" => Self::Or(Self::decode_varops(opexps)?),
+            "and" => Self::And(Self::decode_varops(opexps, ctx)?),
+            "or" => Self::Or(Self::decode_varops(opexps, ctx)?),
             "not" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::Not(op1)
             }
             ">" => {
-                let (op1, op2) = Self::decode_2ops(opexps)?;
+                let (op1, op2) = Self::decode_2ops(opexps, ctx)?;
                 Self::Greater(op1, op2)
             }
             ">=" => {
-                let (op1, op2) = Self::decode_2ops(opexps)?;
+                let (op1, op2) = Self::decode_2ops(opexps, ctx)?;
                 Self::Geq(op1, op2)
             }
-            "is-eq" => Self::Equals(Self::decode_varops(opexps)?),
+            "is-eq" => Self::Equals(Self::decode_varops(opexps, ctx)?),
             "<=" => {
-                let (op1, op2) = Self::decode_2ops(opexps)?;
+                let (op1, op2) = Self::decode_2ops(opexps, ctx)?;
                 Self::Leq(op1, op2)
             }
             "<" => {
-                let (op1, op2) = Self::decode_2ops(opexps)?;
+                let (op1, op2) = Self::decode_2ops(opexps, ctx)?;
                 Self::Less(op1, op2)
             }
             "append" => {
-                let (op1, op2) = Self::decode_2ops(opexps)?;
+                let (op1, op2) = Self::decode_2ops(opexps, ctx)?;
                 Self::Append(op1, op2)
             }
-            "concat" => Self::Concat(Self::decode_varops(opexps)?),
+            "concat" => Self::Concat(Self::decode_varops(opexps, ctx)?),
             "as-max-len?" => {
-                let (op1, op2) = Self::decode_2ops(opexps)?;
+                let (op1, op2) = Self::decode_2ops(opexps, ctx)?;
                 Self::AsMaxLen(op1, op2)
             }
             "len" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::Len(op1)
             }
             "element-at" | "element-at?" => {
-                let (op1, op2) = Self::decode_2ops(opexps)?;
+                let (op1, op2) = Self::decode_2ops(opexps, ctx)?;
                 Self::ElementAt(op1, op2)
             }
             "index-of" => {
-                let (op1, op2) = Self::decode_2ops(opexps)?;
+                let (op1, op2) = Self::decode_2ops(opexps, ctx)?;
                 Self::IndexOf(op1, op2)
             }
             "buff-to-int-le" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::BuffToIntLe(op1)
             }
             "buff-to-int-be" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::BuffToIntBe(op1)
             }
             "buff-to-uint-le" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::BuffToUIntLe(op1)
             }
             "buff-to-uint-be" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::BuffToUIntBe(op1)
             }
             "is-standard" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::IsStandard(op1)
             }
             "principal-destruct" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::PrincipalDestruct(op1)
             }
             "principal-construct" => {
-                let mut ops = Self::decode_varops(opexps)?;
+                let mut ops = Self::decode_varops(opexps, ctx)?;
                 if ops.len() == 2 {
                     let op2 = ops.pop().expect("unreachable");
                     let op1 = ops.pop().expect("unreachable");
@@ -1079,22 +1200,22 @@ impl SymOp {
                 }
             },
             "string-to-int?" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::StringToInt(op1)
             }
             "string-to-uint?" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::StringToUInt(op1)
             }
             "int-to-ascii" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::IntToAscii(op1)
             }
             "int-to-utf8" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::IntToUtf8(op1)
             }
-            "list" => Self::ListCons(Self::decode_varops0(opexps)?),
+            "list" => Self::ListCons(Self::decode_varops0(opexps, ctx)?),
             "var-get" => {
                 let var_name = Self::match_fullname(second)?;
                 Self::FetchVar(var_name)
@@ -1102,13 +1223,13 @@ impl SymOp {
             "var-set" => {
                 let var_name = Self::match_fullname(second)?;
                 let args = lv.get(2..).ok_or_else(|| Error::new_program_error(format!("{first_name} expected a name and an argument")))?;
-                let op1 = Self::decode_1op(args)?;
+                let op1 = Self::decode_1op(args, ctx)?;
                 Self::SetVar(var_name, op1)
             }
             "map-get?" => {
                 let map_name = Self::match_fullname(second)?;
                 let args = lv.get(2..).ok_or_else(|| Error::new_program_error(format!("{first_name} expected a name and an argument")))?;
-                let op1 = Self::decode_1op(args)?;
+                let op1 = Self::decode_1op(args, ctx)?;
                 Self::FetchEntry(map_name, op1)
             }
             "map-entry"
@@ -1119,9 +1240,9 @@ impl SymOp {
                 let Some(key_sym) = lv.get(2) else {
                     return Err(Error::new_program_error(format!("map `{second}` has no key symbolic expression (in {symexp})")));
                 };
-                let key_symop = Box::new(Self::try_from(key_sym)?);
+                let key_symop = Box::new(Self::try_decode(key_sym, ctx)?);
                 let value_symop_opt = match lv.get(3) {
-                    Some(val_sym) => Some(Box::new(Self::try_from(val_sym)?)),
+                    Some(val_sym) => Some(Box::new(Self::try_decode(val_sym, ctx)?)),
                     None => None
                 };
 
@@ -1141,7 +1262,7 @@ impl SymOp {
                         let Some(ts_symexp) = lv.get(4) else {
                             return Err(Error::new_program_error(format!("map-entry-type `{second}` has no type signature (in {symexp})")));
                         };
-                        let Ok(ts) = TypeSignature::parse_type_repr(DEFAULT_STACKS_EPOCH, ts_symexp, &mut ()) else {
+                        let Ok(ts) = Self::try_decode_type_signature(ts_symexp, ctx) else {
                             return Err(Error::new_program_error(format!("map-entry-type `{second}` has invalid type signature `{ts_symexp}`")));
                         };
                         // parity check
@@ -1158,19 +1279,19 @@ impl SymOp {
             "map-set" => {
                 let map_name = Self::match_fullname(second)?;
                 let args = lv.get(2..).ok_or_else(|| Error::new_program_error(format!("{first_name} expected a name and two arguments")))?;
-                let (op1, op2) = Self::decode_2ops(args)?;
+                let (op1, op2) = Self::decode_2ops(args, ctx)?;
                 Self::SetEntry(map_name, op1, op2)
             }
             "map-insert" => {
                 let map_name = Self::match_fullname(second)?;
                 let args = lv.get(2..).ok_or_else(|| Error::new_program_error(format!("{first_name} expected a name and two arguments")))?;
-                let (op1, op2) = Self::decode_2ops(args)?;
+                let (op1, op2) = Self::decode_2ops(args, ctx)?;
                 Self::InsertEntry(map_name, op1, op2)
             }
             "map-delete" => {
                 let map_name = Self::match_fullname(second)?;
                 let args = lv.get(2..).ok_or_else(|| Error::new_program_error(format!("{first_name} expected a name and two arguments")))?;
-                let op1 = Self::decode_1op(args)?;
+                let op1 = Self::decode_1op(args, ctx)?;
                 Self::DeleteEntry(map_name, op1)
             }
             "tuple" => {
@@ -1185,7 +1306,7 @@ impl SymOp {
                     let Some(name) = name_and_opexp[0].match_atom() else {
                         return Err(Error::new_program_error(format!("First item in tuple binding #{i} ({name_and_opexp_symexp}) is not an atom (in {symexp})")));
                     };
-                    let op = Self::try_from(&name_and_opexp[1])?;
+                    let op = Self::try_decode(&name_and_opexp[1], ctx)?;
                     inner.push((name.clone(), Box::new(op)));
                 }
                 Self::TupleCons(inner)
@@ -1195,119 +1316,119 @@ impl SymOp {
                     return Err(Error::new_program_error(format!("tuple field name `{second}` is not an atom (in {symexp})")));
                 };
                 let args = lv.get(2..).ok_or_else(|| Error::new_program_error(format!("{first_name} expected a name and an argument")))?;
-                let op1 = Self::decode_1op(args)?;
+                let op1 = Self::decode_1op(args, ctx)?;
                 Self::TupleGet(field_name_atom.clone(), op1)
             }
             "merge" => {
-                let (op1, op2) = Self::decode_2ops(opexps)?;
+                let (op1, op2) = Self::decode_2ops(opexps, ctx)?;
                 Self::TupleMerge(op1, op2)
             }
             "hash160" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::Hash160(op1)
             }
             "sha256" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::Sha256(op1)
             }
             "sha512" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::Sha512(op1)
             }
             "sha512/256" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::Sha512Trunc256(op1)
             }
             "keccak256" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::Keccak256(op1)
             }
             "secp256k1-recover?" => {
-                let (op1, op2) = Self::decode_2ops(opexps)?;
+                let (op1, op2) = Self::decode_2ops(opexps, ctx)?;
                 Self::Secp256k1Recover(op1, op2)
             }
             "secp256k1-verify" => {
-                let (op1, op2, op3) = Self::decode_3ops(opexps)?;
+                let (op1, op2, op3) = Self::decode_3ops(opexps, ctx)?;
                 Self::Secp256k1Verify(op1, op2, op3)
             }
             "contract-of" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::ContractOf(op1)
             }
             "principal-of" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::PrincipalOf(op1)
             }
             "is-ok" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::IsOkay(op1)
             }
             "is-err" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::IsErr(op1)
             }
             "is-some" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::IsSome(op1)
             }
             "is-none" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::IsNone(op1)
             }
             "unwrap-panic" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::UnwrapPanic(op1)
             }
             "unwrap-err-panic" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::UnwrapErrPanic(op1)
             }
             "err" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::ConsError(op1)
             }
             "ok" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::ConsOkay(op1)
             }
             "some" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::ConsSome(op1)
             }
             "ft-get-balance" => {
                 let name = Self::match_fullname(second)?;
                 let args = lv.get(2..).ok_or_else(|| Error::new_program_error(format!("{first_name} expected a name and an argument")))?;
-                let op1 = Self::decode_1op(args)?;
+                let op1 = Self::decode_1op(args, ctx)?;
                 Self::GetTokenBalance(name, op1)
             }
             "nft-get-owner?" => {
                 let name = Self::match_fullname(second)?;
                 let args = lv.get(2..).ok_or_else(|| Error::new_program_error(format!("{first_name} expected a name and an argument")))?;
-                let op1 = Self::decode_1op(args)?;
+                let op1 = Self::decode_1op(args, ctx)?;
                 Self::GetNftOwner(name, op1)
             }
             "ft-transfer?" => {
                 let name = Self::match_fullname(second)?;
                 let args = lv.get(2..).ok_or_else(|| Error::new_program_error(format!("{first_name} expected a name and 3 arguments")))?;
-                let (op1, op2, op3) = Self::decode_3ops(args)?;
+                let (op1, op2, op3) = Self::decode_3ops(args, ctx)?;
                 Self::TransferToken(name, op1, op2, op3)
             }
             "nft-transfer?" => {
                 let name = Self::match_fullname(second)?;
                 let args = lv.get(2..).ok_or_else(|| Error::new_program_error(format!("{first_name} expected a name and 3 arguments")))?;
-                let (op1, op2, op3) = Self::decode_3ops(args)?;
+                let (op1, op2, op3) = Self::decode_3ops(args, ctx)?;
                 Self::TransferNft(name, op1, op2, op3)
             }
             "ft-mint?" => {
                 let name = Self::match_fullname(second)?;
                 let args = lv.get(2..).ok_or_else(|| Error::new_program_error(format!("{first_name} expected a name and 2 arguments")))?;
-                let (op1, op2) = Self::decode_2ops(args)?;
+                let (op1, op2) = Self::decode_2ops(args, ctx)?;
                 Self::MintToken(name, op1, op2)
             }
             "nft-mint" => {
                 let name = Self::match_fullname(second)?;
                 let args = lv.get(2..).ok_or_else(|| Error::new_program_error(format!("{first_name} expected a name and 2 arguments")))?;
-                let (op1, op2) = Self::decode_2ops(args)?;
+                let (op1, op2) = Self::decode_2ops(args, ctx)?;
                 Self::MintNft(name, op1, op2)
             }
             "ft-get-supply" => {
@@ -1317,56 +1438,56 @@ impl SymOp {
             "ft-burn?" => {
                 let name = Self::match_fullname(second)?;
                 let args = lv.get(2..).ok_or_else(|| Error::new_program_error(format!("{first_name} expected a name and an argument")))?;
-                let op1 = Self::decode_1op(args)?;
+                let op1 = Self::decode_1op(args, ctx)?;
                 Self::BurnToken(name, op1)
             }
             "nft-burn?" => {
                 let name = Self::match_fullname(second)?;
                 let args = lv.get(2..).ok_or_else(|| Error::new_program_error(format!("{first_name} expected a name and 2 arguments")))?;
-                let (op1, op2) = Self::decode_2ops(args)?;
+                let (op1, op2) = Self::decode_2ops(args, ctx)?;
                 Self::BurnNft(name, op1, op2)
             }
             "stx-get-balance" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::GetStxBalance(op1)
             }
             "stx-transfer?" => {
-                let (op1, op2, op3) = Self::decode_3ops(opexps)?;
+                let (op1, op2, op3) = Self::decode_3ops(opexps, ctx)?;
                 Self::StxTransfer(op1, op2, op3)
             }
             "stx-transfer-memo?" => {
-                let (op1, op2, op3, op4) = Self::decode_4ops(opexps)?;
+                let (op1, op2, op3, op4) = Self::decode_4ops(opexps, ctx)?;
                 Self::StxTransferMemo(op1, op2, op3, op4)
             }
             "stx-burn?" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::StxBurn(op1)
             }
             "stx-account" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::StxGetAccount(op1)
             }
-            "bit-and" => Self::BitwiseAnd(Self::decode_varops(opexps)?),
-            "bit-or" => Self::BitwiseOr(Self::decode_varops(opexps)?),
-            "bit-xor" | "xor" => Self::BitwiseXor(Self::decode_varops(opexps)?),
+            "bit-and" => Self::BitwiseAnd(Self::decode_varops(opexps, ctx)?),
+            "bit-or" => Self::BitwiseOr(Self::decode_varops(opexps, ctx)?),
+            "bit-xor" | "xor" => Self::BitwiseXor(Self::decode_varops(opexps, ctx)?),
             "bit-not" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::BitwiseNot(op1)
             }
             "bit-shift-left" => {
-                let (op1, op2) = Self::decode_2ops(opexps)?;
+                let (op1, op2) = Self::decode_2ops(opexps, ctx)?;
                 Self::BitwiseLShift(op1, op2)
             }
             "bit-shift-right" => {
-                let (op1, op2) = Self::decode_2ops(opexps)?;
+                let (op1, op2) = Self::decode_2ops(opexps, ctx)?;
                 Self::BitwiseRShift(op1, op2)
             }
             "slice" | "slice?" => {
-                let (op1, op2, op3) = Self::decode_3ops(opexps)?;
+                let (op1, op2, op3) = Self::decode_3ops(opexps, ctx)?;
                 Self::Slice(op1, op2, op3)
             }
             "to-consensus-buff?" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::ToConsensusBuff(op1)
             }
             "from-consensus-buff?" => {
@@ -1377,14 +1498,14 @@ impl SymOp {
                     return Err(Error::new_program_error(format!("`{first_name}` is missing a buffer (in {symexp})")));
                 };
 
-                let Ok(ts) = TypeSignature::parse_type_repr(DEFAULT_STACKS_EPOCH, ts_symexp, &mut ()) else {
+                let Ok(ts) = Self::try_decode_type_signature(ts_symexp, ctx) else {
                     return Err(Error::new_program_error(format!("Failed to parse type signature `{ts_symexp}` (in {symexp})")));
                 };
-                let buf_symop = Box::new(Self::try_from(buf_sym)?);
+                let buf_symop = Box::new(Self::try_decode(buf_sym, ctx)?);
                 Self::FromConsensusBuff(ts, buf_symop)
             }
             "replace-at?" => {
-                let (op1, op2, op3) = Self::decode_3ops(opexps)?;
+                let (op1, op2, op3) = Self::decode_3ops(opexps, ctx)?;
                 Self::ReplaceAt(op1, op2, op3)
             }
             "get-stacks-block-info?" => {
@@ -1392,7 +1513,7 @@ impl SymOp {
                     return Err(Error::new_program_error(format!("NFT name `{second}` is not an atom (in {symexp})")));
                 };
                 let args = lv.get(2..).ok_or_else(|| Error::new_program_error(format!("{first_name} expected a name and an argument")))?;
-                let op1 = Self::decode_1op(args)?;
+                let op1 = Self::decode_1op(args, ctx)?;
                 Self::GetStacksBlockInfo(name_atom.clone(), op1)
             }
             "get-tenure-info?" => {
@@ -1400,27 +1521,27 @@ impl SymOp {
                     return Err(Error::new_program_error(format!("NFT name `{second}` is not an atom (in {symexp})")));
                 };
                 let args = lv.get(2..).ok_or_else(|| Error::new_program_error(format!("{first_name} expected a name and an argument")))?;
-                let op1 = Self::decode_1op(args)?;
+                let op1 = Self::decode_1op(args, ctx)?;
                 Self::GetTenureInfo(name_atom.clone(), op1)
             }
             "contract-hash" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::ContractHash(op1)
             }
             "to-ascii?" => {
-                let op1 = Self::decode_1op(opexps)?;
+                let op1 = Self::decode_1op(opexps, ctx)?;
                 Self::ToAscii(op1)
             }
             "secp256r1-verify?" => {
-                let (op1, op2, op3) = Self::decode_3ops(opexps)?;
+                let (op1, op2, op3) = Self::decode_3ops(opexps, ctx)?;
                 Self::Secp256r1Verify(op1, op2, op3)
             }
             "verify-merkle-proof" => {
-                let (op1, op2, op3, op4, op5) = Self::decode_5ops(opexps)?;
+                let (op1, op2, op3, op4, op5) = Self::decode_5ops(opexps, ctx)?;
                 Self::VerifyMerkleProof(op1, op2, op3, op4, op5)
             }
             "get-bitcoin-tx-output?" => {
-                let (op1, op2) = Self::decode_2ops(opexps)?;
+                let (op1, op2) = Self::decode_2ops(opexps, ctx)?;
                 Self::GetBitcoinTxOutput(op1, op2)
             }
             "unconditional-panic" => {
@@ -1431,16 +1552,6 @@ impl SymOp {
             }
         };
         Ok(symop)
-    }
-}
-
-impl TryFrom<&SymbolicExpression> for SymOp {
-    type Error = Error;
-    fn try_from(symexp: &SymbolicExpression) -> Result<Self, Error> {
-        match Self::inner_try_from(symexp) {
-            Ok(op) => Ok(op),
-            Err(e) => Err(e.program_error(symexp.span.start_line, format!("in {symexp}"))),
-        }
     }
 }
 

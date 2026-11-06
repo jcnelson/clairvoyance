@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 
+use std::hash::{Hash, Hasher, DefaultHasher};
 use clarity::vm::contexts::ExecutionState;
 use clarity::vm::contexts::InvocationContext;
 use clarity::vm::contexts::LocalContext;
@@ -43,7 +44,6 @@ use stacks_common::consts::CHAIN_ID_MAINNET;
 use stacks_common::types::StacksEpochId;
 use stacks_common::address::C32_ADDRESS_VERSION_MAINNET_SINGLESIG;
 
-use clarity::vm::EvalHook;
 use clarity_types::Value;
 
 use serde_json;
@@ -959,11 +959,11 @@ fn test_consolidate_and() {
     assert_eq!(simplified, Ok(*f()));
     
     // (and (x >= 100) (x < 110)) is rewritten to the equivalent
-    // (or (is-eq x 100) (and (< 100 x) (< x 110)))
+    // (and (99 < x) (x < 110))
     let symop = and(vec![geq(vi("x"), ci(100)), lt(vi("x"), ci(110))]);
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
-    assert_eq!(simplified, Ok(*or(vec![eq(vi("x"), ci(100)), and(vec![lt(ci(100), vi("x")), lt(vi("x"), ci(110))])])));
+    assert_eq!(simplified, Ok(*and(vec![lt(ci(99), vi("x")), lt(vi("x"), ci(110))])));
 
     // (and (>= u0 x) (not (is-eq x u0))) is a contradiction
     let symop = and(vec![geq(cu(0), vu("x")), not(eq(vu("x"), cu(0)))]);
@@ -1025,29 +1025,29 @@ fn test_consolidate_and() {
     info!("symop = {symop:?}, simplifed = {simplified:?}");
     assert_eq!(simplified, Ok(*lt(vi("x"), ci(50))));
     
-    // (and (x <= u100) (x <= u50)) === Ok(x <= u50)
+    // (and (x <= u100) (x <= u50)) === Ok(x < u51)
     let symop = and(vec![leq(vu("x"), cu(100)), leq(vu("x"), cu(50))]);
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
-    assert_eq!(simplified, Ok(*or(vec![eq(vu("x"), cu(50)), lt(vu("x"), cu(50))])));
+    assert_eq!(simplified, Ok(*lt(vu("x"), cu(51))));
     
-    // (and (x <= 100) (x <= 50)) === Ok(x <= 50)
+    // (and (x <= 100) (x <= 50)) === Ok(x < 51)
     let symop = and(vec![leq(vi("x"), ci(100)), leq(vi("x"), ci(50))]);
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
-    assert_eq!(simplified, Ok(*or(vec![eq(vi("x"), ci(50)), lt(vi("x"), ci(50))])));
+    assert_eq!(simplified, Ok(*lt(vi("x"), ci(51))));
     
-    // (and (x < u100) (x <= u50)) === Ok(x <= u50)
+    // (and (x < u100) (x <= u50)) === Ok(x < u51)
     let symop = and(vec![lt(vu("x"), cu(100)), leq(vu("x"), cu(50))]);
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
-    assert_eq!(simplified, Ok(*or(vec![eq(vu("x"), cu(50)), lt(vu("x"), cu(50))])));
+    assert_eq!(simplified, Ok(*lt(vu("x"), cu(51))));
     
-    // (and (x < 100) (x <= 50)) === Ok(x <= u50)
+    // (and (x < 100) (x <= 50)) === Ok(x < u51)
     let symop = and(vec![lt(vi("x"), ci(100)), leq(vi("x"), ci(50))]);
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
-    assert_eq!(simplified, Ok(*or(vec![eq(vi("x"), ci(50)), lt(vi("x"), ci(50))])));
+    assert_eq!(simplified, Ok(*lt(vi("x"), ci(51))));
     
     // (and (x <= u100) (x < u50)) === Ok(x < u50)
     let symop = and(vec![leq(vu("x"), cu(100)), lt(vu("x"), cu(50))]);
@@ -1061,52 +1061,53 @@ fn test_consolidate_and() {
     info!("symop = {symop:?}, simplifed = {simplified:?}");
     assert_eq!(simplified, Ok(*lt(vi("x"), ci(50))));
     
-    // (and (x > u100) (x > u50)) === Ok(x > u100)
+    // (and (x > u100) (x > u50)) === Ok(u100 < x)
     let symop = and(vec![gt(vu("x"), cu(100)), gt(vu("x"), cu(50))]);
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
     assert_eq!(simplified, Ok(*lt(cu(100), vu("x"))));
     
-    // (and (x > 100) (x > 50)) === Ok(x > 100)
+    // (and (x > 100) (x > 50)) === Ok(100 < x)
     let symop = and(vec![gt(vi("x"), ci(100)), gt(vi("x"), ci(50))]);
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
     assert_eq!(simplified, Ok(*lt(ci(100), vi("x"))));
     
-    // (and (x >= u100) (x >= u50)) === Ok(x >= u100)
+    // (and (x >= u100) (x >= u50)) === Ok(u99 < x)
     let symop = and(vec![geq(vu("x"), cu(100)), geq(vu("x"), cu(50))]);
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*lt(cu(99), vu("x"))));
 
-    // (and (x >= 100) (x >= 50)) === Ok(x >= 100)
+    // (and (x >= 100) (x >= 50)) === Ok(99 < x)
     let symop = and(vec![geq(vi("x"), ci(100)), geq(vi("x"), ci(50))]);
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
-    assert_eq!(simplified, Ok(*or(vec![eq(vi("x"), ci(100)), lt(ci(100), vi("x"))])));
+    assert_eq!(simplified, Ok(*lt(ci(99), vi("x"))));
     
-    // (and (x > u100) (x >= u50)) === Ok(x > u100)
+    // (and (x > u100) (x >= u50)) === Ok(u100 < x)
     let symop = and(vec![gt(vu("x"), cu(100)), geq(vu("x"), cu(50))]);
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
     assert_eq!(simplified, Ok(*lt(cu(100), vu("x"))));
     
-    // (and (x > 100) (x >= 50)) === Ok(x > u100)
+    // (and (x > 100) (x >= 50)) === Ok(100 < x)
     let symop = and(vec![gt(vi("x"), ci(100)), geq(vi("x"), ci(50))]);
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
     assert_eq!(simplified, Ok(*lt(ci(100), vi("x"))));
     
-    // (and (x >= u100) (x > u50)) === Ok(x >= u100)
+    // (and (x >= u100) (x > u50)) === Ok(u99 < x)
     let symop = and(vec![geq(vu("x"), cu(100)), gt(vu("x"), cu(50))]);
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
-    assert_eq!(simplified, Ok(*or(vec![eq(vu("x"), cu(100)), lt(cu(100), vu("x"))])));
+    assert_eq!(simplified, Ok(*lt(cu(99), vu("x"))));
     
-    // (and (x >= 100) (x > 50)) === Ok(x >= 100)
+    // (and (x >= 100) (x > 50)) === Ok(99 < x)
     let symop = and(vec![geq(vi("x"), ci(100)), gt(vi("x"), ci(50))]);
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
-    assert_eq!(simplified, Ok(*or(vec![eq(vi("x"), ci(100)), lt(ci(100), vi("x"))])));
+    assert_eq!(simplified, Ok(*lt(ci(99), vi("x"))));
 
     // (and (x > u0) (not (is-eq x u1)) (x < u2)) is a contradiction
     let symop = and(vec![gt(vu("x"), cu(0)), not(eq(vu("x"), cu(1))), lt(vu("x"), cu(2))]);
@@ -1243,6 +1244,160 @@ fn test_consolidate_and() {
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
     assert_eq!(simplified, Ok(*eq(llen(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9)), cu(9))));
+
+    // (and (is-eq (len (keys (list 9 (buff 33))) u5) (is-some element-at (keys (list 9 (buff 33))) u5))) is false
+    let symop = and(vec![
+        eq(llen(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9)), cu(5)),
+        is_some(elat(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9), cu(5)))
+    ]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*f()));
+    
+    // (and (is-eq (len (keys (list 9 (buff 33))) u5) (is-some element-at (keys (list 9 (buff 33))) u6))) is false
+    let symop = and(vec![
+        eq(llen(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9)), cu(5)),
+        is_some(elat(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9), cu(6)))
+    ]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*f()));
+    
+    // (and (< (len (keys (list 9 (buff 33))) u6) (is-some element-at (keys (list 9 (buff 33))) u5))) is false
+    let symop = and(vec![
+        lt(llen(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9)), cu(6)),
+        is_some(elat(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9), cu(5)))
+    ]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*f()));
+    
+    // (and (<= (len (keys (list 9 (buff 33))) u5) (is-some element-at (keys (list 9 (buff 33))) u4))) does not reduce
+    let symop = and(vec![
+        leq(llen(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9)), cu(5)),
+        is_some(elat(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9), cu(4)))
+    ]);
+    let simplified = symop.clone().simplify();
+    let reduced_symop = and(vec![
+        lt(llen(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9)), cu(6)),
+        is_some(elat(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9), cu(4)))
+    ]);
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*reduced_symop));
+    
+    // (and (> (len (keys (list 9 (buff 33))) u6) (is-some element-at (keys (list 9 (buff 33))) u5))) reduces to
+    // (< u6 (len (keys (list 9 (buff 33)))))
+    let symop = and(vec![
+        gt(llen(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9)), cu(6)),
+        is_some(elat(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9), cu(5)))
+    ]);
+    let simplified = symop.clone().simplify();
+    let reduced_symop = lt(cu(6), llen(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9)));
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*reduced_symop));
+    
+    // (and (>= (len (keys (list 9 (buff 33))) u5) (is-some element-at (keys (list 9 (buff 33))) u4))) reduces to
+    // (< u4 (len (keys (list 9 (buff 33)))))
+    let symop = and(vec![
+        geq(llen(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9)), cu(5)),
+        is_some(elat(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9), cu(4)))
+    ]);
+    let simplified = symop.clone().simplify();
+    let reduced_symop = lt(cu(4), llen(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9)));
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*reduced_symop));
+    
+    // (and (>= (len (keys (list 9 (buff 33))) u5) (is-some element-at (keys (list 9 (buff 33))) u5))) does not reduce
+    let symop = and(vec![
+        geq(llen(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9)), cu(5)),
+        is_some(elat(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9), cu(5)))
+    ]);
+    let reduced_symop = and(vec![
+        lt(cu(4), llen(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9))),
+        is_some(elat(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9), cu(5)))
+    ]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*reduced_symop));
+    
+    // (and (>= (len (keys (list 9 (buff 33))) u6) (is-some element-at (keys (list 9 (buff 33))) u5))) reduces to
+    // (< u5 (len (keys (list 9 (buff 33)))))
+    let symop = and(vec![
+        geq(llen(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9)), cu(6)),
+        is_some(elat(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9), cu(5)))
+    ]);
+    let reduced_symop = lt(cu(5), llen(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9)));
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*reduced_symop));
+    
+    // (and (>= (len (keys (list 9 (buff 33))) u5) (is-some element-at (keys (list 9 (buff 33))) u5))) does no reduce
+    let symop = and(vec![
+        lt(cu(4), llen(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9))),
+        is_some(elat(vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9), cu(5)))
+    ]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*symop));
+}
+
+#[test]
+fn test_substitute_and() {
+
+    // (and (< (/ (* (len (keys (list 9 (buff 33)))) u2) u3) u15) (< u3 (len (keys (list 9 (buff 33))))) (is-eq (len (keys (list 9 (buff 33)))) u9) (is-some (element-at (keys (list 9 (buff 33))) u4)) (is-some (element-at (keys (list 9 (buff 33))) u5)) (is-some (element-at (keys (list 9 (buff 33))) u6)) (is-some (element-at (keys (list 9 (buff 33))) u7)) (is-some (element-at (keys (list 9 (buff 33))) u8)) (not (is-eq (+ (/ (* (len (keys (list 9 (buff 33)))) u2) u3) u1) u0))) ==> (is-some (element-at (keys (list 9 (buff 33))) u7))
+
+    let keys_sym = vsl("keys", TS::SequenceType(SequenceSubtype::BufferType(33u32.try_into().unwrap())), 9);
+    let symop = and(vec![
+        lt(div2(mul2(llen(keys_sym.clone()), cu(2)), cu(3)), cu(15)),
+        lt(cu(3), llen(keys_sym.clone())),
+        eq(llen(keys_sym.clone()), cu(9)),
+        is_some(elat(keys_sym.clone(), cu(4))),
+        is_some(elat(keys_sym.clone(), cu(5))),
+        is_some(elat(keys_sym.clone(), cu(6))),
+        is_some(elat(keys_sym.clone(), cu(7))),
+        is_some(elat(keys_sym.clone(), cu(8))),
+        not(eq(add2(div2(mul2(llen(keys_sym.clone()), cu(2)), cu(3)), cu(1)), cu(0)))
+    ]);
+    let simplified = symop.clone().simplify().unwrap();
+    info!("symop = {symop}, simplifed = {simplified}");
+    assert_eq!(simplified, *eq(llen(keys_sym.clone()), cu(9)));
+    
+    //  (and
+    //      (is-some (element-at (unwrap-panic (slice? (witness (list 13 (buff 1376))) u1 (- (len (witness (list 13 (buff 1376)))) u3))) u5))
+    //      (is-eq (len (witness (list 13 (buff 1376)))) u5)
+    //  )
+    //
+    //  Should be false
+    let witness_sym = vsl("witness", TS::SequenceType(SequenceSubtype::BufferType(1376u32.try_into().unwrap())), 13);
+    let symop = and(vec![
+        eq(llen(witness_sym.clone()), cu(5)),
+        is_some(elat(unwrap_panic(slice(witness_sym.clone(), cu(1), sub2(llen(witness_sym.clone()), cu(3)))), cu(5)))
+    ]);
+    let simplified = symop.clone().simplify().unwrap();
+    info!("symop = {symop}, simplified = {simplified}");
+    assert_eq!(simplified, *f());
+   
+    //  (and
+    //      (is-some (element-at (unwrap-panic (slice? (witness (list 13 (buff 1376))) u1 (- (len (witness (list 13 (buff 1376)))) u3))) u5))
+    //      (is-eq (len (witness (list 13 (buff 1376)))) u5)
+    //      (is-some (element-at? (witness (list 13 (buff 1376))) (- (len (witness (list 13 (buff 1376)))) u1)))
+    //      (is-some (element-at? (witness (list 13 (buff 1376))) (- (len (witness (list 13 (buff 1376)))) u3)))
+    //      (is-some (slice? (witness (list 13 (buff 1376))) u1 (- (len (witness (list 13 (buff 1376)))) u3)))
+    //      (is-eq (len (unwrap-panic (slice? (witness (list 13 (buff 1376))) u1 (- (len (witness (list 13 (buff 1376)))) u2)))))
+    //  )
+    //
+    //  Should reduce to (is-eq (len (witness (list 13 (buff 1376)))) u5)
+    let symop = and(vec![
+        eq(llen(witness_sym.clone()), cu(5)),
+        // extraneous; should disappear
+        is_some(elat(witness_sym.clone(), sub2(llen(witness_sym.clone()), cu(1)))),
+        is_some(elat(witness_sym.clone(), sub2(llen(witness_sym.clone()), cu(3)))),
+        is_some(slice(witness_sym.clone(), cu(1), sub2(llen(witness_sym.clone()), cu(3)))),
+        eq(llen(unwrap_panic(slice(witness_sym.clone(), cu(1), sub2(llen(witness_sym.clone()), cu(3))))), cu(2)),
+    ]);
+    let simplified = symop.clone().simplify().unwrap();
+    info!("symop = {symop}, simplified = {simplified}");
+    assert_eq!(simplified, *eq(llen(witness_sym.clone()), cu(5)));
 }
 
 #[test]
@@ -1375,6 +1530,27 @@ fn test_consolidate_or() {
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
     assert_eq!(simplified, Ok(*vb("a")));
+    
+    // absorption with multiple terms
+    let symop = or(vec![
+        and(vec![vb("a"), vb("b"), vb("c"), vb("d")]),
+        and(vec![vb("a"), vb("b"), vb("c")]),
+        vb("e")
+    ]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*or(vec![and(vec![vb("a"), vb("b"), vb("c")]), vb("e")])));
+
+    // absorption with multiple terms
+    let symop = or(vec![
+        and(vec![vb("a"), vb("b"), vb("c"), vb("d")]),
+        and(vec![vb("a"), vb("b"), vb("c")]),
+        vb("e"),
+        and(vec![vb("a"), vb("b"), vb("e")]),
+    ]);
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*or(vec![and(vec![vb("a"), vb("b"), vb("c")]), vb("e")])));
 
     // consensus 
     // (!A && B) || (A && C) || (B && C) == (!A && B) || (A && C)
@@ -1382,6 +1558,25 @@ fn test_consolidate_or() {
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
     assert_eq!(simplified, Ok(*or(vec![and(vec![not(vb("a")), vb("b")]), and(vec![vb("a"), vb("c")])])));
+
+    // predicate compression
+    // (a && b && c) || (a && b && d && e) || (a && b && c && e)
+    // becomes
+    // (a && b && c) || (a && b && d && e)
+    // becomes
+    // a && b && (c || (d && e))
+    let symop = or(vec![
+        and(vec![vb("a"), vb("b"), vb("c")]),
+        and(vec![vb("a"), vb("b"), vb("d"), vb("e")]),
+        and(vec![vb("a"), vb("b"), vb("c"), vb("e")])
+    ]);
+    let simplified = symop.clone().simplify().unwrap();
+    let compressed = simplified.try_as_predicate().unwrap().compress().as_symop();
+    info!("symop = {symop}, simplified = {simplified}, compressed = {compressed}");
+    assert_eq!(compressed, *and(vec![vb("a"), vb("b"), or(vec![vb("c"), and(vec![vb("d"), vb("e")])])]));
+    
+    // multi-layer predicate compression
+    // (a && b && c) || (x && y && z) || (a && b && z) || (a && b && y) ||
 }
 
 #[test]
@@ -1454,6 +1649,29 @@ fn test_consolidate_equals() {
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
     assert_eq!(simplified, Ok(*cb(false)));
+
+    // and-eq consolidation
+    // (and (is-eq x y) (is-eq y z) (is-eq z w) (is-eq w x))
+    // becomes
+    // (is-eq w x y z)
+    let symop = and(vec![
+        eq(vu("x"), vu("y")),
+        eq(vu("y"), vu("z")),
+        eq(vu("z"), vu("w")),
+        eq(vu("w"), vu("x")),
+    ]);
+    let simplified = symop.clone().simplify().unwrap();
+    info!("symop = {symop}, simplifed = {simplified}");
+    assert_eq!(simplified, *eqs(vec![vu("w"), vu("x"), vu("y"), vu("z")]));
+
+    let symop = and(vec![
+        is_some(vo("x", TS::UIntType)),
+        eq(vo("x", TS::UIntType), vo("y", TS::UIntType)),
+        is_none(vo("y", TS::UIntType))
+    ]);
+    let simplified = symop.clone().simplify().unwrap();
+    info!("symop = {symop}, simplifed = {simplified}");
+    assert_eq!(simplified, *f());
 }
 
 #[test]
@@ -1731,6 +1949,30 @@ fn test_consolidate_is_some() {
     let simplified = symop.clone().simplify();
     info!("symop = {symop:?}, simplifed = {simplified:?}");
     assert_eq!(simplified, Ok(*cb(true)));
+
+    // (is-some (slice? (unwrap-panic (to-consensus-buff? (len (get scriptPubKey (unwrap-panic (element-at (outs (list 50 (tuple (scriptPubKey (buff 1376)) (value uint)))) (input-index uint))))))) u16 u17))
+    let symop = is_some(
+        slice(
+            unwrap_panic(
+                to_consensus_buff(
+                    llen(tget("scriptPubKey", unwrap_panic(elat(vsl("outs", TS::TupleType(TupleTypeSignature::try_from(vec![
+                        (
+                            ClarityName::try_from("scriptPubKey").unwrap(),
+                            TS::SequenceType(SequenceSubtype::BufferType(1376u32.try_into().unwrap()))
+                        ),
+                        (
+                            ClarityName::try_from("value").unwrap(),
+                            TS::UIntType
+                        )
+                    ]).unwrap()), 50),
+                    vu("input-index")))))
+                )
+            ),
+            cu(16),
+            cu(17)));
+    let simplified = symop.clone().simplify();
+    info!("symop = {symop:?}, simplifed = {simplified:?}");
+    assert_eq!(simplified, Ok(*cb(true)));
 }
 
 #[test]
@@ -1924,6 +2166,22 @@ fn test_consolidate_len() {
 }
 
 #[test]
+fn test_commutative_hashing() {
+    let p1 = pand(vec![peq(cu(1), cu(1)), peq(cu(2), cu(3))]);
+    let p2 = pand(vec![peq(cu(2), cu(3)), peq(cu(1), cu(1))]);
+
+    let mut s1 = DefaultHasher::new();
+    p1.hash(&mut s1);
+    let h1 = s1.finish();
+
+    let mut s2 = DefaultHasher::new();
+    p2.hash(&mut s2);
+    let h2 = s2.finish();
+
+    assert_eq!(h1, h2);
+}
+
+#[test]
 fn test_commutative_cmp() {
     let p1 = pand(vec![peq(cu(1), cu(1)), peq(cu(2), cu(3))]);
     let p2 = pand(vec![peq(cu(2), cu(3)), peq(cu(1), cu(1))]);
@@ -1960,13 +2218,15 @@ fn test_commutative_cmp() {
 
 #[test]
 fn test_bind_symbol() {
+    let null = HashSet::new();
+
     // (to-int (x uint)), x <-- u3
     // ---------------------------
     //             3
     let symop = SymOp::ToInt(vu("x"));
     let simplified = symop
         .clone()
-        .bind_symbol("x".try_into().unwrap(), *cu(3))
+        .bind_symbol_with_skips("x".try_into().unwrap(), *cu(3), &null)
         .simplify()
         .unwrap();
 
@@ -1979,7 +2239,7 @@ fn test_bind_symbol() {
     let symop = SymOp::ToInt(vu("x"));
     let simplified = symop
         .clone()
-        .bind_symbol("x".try_into().unwrap(), *add2(vu("y"), cu(3)))
+        .bind_symbol_with_skips("x".try_into().unwrap(), *add2(vu("y"), cu(3)), &null)
         .simplify()
         .unwrap();
 
@@ -1992,8 +2252,8 @@ fn test_bind_symbol() {
     let symop = add(vec![vu("x"), vu("y"), cu(3)]);
     let simplified = symop
         .clone()
-        .bind_symbol("x".try_into().unwrap(), *cu(1))
-        .bind_symbol("y".try_into().unwrap(), *cu(2))
+        .bind_symbol_with_skips("x".try_into().unwrap(), *cu(1), &null)
+        .bind_symbol_with_skips("y".try_into().unwrap(), *cu(2), &null)
         .simplify()
         .unwrap();
 
@@ -2006,7 +2266,7 @@ fn test_bind_symbol() {
     let symop = lm("foo", add2(vu("x"), cu(3)), add2(vu("y"), cu(6)));
     let simplified = symop
         .clone()
-        .bind_symbol("y".try_into().unwrap(), *cu(5))
+        .bind_symbol_with_skips("y".try_into().unwrap(), *cu(5), &null)
         .simplify()
         .unwrap();
 
@@ -3718,19 +3978,19 @@ fn test_halt_fold_user_func() {
 fn test_halt_fold_user_func_branch() {
     let contract_id = default_contract_id();
     let mut symbex = Symbex::from_contract(contract_id.clone(), r#"
-        (define-data-var v uint u0)
+        (define-data-var v int 0)
 
-        (define-private (fetch-add-sub (x uint) (value uint))
-           (if (is-eq (mod (var-get v) u2) u0)
-              (+ (var-get v) x value)
+        (define-private (fetch-add-sub (x int) (value int))
+           (if (is-eq (mod (var-get v) 2) 0)
+              (+ (var-get v) x (- value))
               (- (var-get v) x value)))
 
         ;; If v is odd, then this `fold` evaluates to:
-        ;; ((var-get v) - u0 - u10)                     --> ((var-get v) - u10)
-        ;; ((var-get v) - u1 - ((var-get v) - u10))     --> u9
-        ;; ((var-get v) - u2 - u9)                      --> ((var-get v) - u11)
-        ;; ((var-get v) - u3 - ((var-get v) - u11))     --> u8
-        (fold fetch-add-sub (list u0 u1 u2 u3) u10)
+        ;; ((var-get v) - 0 - 10)                     --> ((var-get v) - 10)
+        ;; ((var-get v) - 1 - ((var-get v) - 10))     --> 9
+        ;; ((var-get v) - 2 - 9)                      --> ((var-get v) - 11)
+        ;; ((var-get v) - 3 - ((var-get v) - 11))     --> 8
+        (fold fetch-add-sub (list 0 1 2 3) 10)
         "#,
     ).unwrap();
     let termination_states = symbex.eval_all().unwrap();
@@ -3741,15 +4001,15 @@ fn test_halt_fold_user_func_branch() {
 
     assert_halts(termination_states, vec![
         Halt::new_test()
-            .pred(peq(rem(var_get(su("v")), cu(2)), cu(0)))
+            .pred(peq(rem(var_get(si("v")), ci(2)), ci(0)))
             .formula(add(vec![
-                mul2(cu(4), var_get(su("v"))),
-                cu(16)
+                mul2(ci(4), var_get(si("v"))),
+                ci(16)
             ])),
 
         Halt::new_test()
-            .pred(pnot(peq(rem(var_get(su("v")), cu(2)), cu(0))))
-            .formula(cu(8))
+            .pred(pnot(peq(rem(var_get(si("v")), ci(2)), ci(0))))
+            .formula(ci(8))
     ]);
 }
 
@@ -4416,31 +4676,15 @@ fn test_halt_contract_call() {
             (
                 library_contract_id.clone(),
                 r#"
-                (define-map squares uint uint)
-                (define-map cubes uint uint)
-                (define-map quads uint uint)
+                (define-map even-squares uint uint)
 
-                (define-read-only (get-square (x uint))
-                    (default-to u0 (map-get? squares x)))
-
-                (define-read-only (get-cube (x uint))
-                    (default-to (* x (get-square x)) (map-get? cubes x)))
-
-                (define-public (insert-cube (x uint))
-                    (if true
-                        (ok (map-insert cubes x (* x x x)))
-                        (err u0)))
+                (define-read-only (get-even-square (x uint))
+                    (default-to u0 (map-get? even-squares x)))
 
                 (define-public (compute (x uint))
-                    (if (is-eq u0 (mod x u3))
-                        (let (
-                            (y (get-square x))
-                        )
-                        (ok (map-insert quads x (* y y))))
-                        (let (
-                            (y (get-cube x))
-                        )
-                        (insert-cube y))))
+                    (if (is-eq u0 (mod x u2))
+                        (ok (map-insert even-squares x (* x x)))
+                        (err u0)))
 
                 "#.to_string(),
                 None
@@ -4448,24 +4692,12 @@ fn test_halt_contract_call() {
             (
                 client_contract_id.clone(),
                 r#"
-                (define-map squares uint uint)
-                (define-map quints uint uint)
-
-                (define-read-only (get-square (x uint))
-                    (default-to (contract-call? .library get-square x) (map-get? squares x)))
-
-                (define-read-only (compute-quint (x uint))
-                    (* (contract-call? .library get-cube x) (get-square x)))
-
-                (define-public (insert-quint (x uint) (x_5 uint))
-                    (if true
-                        (ok (map-insert quints x x_5))
-                        (err u0)))
-
                 (define-public (compute (x uint))
-                    (if (is-eq u0 (mod x u3))
-                        (contract-call? .library compute x)
-                        (insert-quint x (compute-quint x))))
+                    (match (contract-call? .library compute x)
+                        inserted
+                            (ok (+ x u2))
+                        not-inserted
+                            (err (+ x not-inserted u20))))
 
                 ;; NOTE: can't call this `x` since it seems to trigger a Clarity bug
                 ;; whereby the `x` in `get-square` will seem to be already used.
@@ -4489,209 +4721,24 @@ fn test_halt_contract_call() {
     assert_halts(termination_states, vec![
         Halt::new_test()
             .pred(pand(vec![
-                peq(rem(fq_var_get(&client_contract_id, su("xx")), cu(3)), cu(0)),
-                pis_none(fq_map_get(&library_contract_id, "quads", fq_var_get(&client_contract_id, su("xx")))),
-                pis_some(fq_map_get(&library_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
+                peq(rem(fqlv(&client_contract_id, "xx", vu("xx")), cu(2)), cu(0)),
+                pis_some(fq_map_get(&library_contract_id, "even-squares", fqlv(&client_contract_id, "xx", vu("xx"))))
             ]))
-            .formula(cok(valb(true)))
-            .map(library_contract_id.clone(), "quads", fq_var_get(&client_contract_id, su("xx")), pow(unwrap_panic(fq_map_get(&library_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))), cu(2)))
-            .reachable_map_write(library_contract_id.clone(), "cubes")
-            .reachable_map_write(library_contract_id.clone(), "quads")
-            .reachable_map_write(client_contract_id.clone(), "quints"),
+            .formula(ok(add2(fqlv(&client_contract_id, "xx", vu("xx")), cu(2))))
+            .reachable_map_write(library_contract_id.clone(), "even-squares"),
 
         Halt::new_test()
             .pred(pand(vec![
-                peq(rem(fq_var_get(&client_contract_id, su("xx")), cu(3)), cu(0)),
-                pis_none(fq_map_get(&library_contract_id, "quads", fq_var_get(&client_contract_id, su("xx")))),
-                pis_none(fq_map_get(&library_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
+                peq(rem(fqlv(&client_contract_id, "xx", vu("xx")), cu(2)), cu(0)),
+                pis_none(fq_map_get(&library_contract_id, "even-squares", fqlv(&client_contract_id, "xx", vu("xx"))))
             ]))
-            .formula(cok(valb(true)))
-            .map(library_contract_id.clone(), "quads", fq_var_get(&client_contract_id, su("xx")), cu(0))
-            .reachable_map_write(library_contract_id.clone(), "cubes")
-            .reachable_map_write(library_contract_id.clone(), "quads")
-            .reachable_map_write(client_contract_id.clone(), "quints"),
+            .formula(ok(add2(fqlv(&client_contract_id, "xx", vu("xx")), cu(2))))
+            .reachable_map_write(library_contract_id.clone(), "even-squares"),
 
         Halt::new_test()
-            .pred(pand(vec![
-                pnot(peq(rem(fq_var_get(&client_contract_id, su("xx")), cu(3)), cu(0))),
-                pis_none(fq_map_get(&client_contract_id, "quints", fq_var_get(&client_contract_id, su("xx")))),
-                pis_none(fq_map_get(&client_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-                pis_some(fq_map_get(&library_contract_id, "cubes", fq_var_get(&client_contract_id, su("xx")))),
-                pis_some(fq_map_get(&library_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-            ]))
-            .formula(cok(valb(true)))
-            .map(client_contract_id.clone(), "quints", fq_var_get(&client_contract_id, su("xx")), mul(vec![
-                unwrap_panic(fq_map_get(&library_contract_id, "cubes", fq_var_get(&client_contract_id, su("xx")))),
-                unwrap_panic(fq_map_get(&library_contract_id, "squares", fq_var_get(&client_contract_id, su("xx"))))
-            ]))
-            .reachable_map_write(library_contract_id.clone(), "cubes")
-            .reachable_map_write(library_contract_id.clone(), "quads")
-            .reachable_map_write(client_contract_id.clone(), "quints"),
-
-        Halt::new_test()
-            .pred(por(vec![
-                pand(vec![
-                    pnot(peq(rem(fq_var_get(&client_contract_id, su("xx")), cu(3)), cu(0))),
-                    pis_none(fq_map_get(&client_contract_id, "quints", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_some(fq_map_get(&client_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_some(fq_map_get(&library_contract_id, "cubes", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_none(fq_map_get(&library_contract_id, "squares", fq_var_get(&client_contract_id, su("xx"))))
-                ]),
-                pand(vec![
-                    pnot(peq(rem(fq_var_get(&client_contract_id, su("xx")), cu(3)), cu(0))),
-                    pis_none(fq_map_get(&client_contract_id, "quints", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_some(fq_map_get(&client_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_some(fq_map_get(&library_contract_id, "cubes", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_some(fq_map_get(&library_contract_id, "squares", fq_var_get(&client_contract_id, su("xx"))))
-                ]),
-            ]))
-            .formula(cok(valb(true)))
-            .map(client_contract_id.clone(), "quints", fq_var_get(&client_contract_id, su("xx")), mul(vec![
-                unwrap_panic(fq_map_get(&client_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-                unwrap_panic(fq_map_get(&library_contract_id, "cubes", fq_var_get(&client_contract_id, su("xx")))),
-            ]))
-            .reachable_map_write(library_contract_id.clone(), "cubes")
-            .reachable_map_write(library_contract_id.clone(), "quads")
-            .reachable_map_write(client_contract_id.clone(), "quints"),
-       
-        Halt::new_test()
-            .pred(pand(vec![
-                pnot(peq(rem(fq_var_get(&client_contract_id, su("xx")), cu(3)), cu(0))),
-                pis_none(fq_map_get(&client_contract_id, "quints", fq_var_get(&client_contract_id, su("xx")))),
-                pis_some(fq_map_get(&client_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-                pis_none(fq_map_get(&library_contract_id, "cubes", fq_var_get(&client_contract_id, su("xx")))),
-                pis_some(fq_map_get(&library_contract_id, "squares", fq_var_get(&client_contract_id, su("xx"))))
-            ]))
-            .formula(cok(valb(true)))
-            .map(client_contract_id.clone(), "quints", fq_var_get(&client_contract_id, su("xx")), mul(vec![
-                unwrap_panic(fq_map_get(&client_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-                unwrap_panic(fq_map_get(&library_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-                fq_var_get(&client_contract_id, su("xx"))
-            ]))
-            .reachable_map_write(library_contract_id.clone(), "cubes")
-            .reachable_map_write(library_contract_id.clone(), "quads")
-            .reachable_map_write(client_contract_id.clone(), "quints"),
-
-        Halt::new_test()
-            .pred(pand(vec![
-                pnot(peq(rem(fq_var_get(&client_contract_id, su("xx")), cu(3)), cu(0))),
-                pis_none(fq_map_get(&client_contract_id, "quints", fq_var_get(&client_contract_id, su("xx")))),
-                pis_none(fq_map_get(&client_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-                pis_none(fq_map_get(&library_contract_id, "cubes", fq_var_get(&client_contract_id, su("xx")))),
-                pis_some(fq_map_get(&library_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-            ]))
-            .formula(cok(valb(true)))
-            .map(client_contract_id.clone(), "quints", fq_var_get(&client_contract_id, su("xx")), mul(vec![
-                fq_var_get(&client_contract_id, su("xx")),
-                pow(unwrap_panic(fq_map_get(&library_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))), cu(2))
-            ]))
-            .reachable_map_write(library_contract_id.clone(), "cubes")
-            .reachable_map_write(library_contract_id.clone(), "quads")
-            .reachable_map_write(client_contract_id.clone(), "quints"),
-
-        Halt::new_test()
-            .pred(por(vec![
-                pand(vec![
-                    pnot(peq(rem(fq_var_get(&client_contract_id, su("xx")), cu(3)), cu(0))),
-                    pis_none(fq_map_get(&client_contract_id, "quints", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_none(fq_map_get(&client_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_none(fq_map_get(&library_contract_id, "cubes", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_none(fq_map_get(&library_contract_id, "squares", fq_var_get(&client_contract_id, su("xx"))))
-                ]),
-                pand(vec![
-                    pnot(peq(rem(fq_var_get(&client_contract_id, su("xx")), cu(3)), cu(0))),
-                    pis_none(fq_map_get(&client_contract_id, "quints", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_none(fq_map_get(&client_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_some(fq_map_get(&library_contract_id, "cubes", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_none(fq_map_get(&library_contract_id, "squares", fq_var_get(&client_contract_id, su("xx"))))
-                ]),
-                pand(vec![
-                    pnot(peq(rem(fq_var_get(&client_contract_id, su("xx")), cu(3)), cu(0))),
-                    pis_none(fq_map_get(&client_contract_id, "quints", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_some(fq_map_get(&client_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_none(fq_map_get(&library_contract_id, "cubes", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_none(fq_map_get(&library_contract_id, "squares", fq_var_get(&client_contract_id, su("xx"))))
-                ]),
-            ]))
-            .formula(cok(valb(true)))
-            .map(client_contract_id.clone(), "quints", fq_var_get(&client_contract_id, su("xx")), cu(0))
-            .reachable_map_write(library_contract_id.clone(), "cubes")
-            .reachable_map_write(library_contract_id.clone(), "quads")
-            .reachable_map_write(client_contract_id.clone(), "quints"),
-
-        Halt::new_test()
-            .pred(por(vec![
-                pand(vec![
-                    peq(rem(fq_var_get(&client_contract_id, su("xx")), cu(3)), cu(0)),
-                    pis_some(fq_map_get(&library_contract_id, "quads", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_some(fq_map_get(&library_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-                ]),
-                pand(vec![
-                    peq(rem(fq_var_get(&client_contract_id, su("xx")), cu(3)), cu(0)),
-                    pis_some(fq_map_get(&library_contract_id, "quads", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_none(fq_map_get(&library_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-                ]),
-                pand(vec![
-                    pnot(peq(rem(fq_var_get(&client_contract_id, su("xx")), cu(3)), cu(0))),
-                    pis_some(fq_map_get(&client_contract_id, "quints", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_none(fq_map_get(&client_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_none(fq_map_get(&library_contract_id, "cubes", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_none(fq_map_get(&library_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-                ]),
-                pand(vec![
-                    pnot(peq(rem(fq_var_get(&client_contract_id, su("xx")), cu(3)), cu(0))),
-                    pis_some(fq_map_get(&client_contract_id, "quints", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_none(fq_map_get(&client_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_none(fq_map_get(&library_contract_id, "cubes", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_some(fq_map_get(&library_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-                ]),
-                pand(vec![
-                    pnot(peq(rem(fq_var_get(&client_contract_id, su("xx")), cu(3)), cu(0))),
-                    pis_some(fq_map_get(&client_contract_id, "quints", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_none(fq_map_get(&client_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_some(fq_map_get(&library_contract_id, "cubes", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_none(fq_map_get(&library_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-                ]),
-                pand(vec![
-                    pnot(peq(rem(fq_var_get(&client_contract_id, su("xx")), cu(3)), cu(0))),
-                    pis_some(fq_map_get(&client_contract_id, "quints", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_none(fq_map_get(&client_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_some(fq_map_get(&library_contract_id, "cubes", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_some(fq_map_get(&library_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-                ]),
-                pand(vec![
-                    pnot(peq(rem(fq_var_get(&client_contract_id, su("xx")), cu(3)), cu(0))),
-                    pis_some(fq_map_get(&client_contract_id, "quints", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_some(fq_map_get(&client_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_none(fq_map_get(&library_contract_id, "cubes", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_none(fq_map_get(&library_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-                ]),
-                pand(vec![
-                    pnot(peq(rem(fq_var_get(&client_contract_id, su("xx")), cu(3)), cu(0))),
-                    pis_some(fq_map_get(&client_contract_id, "quints", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_some(fq_map_get(&client_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_none(fq_map_get(&library_contract_id, "cubes", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_some(fq_map_get(&library_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-                ]),
-                pand(vec![
-                    pnot(peq(rem(fq_var_get(&client_contract_id, su("xx")), cu(3)), cu(0))),
-                    pis_some(fq_map_get(&client_contract_id, "quints", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_some(fq_map_get(&client_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_some(fq_map_get(&library_contract_id, "cubes", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_none(fq_map_get(&library_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-                ]),
-                pand(vec![
-                    pnot(peq(rem(fq_var_get(&client_contract_id, su("xx")), cu(3)), cu(0))),
-                    pis_some(fq_map_get(&client_contract_id, "quints", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_some(fq_map_get(&client_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_some(fq_map_get(&library_contract_id, "cubes", fq_var_get(&client_contract_id, su("xx")))),
-                    pis_some(fq_map_get(&library_contract_id, "squares", fq_var_get(&client_contract_id, su("xx")))),
-                ])
-            ]))
-            .formula(cok(valb(false)))
-            .reachable_map_write(library_contract_id.clone(), "cubes")
-            .reachable_map_write(library_contract_id.clone(), "quads")
-            .reachable_map_write(client_contract_id.clone(), "quints"),
+            .pred(pnot(peq(rem(fqlv(&client_contract_id, "xx", vu("xx")), cu(2)), cu(0))))
+            .formula(err(add2(fqlv(&client_contract_id, "xx", vu("xx")), cu(20))))
+            .reachable_map_write(library_contract_id.clone(), "even-squares"),
     ]);
 }
 
@@ -4867,9 +4914,9 @@ fn test_callgraph_reachability_trait_contract_call() {
 
     assert_eq!(reachable, vec![
         FullName(library_contract_id.clone(), "do-op-and-log".try_into().unwrap()),
-        FullName(library_contract_id.clone(), "div".try_into().unwrap()),
-        FullName(library_contract_id.clone(), "mul".try_into().unwrap()),
         FullName(library_contract_id.clone(), "sub".try_into().unwrap()),
+        FullName(library_contract_id.clone(), "mul".try_into().unwrap()),
+        FullName(library_contract_id.clone(), "div".try_into().unwrap()),
         FullName(library_contract_id.clone(), "add".try_into().unwrap())
     ]);
 }
@@ -4914,8 +4961,8 @@ fn test_callgraph_reachability_functions() {
     assert_eq!(reachable, vec![
         FullName(contract_id.clone(), "summer".try_into().unwrap()),
         FullName(contract_id.clone(), "mul".try_into().unwrap()),
-        FullName(contract_id.clone(), "add".try_into().unwrap()),
         FullName(contract_id.clone(), "div".try_into().unwrap()),
+        FullName(contract_id.clone(), "add".try_into().unwrap()),
     ]);
 
     let fq_name = FullName(contract_id.clone(), "div".try_into().unwrap());
@@ -4924,7 +4971,7 @@ fn test_callgraph_reachability_functions() {
 
     let fq_name = FullName(contract_id.clone(), "nope".try_into().unwrap());
     let reachable = symbex.callgraph().reachable_from(&fq_name).unwrap_err();
-    assert_eq!(reachable, Error::NotFound(format!("{fq_name}")));
+    assert_eq!(reachable, Error::NotFound(format!("No such reachable function: {fq_name}")));
 }
     
 #[test]
@@ -4994,8 +5041,8 @@ fn test_callgraph_reachability_contract_functions() {
     info!("reachable from 'compute': {:?}", &reachable);
 
     assert_eq!(reachable, vec![
-        FullName(library_contract_id.clone(), "add".try_into().unwrap()),
         FullName(library_contract_id.clone(), "div".try_into().unwrap()),
+        FullName(library_contract_id.clone(), "add".try_into().unwrap()),
         FullName(client_contract_id.clone(), "double".try_into().unwrap()),
         FullName(client_contract_id.clone(), "add-div".try_into().unwrap()),
     ]);
@@ -6327,4 +6374,158 @@ fn test_halt_list_len() {
         info!("{}", t.trace());
         info!("termination state: ==================================\n{}\n", &t.clone().rollup());
     }
+
+    // TODO
+}
+
+#[test]
+fn test_halt_decode_sig_der_to_rs() {
+    let contract_id = default_contract_id();
+    let mut symbex = Symbex::from_contract(contract_id.clone(), r#"
+
+(define-constant ERR_SIG_BAD_LENGTH u37)
+(define-constant ERR_SIG_BAD_PREFIX u38)
+(define-constant ERR_SIG_BAD_PAYLOAD_LENGTH u39)
+(define-constant ERR_SIG_BAD_R_PREFIX u40)
+(define-constant ERR_SIG_BAD_R_LENGTH u41)
+(define-constant ERR_SIG_BAD_R u42)
+(define-constant ERR_SIG_BAD_S_PREFIX u43)
+(define-constant ERR_SIG_BAD_S_LENGTH u44)
+(define-constant ERR_SIG_BAD_S u45)
+(define-constant ERR_SIG_UNEXPECTED_SIGHASH u46)
+(define-constant ERR_SIG_HIGH_S u47)
+(define-constant ERR_SIG_INVALID_PAYLOAD_LENGTH u48)
+(define-constant ERR_SIG_VERIFY_FAILED u49)
+(define-constant ERR_SIG_KEY_ALREADY_USED u50)
+(define-constant ERR_SIG_MALFORMED u51) 
+(define-constant ERR_SIG_R_IS_ZERO u52)
+(define-constant ERR_SIG_S_IS_ZERO u53)
+(define-constant ERR_SIG_R_IS_NEGATIVE u54)
+(define-constant ERR_SIG_S_IS_NEGATIVE u55)
+(define-constant ERR_SIG_R_HAS_NULLS u56)
+(define-constant ERR_SIG_S_HAS_NULLS u57)
+
+(define-constant HIGH_S 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0)
+
+(define-private (decode-sig-der-to-rs (sig (buff 73)) (expected-sighash (optional (buff 1))))
+    (let (
+        ;; checks derived from BIP66
+        (has-right-len (try! (if (>= (len sig) u9)
+            (ok true)
+            (err ERR_SIG_BAD_LENGTH))))
+
+        (starts-with-0x30 (try! (if (is-eq (element-at? sig u0) (some 0x30))
+            (ok true)
+            (err ERR_SIG_BAD_PREFIX))))
+
+        (payload-length (try! (match (element-at? sig u1)
+            length (ok (buff-to-uint-le length))
+            (err ERR_SIG_BAD_PAYLOAD_LENGTH))))
+
+        (payload-length-is-valid (try! (if (is-eq (len sig) (+ u3 payload-length))
+            (ok true)
+            (err ERR_SIG_INVALID_PAYLOAD_LENGTH))))
+        
+        (r-length (try! (match (element-at? sig u3)
+            length (ok (buff-to-uint-le length))
+            (err ERR_SIG_BAD_R_LENGTH))))
+
+        (s-length (try! (match (element-at? sig (+ u5 r-length))
+            length (ok (buff-to-uint-le length))
+            (err ERR_SIG_BAD_S_LENGTH))))
+
+        (payload-contains-s (try! (if (is-eq (len sig) (+ u7 r-length s-length))
+            (ok true)
+            (err ERR_SIG_INVALID_PAYLOAD_LENGTH))))
+
+        (r-starts-with-0x02 (try! (if (is-eq (element-at? sig u2) (some 0x02))
+            (ok true)
+            (err ERR_SIG_BAD_R_PREFIX))))
+
+        (r-length-is-valid (try! (if (> r-length u0)
+            (ok true)
+            (err ERR_SIG_R_IS_ZERO))))
+
+        (r-is-positive (try! (if (< (unwrap-panic (element-at? sig u4)) 0x80)
+            (ok true)
+            (err ERR_SIG_R_IS_NEGATIVE))))
+
+        (r-has-valid-null-prefix
+            (try! (if
+                (and (> r-length u1)
+                     (is-eq (element-at? sig u4) (some 0x00))
+                     (< (unwrap-panic (element-at? sig u5)) 0x80))
+                (err ERR_SIG_R_HAS_NULLS)
+                (ok true))))
+
+        (r-val-full (try! (match (slice? sig u4 (+ u4 r-length))
+            r (ok r)
+            (err ERR_SIG_BAD_R))))
+
+        (s-starts-with-0x02 (try! (if (is-eq (element-at? sig (+ u4 r-length)) (some 0x02))
+            (ok true)
+            (err ERR_SIG_BAD_S_PREFIX))))
+        
+        (s-length-is-valid (try! (if (> s-length u0)
+            (ok true)
+            (err ERR_SIG_S_IS_ZERO))))
+
+        (s-is-positive (try! (if (<= (unwrap-panic (element-at? sig (+ u6 r-length))) 0x80)
+            (ok true)
+            (err ERR_SIG_S_IS_NEGATIVE))))
+
+        (s-has-valid-null-refix
+            (try! (if
+                (and (> s-length u1)
+                     (is-eq (element-at? sig (+ u6 r-length)) (some 0x00))
+                     (< (unwrap-panic (element-at? sig (+ u7 r-length))) 0x80))
+                (err ERR_SIG_S_HAS_NULLS)
+                (ok true))))
+
+        (s-val-full (try! (match (slice? sig (+ u6 r-length) (+ u6 r-length s-length))
+            s (ok s)
+            (err ERR_SIG_BAD_S))))
+
+        ;; trim the single leading zero, if present
+        ;; (happens if the value is negative)
+        (r-val (if (is-eq (element-at? r-val-full u0) (some 0x00))
+            (unwrap-panic (slice? r-val-full u1 (len r-val-full)))
+            r-val-full))
+        
+        (s-val (if (is-eq (element-at? s-val-full u0) (some 0x00))
+            (unwrap-panic (slice? s-val-full u1 (len s-val-full)))
+            s-val-full))
+
+        (s-is-low (try! (if (<= s-val HIGH_S)
+            (ok true)
+            (err ERR_SIG_HIGH_S))))
+
+        (valid-sighash (try! (match expected-sighash
+            sighash
+                (if (is-eq (element-at? sig (- (len sig) u1)) (some sighash))
+                    (ok true)
+                    (err ERR_SIG_UNEXPECTED_SIGHASH))
+            (ok true))))
+
+;;      (can-make-65-byte-buff (try! (if (<= (+ (len r-val) (len s-val) u1) u65)
+;;          (ok true)
+;;          (err ERR_SIG_MALFORMED))))
+    )
+    (ok (unwrap-panic (as-max-len? (concat r-val s-val 0x00) u65)))))
+
+"#,
+    )
+    .unwrap()
+    .skip_causally_independent(false)
+    .skip_pure(false) 
+    .init()
+    .unwrap();
+
+    let termination_states = symbex.eval_user_function("decode-sig-der-to-rs").unwrap();
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+
+    // TODO
 }

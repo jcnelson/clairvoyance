@@ -145,13 +145,33 @@ pub fn find_pre_comments(src: &str, syms: &[SymbolicExpression]) -> HashMap<u64,
         let mut comments = vec![];
         loop {
             let src_line = src_lines[usize::try_from(line).expect("BUG: could not convert u32 to usize")];
-            let Some(src_line) = src_line.trim_start().strip_prefix(";; ") else {
-                debug!("Stop find comments starting at line {line}: '{}'", src_line.trim_start()); 
+            if src_line.trim().len() == 0 {
+                if line > 0 {
+                    line -= 1;
+                    continue;
+                }
+                else {
+                    break;
+                }
+            }
+            // skip top-level comments
+            if src_line.trim_start().strip_prefix(";;;").is_some() {
+                if line > 0 {
+                    line -= 1;
+                    continue;
+                }
+                else {
+                    break;
+                }
+            }
+
+            let Some(src_line) = src_line.trim_start().strip_prefix(";;") else {
+                debug!("Stop finding comments starting at line {line}: '{}'", src_line.trim_start()); 
                 break;
             };
             comments.push(src_line.to_string());
             if line == 0 {
-                debug!("Stop find comments starting at line {line}"); 
+                debug!("Stop finding comments starting at line {line}"); 
                 break;
             }
             line -= 1;
@@ -162,30 +182,33 @@ pub fn find_pre_comments(src: &str, syms: &[SymbolicExpression]) -> HashMap<u64,
         }
 
         comments.reverse();
-        debug!("Got {} comments for symbolic expression {sym} atarting at line {}", comments.len(), line);
+        debug!("Got {} comments for symbolic expression {sym} starting at line {}", comments.len(), line);
         ret.insert(id, (line, comments));
     }
     ret
 }
 
 
-/// Find all "top-level" comment blocks -- i.e. ones that have no indentation
+/// Find all "top-level" comment blocks -- i.e. ones that start with `;;; ` instead of `;; `
 pub fn find_toplevel_comment_blocks(src: &str) -> Vec<(u32, Vec<String>)> {
     let mut cur_block = vec![];
     let mut blocks = vec![];
     let mut block_id = None;
     for (lineno, line) in src.split('\n').enumerate() {
-        if let Some(comment_line) = line.strip_prefix(";; ") {
+        debug!("Line {lineno}: `{line}`");
+        if let Some(comment_line) = line.trim().strip_prefix(";;;") {
             if block_id.is_some() {
                 cur_block.push(comment_line.to_string());
             }
             else {
+                debug!("Begin top-level comment block at line {}", lineno);
                 cur_block = vec![comment_line.to_string()];
                 block_id = Some(u32::try_from(lineno).expect("FATAL: cannot convert usize to u32 lineno"));
             }
         }
         else {
             if let Some(block_id) = block_id.take() && cur_block.len() > 0 {
+                debug!("End top-level comment block at line {}", lineno);
                 blocks.push((block_id, cur_block));
             }
             block_id = None;
