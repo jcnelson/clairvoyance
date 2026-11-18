@@ -174,6 +174,7 @@ fn map_get(n: &str, key: Box<SymOp>) -> Box<SymOp> { fq_map_get(&default_contrac
 fn fq_map_get(c: &QualifiedContractIdentifier, n: &str, key: Box<SymOp>) -> Box<SymOp> { Box::new(SymOp::LoadedMapEntry(FullName::try_from(format!("{}.{n}", c)).unwrap(), key, None)) }
 fn secp256k1_recover(mh: Box<SymOp>, sig: Box<SymOp>) -> Box<SymOp> { Box::new(SymOp::Secp256k1Recover(mh, sig)) }
 fn fcall(name: &str, args: Vec<Box<SymOp>>) -> Box<SymOp> { Box::new(SymOp::FunctionCall(name.try_into().unwrap(), args)) }
+fn lftb(fqn: FullName, addr: Box<SymOp>, val: Option<Box<SymOp>>) -> Box<SymOp> { Box::new(SymOp::LoadedTokenBalance(fqn, addr, val)) }
 
 fn pt() -> Box<Predicate> { Box::new(Predicate::True) }
 fn pf() -> Box<Predicate> { Box::new(Predicate::False) }
@@ -1672,6 +1673,63 @@ fn test_consolidate_equals() {
     let simplified = symop.clone().simplify().unwrap();
     info!("symop = {symop}, simplifed = {simplified}");
     assert_eq!(simplified, *f());
+
+    // (is-eq (x + k1) k2) ==> (is-eq x (- k2 k1))
+    let symop = eq(add2(vu("x"), cu(1)), cu(4));
+    let simplified = symop.clone().simplify().unwrap();
+    info!("symop = {symop}, simplified = {simplified}");
+    assert_eq!(simplified, *eq(vu("x"), cu(3)));
+    
+    // (is-eq (x + k1) (y + k3) (z + k4) k2) solves for x, y, and z
+    let symop = eqs(vec![
+        add2(vu("x"), cu(1)),
+        add2(vu("y"), cu(2)),
+        add2(vu("z"), cu(7)),
+        cu(10)
+    ]);
+    let simplified = symop.clone().simplify().unwrap();
+    info!("symop = {symop}, simplified = {simplified}");
+    assert_eq!(simplified, *and(vec![
+        eq(vu("x"), cu(9)),
+        eq(vu("y"), cu(8)),
+        eq(vu("z"), cu(3))
+    ]));
+
+    // (is-eq (- x k1) k2) ==> (is-eq x (+ k1 k2))
+    let symop = eq(sub2(vu("x"), cu(3)), cu(7));
+    let simplified = symop.clone().simplify().unwrap();
+    info!("symop = {symop}, simplified = {simplified}");
+    assert_eq!(simplified, *eq(vu("x"), cu(10)));
+
+    // (is-eq (- k1 x) k2) ==> (is-eq (- x) (- k2 k1)) ==> (is-eq x (- k1 k2))
+    let symop = eq(sub2(cu(10), vu("x")), cu(7));
+    let simplified = symop.clone().simplify().unwrap();
+    info!("symop = {symop}, simplified = {simplified}");
+    assert_eq!(simplified, *eq(vu("x"), cu(3)));
+
+    // (is-eq (- k1 x) (- k2 y) (- k3 z) k4) ==>
+    // (and (is-eq x (- k1 k4))
+    //      (is-eq y (- k2 k4))
+    //      (is-eq z (- k3 k4)))
+    let symop = eqs(vec![
+        sub2(cu(10), vu("x")),
+        sub2(cu(15), vu("y")),
+        sub2(cu(20), vu("z")),
+        cu(7)
+    ]);
+    let simplified = symop.clone().simplify().unwrap();
+    info!("symop = {symop}, simplified = {simplified}");
+    assert_eq!(simplified, *and(vec![eq(vu("x"), cu(3)), eq(vu("y"), cu(8)), eq(vu("z"), cu(13))]));
+
+    /*
+    // TODO: does not pass yet -- need to balance multiplicative constants
+    // (is-eq (+ (* u2 x) u3) u11) ==>
+    // (is-eq x u4)
+    let symop = eq(add2(mul2(cu(2), vu("x")), cu(3)), cu(11));
+    let simplified = symop.clone().simplify().unwrap();
+    info!("symop = {symop}, simplified = {simplified}");
+    assert_eq!(simplified, *eq(vu("x"), cu(4)));
+    */
 }
 
 #[test]
@@ -4814,6 +4872,94 @@ fn test_halt_trait_contract_call() {
     ]);
 }
 
+#[test]
+fn test_halt_ft_get_balance() {
+    let contract_id = make_contract_id("test");
+    let mut symbex = Symbex::from_contract_comments(r#"
+        ;;; (@clairvoyance
+        ;;;      (contract-id 'SP8H248H248H248H248H248H248H248H24ARTQ82.test)
+        ;;; )
+
+        (define-fungible-token stackaroos)
+
+        (define-private (get-token-balance (user principal))
+            (ft-get-balance stackaroos user))
+
+        ;; (@clairvoyance (explore-all))
+        (define-private (get-combined-token-balance (user1 principal) (user2 principal))
+            (+ (get-token-balance user1) (get-token-balance user2)))
+        "#,
+        vec![]
+    )
+    .unwrap()
+    .init()
+    .unwrap();
+
+    let termination_states = match symbex.eval_user_function("get-combined-token-balance") {
+        Ok(ts) => ts,
+        Err(e) => {
+            error!("symbex.eval_user_function: {e}");
+            panic!()
+        }
+    };
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+
+    let ft_name = FullName(contract_id.clone(), "stackaroos".try_into().unwrap());
+
+    assert_halts(termination_states, vec![
+        Halt::new_test()
+            .pred(pt())
+            .formula(add2(lftb(ft_name.clone(), vp("user1"), None), lftb(ft_name.clone(), vp("user2"), None)))
+    ]);
+}
+
+#[test]
+fn test_halt_ft_mint_unbound() {
+    let contract_id = make_contract_id("test");
+    let mut symbex = Symbex::from_contract_comments(r#"
+        ;;; (@clairvoyance
+        ;;;      (contract-id 'SP8H248H248H248H248H248H248H248H24ARTQ82.test)
+        ;;; )
+
+        ;; This has an implicit max balance of u128::MAX, which will be reflected in the continuations.
+        (define-fungible-token stackaroos)
+
+        (define-private (add-tokens (user principal))
+            (ft-mint? stackaroos u100 user))
+
+        (define-private (get-token-balance (user principal))
+            (ft-get-balance stackaroos user))
+
+        ;; (@clairvoyance (explore-all))
+        (define-private (get-combined-token-balance (user1 principal) (user2 principal))
+            (begin
+                (try! (add-tokens user1))
+                (try! (add-tokens user2))
+                (ok (+ (get-token-balance user1) (get-token-balance user2)))))
+        "#,
+        vec![]
+    )
+    .unwrap()
+    .init()
+    .unwrap();
+
+    let termination_states = match symbex.eval_user_function("get-combined-token-balance") {
+        Ok(ts) => ts,
+        Err(e) => {
+            error!("symbex.eval_user_function: {e}");
+            panic!()
+        }
+    };
+    for t in termination_states.iter() {
+        info!("{}", t.trace());
+        info!("termination state: ==================================\n{}\n", &t.clone().rollup());
+    }
+
+    let ft_name = FullName(contract_id.clone(), "stackaroos".try_into().unwrap());
+}
 
 #[test]
 fn test_callgraph_reachability_trait_contract_call() {
@@ -4973,7 +5119,7 @@ fn test_callgraph_reachability_functions() {
     let reachable = symbex.callgraph().reachable_from(&fq_name).unwrap_err();
     assert_eq!(reachable, Error::NotFound(format!("No such reachable function: {fq_name}")));
 }
-    
+
 #[test]
 fn test_callgraph_reachability_contract_functions() {
     let library_contract_id = make_contract_id("library");

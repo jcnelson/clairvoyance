@@ -834,7 +834,8 @@ fn test_command_define_type() {
         ;;      (assumption (is-eq (len (ins INS)) u1))
         ;;      (assumption (is-eq (len (outs OUTS)) u1))
         ;;
-        ;;      (explore-all))
+        ;;      (explore-pure)
+        ;;      (explore-causally-independent)
         ;; )
         (define-private (inner-check-consumed-utxo
             (ins (list 16 {
@@ -936,8 +937,30 @@ fn test_command_define_type() {
             .formula(ok(concat(vec![
                 unwrap_panic(to_consensus_buff(unwrap_panic(elat(ins_sym.clone(), cu(0))))),
                 unwrap_panic(to_consensus_buff(unwrap_panic(elat(outs_sym.clone(), cu(0)))))
-            ])))
-        ]);
+            ]))),
+
+        Halt::new_test()
+            .pred(pand(vec![
+                peqs(vec![
+                    llen(ins_sym.clone()),
+                    llen(outs_sym.clone()),
+                    cu(1)
+                ]),
+                por(vec![
+                    plesser(cu(4096), llen(unwrap_panic(to_consensus_buff(unwrap_panic(elat(ins_sym.clone(), cu(0))))))),
+                    pis_none(to_consensus_buff(unwrap_panic(elat(ins_sym.clone(), cu(0))))),
+                    pand(vec![
+                        plesser(llen(unwrap_panic(to_consensus_buff(unwrap_panic(elat(ins_sym.clone(), cu(0)))))), cu(4097)),
+                        por(vec![
+                            plesser(cu(4096), llen(unwrap_panic(to_consensus_buff(unwrap_panic(elat(outs_sym.clone(), cu(0))))))),
+                            pis_none(to_consensus_buff(unwrap_panic(elat(outs_sym.clone(), cu(0)))))
+                        ])
+                    ])
+                ])
+            ]))
+            .formula(panic())
+            .early_return(),
+    ]);
 }
 
 
@@ -994,7 +1017,8 @@ fn test_command_define_type_globally() {
         ;;      (assumption (is-eq (len (ins INS)) u1))
         ;;      (assumption (is-eq (len (outs OUTS)) u1))
         ;;
-        ;;      (explore-all))
+        ;;      (explore-pure)
+        ;;      (explore-causally-independent)
         ;; )
         (define-private (inner-check-consumed-utxo
             (ins (list 16 {
@@ -1097,8 +1121,30 @@ fn test_command_define_type_globally() {
             .formula(ok(concat(vec![
                 unwrap_panic(to_consensus_buff(unwrap_panic(elat(ins_sym.clone(), cu(0))))),
                 unwrap_panic(to_consensus_buff(unwrap_panic(elat(outs_sym.clone(), cu(0)))))
-            ])))
-        ]);
+            ]))),
+
+        Halt::new_test()
+            .pred(pand(vec![
+                peqs(vec![
+                    llen(ins_sym.clone()),
+                    llen(outs_sym.clone()),
+                    cu(1)
+                ]),
+                por(vec![
+                    plesser(cu(4096), llen(unwrap_panic(to_consensus_buff(unwrap_panic(elat(ins_sym.clone(), cu(0))))))),
+                    pis_none(to_consensus_buff(unwrap_panic(elat(ins_sym.clone(), cu(0))))),
+                    pand(vec![
+                        plesser(llen(unwrap_panic(to_consensus_buff(unwrap_panic(elat(ins_sym.clone(), cu(0)))))), cu(4097)),
+                        por(vec![
+                            plesser(cu(4096), llen(unwrap_panic(to_consensus_buff(unwrap_panic(elat(outs_sym.clone(), cu(0))))))),
+                            pis_none(to_consensus_buff(unwrap_panic(elat(outs_sym.clone(), cu(0)))))
+                        ])
+                    ])
+                ])
+            ]))
+            .formula(panic())
+            .early_return(),
+    ]);
 }
 
 #[test]

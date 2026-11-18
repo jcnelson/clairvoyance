@@ -370,12 +370,15 @@ pub enum SymOp {
     ConsOkay(Box<SymOp>),
     ConsSome(Box<SymOp>),
     GetTokenBalance(FullName, Box<SymOp>),
+    LoadedTokenBalance(FullName, Box<SymOp>, Option<Box<SymOp>>),
     GetNftOwner(FullName, Box<SymOp>),
+    LoadedNftOwner(FullName, Box<SymOp>, Option<Box<SymOp>>),
     TransferToken(FullName, Box<SymOp>, Box<SymOp>, Box<SymOp>),
     TransferNft(FullName, Box<SymOp>, Box<SymOp>, Box<SymOp>),
     MintToken(FullName, Box<SymOp>, Box<SymOp>),
     MintNft(FullName, Box<SymOp>, Box<SymOp>),
     GetTokenSupply(FullName),
+    LoadedTokenSupply(FullName, Option<Box<SymOp>>),
     BurnToken(FullName, Box<SymOp>),
     BurnNft(FullName, Box<SymOp>, Box<SymOp>),
     GetStxBalance(Box<SymOp>),
@@ -525,12 +528,15 @@ impl PartialEq for SymOp {
             (Self::ConsOkay(s1), Self::ConsOkay(s2)) => s1 == s2,
             (Self::ConsSome(s1), Self::ConsSome(s2)) => s1 == s2,
             (Self::GetTokenBalance(n1, s1), Self::GetTokenBalance(n2, s2)) => n1 == n2 && s1 == s2,
+            (Self::LoadedTokenBalance(n1, s11, s12), Self::LoadedTokenBalance(n2, s21, s22)) => n1 == n2 && s11 == s21 && s12 == s22,
             (Self::GetNftOwner(n1, s1), Self::GetNftOwner(n2, s2)) => n1 == n2 && s1 == s2,
+            (Self::LoadedNftOwner(n1, s11, s12), Self::LoadedNftOwner(n2, s21, s22)) => n1 == n2 && s11 == s21 && s12 == s22,
             (Self::TransferToken(n1, s11, s12, s13), Self::TransferToken(n2, s21, s22, s23)) => n1 == n2 && s11 == s21 && s12 == s22 && s13 == s23,
             (Self::TransferNft(n1, s11, s12, s13), Self::TransferNft(n2, s21, s22, s23)) => n1 == n2 && s11 == s21 && s12 == s22 && s13 == s23,
             (Self::MintToken(n1, s11, s12), Self::MintToken(n2, s21, s22)) => n1 == n2 && s11 == s21 && s12 == s22,
             (Self::MintNft(n1, s11, s12), Self::MintNft(n2, s21, s22)) => n1 == n2 && s11 == s21 && s12 == s22,
             (Self::GetTokenSupply(n1), Self::GetTokenSupply(n2)) => n1 == n2,
+            (Self::LoadedTokenSupply(n1, s1), Self::LoadedTokenSupply(n2, s2)) => n1 == n2 && s1 == s2,
             (Self::BurnToken(n1, s1), Self::BurnToken(n2, s2)) => n1 == n2 && s1 == s2,
             (Self::BurnNft(n1, s11, s12), Self::BurnNft(n2, s21, s22)) => n1 == n2 && s11 == s21 && s12 == s22,
             (Self::GetStxBalance(s1), Self::GetStxBalance(s2)) => s1 == s2,
@@ -584,7 +590,7 @@ impl<'a> SymOpPrettyPrint<'a> {
         let tab = "   ".repeat(self.depth);
         let tab_1 = "   ".repeat(self.depth + 1);
 
-        let write_ops = |f: &mut W, name: &str, tab: &str, ops: &[Box<SymOp>], depth: usize, is_tuple: bool| {
+        let write_ops = |f: &mut W, name: &str, tab: &str, ops: &[Box<SymOp>], depth: usize, is_tuple: bool, sort: bool| {
             if is_tuple {
                 writeln!(f, "{tab}{name}:")?;
             }
@@ -593,7 +599,9 @@ impl<'a> SymOpPrettyPrint<'a> {
             }
             
             let mut sorted_ops = ops.to_vec();
-            sorted_ops.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+            if sort {
+                sorted_ops.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+            }
 
             // but, always put the ORs and ANDs at the back
             let (mut sorted_ops, sorted_ands_ors) : (Vec<Box<SymOp>>, Vec<Box<SymOp>>) = sorted_ops
@@ -645,195 +653,215 @@ impl<'a> SymOpPrettyPrint<'a> {
             SymOp::Variable(s) => writeln!(f, "{tab}{}", s),
             SymOp::LoadedDataVariable(name, symop) => {
                 writeln!(f, "{tab}(loaded-var {name}")?;
-                write_ops(f, "", &tab, &vec![symop.clone()], self.depth, false)?;
+                write_ops(f, "", &tab, &vec![symop.clone()], self.depth, false, false)?;
                 writeln!(f, "{tab})")
             },
-            SymOp::Add(symops) => write_ops(f, "+", &tab, symops, self.depth, false),
-            SymOp::Subtract(symops) => write_ops(f, "-", &tab, symops, self.depth, false),
-            SymOp::Multiply(symops) => write_ops(f, "*", &tab, symops, self.depth, false),
-            SymOp::Divide(symops) => write_ops(f, "/", &tab, symops, self.depth, false),
-            SymOp::Modulo(op1, op2) => write_ops(f, "mod", &tab, &vec![op1.clone(), op2.clone()], self.depth, false),
-            SymOp::ToInt(op) => write_ops(f, "to-int", &tab, &vec![op.clone()], self.depth, false),
-            SymOp::ToUInt(op) => write_ops(f, "to-uint", &tab, &vec![op.clone()], self.depth, false),
-            SymOp::Power(op1, op2) => write_ops(f, "pow", &tab, &vec![op1.clone(), op2.clone()], self.depth, false),
-            SymOp::Sqrti(op1) => write_ops(f, "sqrti", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::Log2(op1) => write_ops(f, "log2", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::Not(op1) => write_ops(f, "not", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::Greater(op1, op2) => write_ops(f, ">", &tab, &vec![op1.clone(), op2.clone()], self.depth, false),
-            SymOp::Geq(op1, op2) => write_ops(f, ">=", &tab, &vec![op1.clone(), op2.clone()], self.depth, false),
-            SymOp::Equals(symops) => write_ops(f, "is-eq", &tab, symops, self.depth, false),
-            SymOp::Leq(op1, op2) => write_ops(f, "<", &tab, &vec![op1.clone(), op2.clone()], self.depth, false),
-            SymOp::Less(op1, op2) => write_ops(f, "<=", &tab, &vec![op1.clone(), op2.clone()], self.depth, false),
-            SymOp::Append(op1, op2) => write_ops(f, "append", &tab, &vec![op1.clone(), op2.clone()], self.depth, false),
-            SymOp::AsMaxLen(op1, op2) => write_ops(f, "as-max-len?", &tab, &vec![op1.clone(), op2.clone()], self.depth, false),
-            SymOp::Len(op1) => write_ops(f, "len", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::ElementAt(op1, op2) => write_ops(f, "element-at?", &tab, &vec![op1.clone(), op2.clone()], self.depth, false),
-            SymOp::IndexOf(op1, op2) => write_ops(f, "index-of", &tab, &vec![op1.clone(), op2.clone()], self.depth, false),
-            SymOp::BuffToIntLe(op1) => write_ops(f, "buff-to-int-le", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::BuffToUIntLe(op1) => write_ops(f, "buff-to-uint-le", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::BuffToIntBe(op1) => write_ops(f, "buff-to-int-be", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::BuffToUIntBe(op1) => write_ops(f, "buff-to-uint-be", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::IsStandard(op1) => write_ops(f, "is-standard", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::PrincipalDestruct(op1) => write_ops(f, "principal-destruct", &tab, &vec![op1.clone()], self.depth, false),
+            SymOp::Add(symops) => write_ops(f, "+", &tab, symops, self.depth, false, true),
+            SymOp::Subtract(symops) => write_ops(f, "-", &tab, symops, self.depth, false, false),
+            SymOp::Multiply(symops) => write_ops(f, "*", &tab, symops, self.depth, false, true),
+            SymOp::Divide(symops) => write_ops(f, "/", &tab, symops, self.depth, false, false),
+            SymOp::Modulo(op1, op2) => write_ops(f, "mod", &tab, &vec![op1.clone(), op2.clone()], self.depth, false, false),
+            SymOp::ToInt(op) => write_ops(f, "to-int", &tab, &vec![op.clone()], self.depth, false, false),
+            SymOp::ToUInt(op) => write_ops(f, "to-uint", &tab, &vec![op.clone()], self.depth, false, false),
+            SymOp::Power(op1, op2) => write_ops(f, "pow", &tab, &vec![op1.clone(), op2.clone()], self.depth, false, false),
+            SymOp::Sqrti(op1) => write_ops(f, "sqrti", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::Log2(op1) => write_ops(f, "log2", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::Not(op1) => write_ops(f, "not", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::Greater(op1, op2) => write_ops(f, ">", &tab, &vec![op1.clone(), op2.clone()], self.depth, false, false),
+            SymOp::Geq(op1, op2) => write_ops(f, ">=", &tab, &vec![op1.clone(), op2.clone()], self.depth, false, false),
+            SymOp::Equals(symops) => write_ops(f, "is-eq", &tab, symops, self.depth, false, true),
+            SymOp::Leq(op1, op2) => write_ops(f, "<=", &tab, &vec![op1.clone(), op2.clone()], self.depth, false, false),
+            SymOp::Less(op1, op2) => write_ops(f, "<", &tab, &vec![op1.clone(), op2.clone()], self.depth, false, false),
+            SymOp::Append(op1, op2) => write_ops(f, "append", &tab, &vec![op1.clone(), op2.clone()], self.depth, false, false),
+            SymOp::AsMaxLen(op1, op2) => write_ops(f, "as-max-len?", &tab, &vec![op1.clone(), op2.clone()], self.depth, false, false),
+            SymOp::Len(op1) => write_ops(f, "len", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::ElementAt(op1, op2) => write_ops(f, "element-at?", &tab, &vec![op1.clone(), op2.clone()], self.depth, false, false),
+            SymOp::IndexOf(op1, op2) => write_ops(f, "index-of", &tab, &vec![op1.clone(), op2.clone()], self.depth, false, false),
+            SymOp::BuffToIntLe(op1) => write_ops(f, "buff-to-int-le", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::BuffToUIntLe(op1) => write_ops(f, "buff-to-uint-le", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::BuffToIntBe(op1) => write_ops(f, "buff-to-int-be", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::BuffToUIntBe(op1) => write_ops(f, "buff-to-uint-be", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::IsStandard(op1) => write_ops(f, "is-standard", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::PrincipalDestruct(op1) => write_ops(f, "principal-destruct", &tab, &vec![op1.clone()], self.depth, false, false),
             SymOp::PrincipalConstruct(op1, op2, op3_opt) => match op3_opt { 
-                Some(op3) => write_ops(f, "principal-construct", &tab, &vec![op1.clone(), op2.clone(), op3.clone()], self.depth, false),
-                None => write_ops(f, "principal-construct", &tab, &vec![op1.clone(), op2.clone()], self.depth, false),
+                Some(op3) => write_ops(f, "principal-construct", &tab, &vec![op1.clone(), op2.clone(), op3.clone()], self.depth, false, false),
+                None => write_ops(f, "principal-construct", &tab, &vec![op1.clone(), op2.clone()], self.depth, false, false),
             },
-            SymOp::StringToInt(op1) => write_ops(f, "string-to-int?", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::StringToUInt(op1) => write_ops(f, "string-to-uint?", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::IntToAscii(op1) => write_ops(f, "int-to-ascii", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::IntToUtf8(op1) => write_ops(f, "int-to-utf8", &tab, &vec![op1.clone()], self.depth, false),
+            SymOp::StringToInt(op1) => write_ops(f, "string-to-int?", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::StringToUInt(op1) => write_ops(f, "string-to-uint?", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::IntToAscii(op1) => write_ops(f, "int-to-ascii", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::IntToUtf8(op1) => write_ops(f, "int-to-utf8", &tab, &vec![op1.clone()], self.depth, false, false),
             SymOp::FetchVar(name) => write!(f, "{tab}(var-get {name})"),
             SymOp::SetVar(name, op1) => {
                 writeln!(f, "{tab}(var-set {name}")?;
-                write_ops(f, "", &tab, &vec![op1.clone()], self.depth, false)?;
+                write_ops(f, "", &tab, &vec![op1.clone()], self.depth, false, false)?;
                 writeln!(f, "{tab})")
             },
             SymOp::FetchEntry(name, op1) => {
                 writeln!(f, "{tab}(map-get? {name}")?;
-                write_ops(f, "", &tab, &vec![op1.clone()], self.depth, false)?;
+                write_ops(f, "", &tab, &vec![op1.clone()], self.depth, false, false)?;
                 writeln!(f, "{tab})")
             },
             SymOp::LoadedMapEntry(name, key_op, value_op_opt) => {
-                writeln!(f, "{tab}(map-entry {name}")?;
+                writeln!(f, "{tab}(loaded-map-entry {name}")?;
                 match value_op_opt {
-                    Some(op) => write_ops(f, "", &tab, &vec![key_op.clone(), op.clone()], self.depth, false),
-                    None => write_ops(f, "", &tab, &vec![key_op.clone()], self.depth, false)
+                    Some(op) => write_ops(f, "", &tab, &vec![key_op.clone(), op.clone()], self.depth, false, false),
+                    None => write_ops(f, "", &tab, &vec![key_op.clone()], self.depth, false, false)
                 }?;
                 writeln!(f, "{tab})")
             },
             SymOp::SetEntry(name, op1, op2) => {
                 writeln!(f, "{tab}(map-set {name}")?;
-                write_ops(f, "", &tab, &vec![op1.clone(), op2.clone()], self.depth, false)?;
+                write_ops(f, "", &tab, &vec![op1.clone(), op2.clone()], self.depth, false, false)?;
                 writeln!(f, "{tab})")
             },
             SymOp::InsertEntry(name, op1, op2) => {
                 writeln!(f, "{tab}(map-insert {name}")?;
-                write_ops(f, "", &tab, &vec![op1.clone(), op2.clone()], self.depth, false)?;
+                write_ops(f, "", &tab, &vec![op1.clone(), op2.clone()], self.depth, false, false)?;
                 writeln!(f, "{tab})")
             },
             SymOp::DeleteEntry(name, op1) => {
                 writeln!(f, "{tab}(map-delete {name}")?;
-                write_ops(f, "", &tab, &vec![op1.clone()], self.depth, false)?;
+                write_ops(f, "", &tab, &vec![op1.clone()], self.depth, false, false)?;
                 writeln!(f, "{tab})")
             },
             SymOp::TupleGet(name, op1) => {
                 writeln!(f, "{tab}(get {name}")?;
-                write_ops(f, "", &tab, &vec![op1.clone()], self.depth, false)?;
+                write_ops(f, "", &tab, &vec![op1.clone()], self.depth, false, false)?;
                 writeln!(f, "{tab})")
             },
-            SymOp::Hash160(op1) => write_ops(f, "hash160", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::Sha256(op1) => write_ops(f, "sha256", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::Sha512(op1) => write_ops(f, "sha512", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::Sha512Trunc256(op1) => write_ops(f, "sha512/256", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::Keccak256(op1) => write_ops(f, "keccak256", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::Secp256k1Recover(op1, op2) => write_ops(f, "secp256k1-recover?", &tab, &vec![op1.clone(), op2.clone()], self.depth, false),
-            SymOp::Secp256k1Verify(op1, op2, op3) => write_ops(f, "secp256k1-verify", &tab, &vec![op1.clone(), op2.clone(), op3.clone()], self.depth, false),
-            SymOp::ContractOf(op1) => write_ops(f, "contract-of", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::PrincipalOf(op1) => write_ops(f, "principal-of", &tab, &vec![op1.clone()], self.depth, false),
+            SymOp::Hash160(op1) => write_ops(f, "hash160", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::Sha256(op1) => write_ops(f, "sha256", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::Sha512(op1) => write_ops(f, "sha512", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::Sha512Trunc256(op1) => write_ops(f, "sha512/256", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::Keccak256(op1) => write_ops(f, "keccak256", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::Secp256k1Recover(op1, op2) => write_ops(f, "secp256k1-recover?", &tab, &vec![op1.clone(), op2.clone()], self.depth, false, false),
+            SymOp::Secp256k1Verify(op1, op2, op3) => write_ops(f, "secp256k1-verify", &tab, &vec![op1.clone(), op2.clone(), op3.clone()], self.depth, false, false),
+            SymOp::ContractOf(op1) => write_ops(f, "contract-of", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::PrincipalOf(op1) => write_ops(f, "principal-of", &tab, &vec![op1.clone()], self.depth, false, false),
             SymOp::GetBurnBlockInfo(prop, op1) => {
-                write!(f, "{tab}(get-burn-block-info {prop}")?;
-                write_ops(f, "", &tab, &vec![op1.clone()], self.depth, false)?;
+                writeln!(f, "{tab}(get-burn-block-info {prop}")?;
+                write_ops(f, "", &tab, &vec![op1.clone()], self.depth, false, false)?;
                 writeln!(f, "{tab})")
             },
-            SymOp::IsOkay(op1) => write_ops(f, "is-ok", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::IsErr(op1) => write_ops(f, "is-err", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::IsSome(op1) => write_ops(f, "is-some", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::IsNone(op1) => write_ops(f, "is-none", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::UnwrapPanic(op1) => write_ops(f, "unwrap-panic", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::UnwrapErrPanic(op1) => write_ops(f, "unwrap-err-panic", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::ConsError(op1) => write_ops(f, "err", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::ConsOkay(op1) => write_ops(f, "ok", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::ConsSome(op1) => write_ops(f, "some", &tab, &vec![op1.clone()], self.depth, false),
+            SymOp::IsOkay(op1) => write_ops(f, "is-ok", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::IsErr(op1) => write_ops(f, "is-err", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::IsSome(op1) => write_ops(f, "is-some", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::IsNone(op1) => write_ops(f, "is-none", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::UnwrapPanic(op1) => write_ops(f, "unwrap-panic", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::UnwrapErrPanic(op1) => write_ops(f, "unwrap-err-panic", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::ConsError(op1) => write_ops(f, "err", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::ConsOkay(op1) => write_ops(f, "ok", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::ConsSome(op1) => write_ops(f, "some", &tab, &vec![op1.clone()], self.depth, false, false),
             SymOp::GetTokenBalance(name, op1) => {
-                write!(f, "{tab}(ft-get-balance {name}")?;
-                write_ops(f, "", &tab, &vec![op1.clone()], self.depth, false)?;
+                writeln!(f, "{tab}(ft-get-balance {name}")?;
+                write_ops(f, "", &tab, &vec![op1.clone()], self.depth, false, false)?;
                 writeln!(f, "{tab})")
             },
+            SymOp::LoadedTokenBalance(name, op1, op2_opt) => {
+                writeln!(f, "{tab}(loaded-ft-balance {name}")?;
+                match op2_opt {
+                    Some(op2) => write_ops(f, "", &tab, &vec![op1.clone(), op2.clone()], self.depth, false, false)?,
+                    None => write_ops(f, "", &tab, &vec![op1.clone()], self.depth, false, false)?
+                }
+                writeln!(f, "{tab})")
+            }
             SymOp::GetNftOwner(name, op1) => {
-                write!(f, "{tab}(nft-get-owner? {name}")?;
-                write_ops(f, "", &tab, &vec![op1.clone()], self.depth, false)?;
+                writeln!(f, "{tab}(nft-get-owner? {name}")?;
+                write_ops(f, "", &tab, &vec![op1.clone()], self.depth, false, false)?;
+                writeln!(f, "{tab})")
+            },
+            SymOp::LoadedNftOwner(name, op1, op2_opt) => {
+                writeln!(f, "{tab}(loaded-nft-owner {name}")?;
+                match op2_opt {
+                    Some(op2) => write_ops(f, "", &tab, &vec![op1.clone(), op2.clone()], self.depth, false, false),
+                    None => write_ops(f, "", &tab, &vec![op1.clone()], self.depth, false, false)
+                }?;
                 writeln!(f, "{tab})")
             },
             SymOp::TransferToken(name, op1, op2, op3) => { 
-                write!(f, "{tab}(stx-transfer? {name}")?;
-                write_ops(f, "", &tab, &vec![op1.clone(), op2.clone(), op3.clone()], self.depth, false)?;
+                writeln!(f, "{tab}(stx-transfer? {name}")?;
+                write_ops(f, "", &tab, &vec![op1.clone(), op2.clone(), op3.clone()], self.depth, false, false)?;
                 writeln!(f, "{tab})")
             },
             SymOp::TransferNft(name, op1, op2, op3) => { 
-                write!(f, "{tab}(ft-transfer? {name}")?;
-                write_ops(f, "", &tab, &vec![op1.clone(), op2.clone(), op3.clone()], self.depth, false)?;
+                writeln!(f, "{tab}(ft-transfer? {name}")?;
+                write_ops(f, "", &tab, &vec![op1.clone(), op2.clone(), op3.clone()], self.depth, false, false)?;
                 writeln!(f, "{tab})")
             },
             SymOp::MintToken(name, op1, op2) => {
-                write!(f, "{tab}(ft-mint? {name}")?;
-                write_ops(f, "", &tab, &vec![op1.clone(), op2.clone()], self.depth, false)?;
+                writeln!(f, "{tab}(ft-mint? {name}")?;
+                write_ops(f, "", &tab, &vec![op1.clone(), op2.clone()], self.depth, false, false)?;
                 writeln!(f, "{tab})")
             },
             SymOp::MintNft(name, op1, op2) => {
-                write!(f, "{tab}(nft-mint? {name}")?;
-                write_ops(f, "", &tab, &vec![op1.clone(), op2.clone()], self.depth, false)?;
+                writeln!(f, "{tab}(nft-mint? {name}")?;
+                write_ops(f, "", &tab, &vec![op1.clone(), op2.clone()], self.depth, false, false)?;
                 writeln!(f, "{tab})")
             },
             SymOp::GetTokenSupply(name) => write!(f, "(ft-get-supply {name})"),
+            SymOp::LoadedTokenSupply(name, s_opt) => match s_opt {
+                Some(op) => write!(f, "(loaded-ft-supply {name} {op})"),
+                None => write!(f, "(loaded-ft-supply {name})")
+            }
             SymOp::BurnToken(name, op1) => {
-                write!(f, "{tab}(ft-burn? {name}")?;
-                write_ops(f, "", &tab, &vec![op1.clone()], self.depth, false)?;
+                writeln!(f, "{tab}(ft-burn? {name}")?;
+                write_ops(f, "", &tab, &vec![op1.clone()], self.depth, false, false)?;
                 writeln!(f, "{tab})")
             },
             SymOp::BurnNft(name, op1, op2) => {
-                write!(f, "{tab}(nft-burn? {name}")?;
-                write_ops(f, "", &tab, &vec![op1.clone(), op2.clone()], self.depth, false)?;
+                writeln!(f, "{tab}(nft-burn? {name}")?;
+                write_ops(f, "", &tab, &vec![op1.clone(), op2.clone()], self.depth, false, false)?;
                 writeln!(f, "{tab})")
             },
-            SymOp::GetStxBalance(op1) => write_ops(f, "stx-get-balance", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::StxTransfer(op1, op2, op3) => write_ops(f, "stx-transfer?", &tab, &vec![op1.clone(), op2.clone(), op3.clone()], self.depth, false),
-            SymOp::StxTransferMemo(op1, op2, op3, op4) => write_ops(f, "stx-transfer-memo?", &tab, &vec![op1.clone(), op2.clone(), op3.clone(), op4.clone()], self.depth, false),
-            SymOp::StxBurn(op1) => write_ops(f, "stx-burn?", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::StxGetAccount(op1) => write_ops(f, "stx-get-account", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::BitwiseAnd(symops) => write_ops(f, "bit-and", &tab, symops, self.depth, false),
-            SymOp::BitwiseOr(symops) => write_ops(f, "bit-or", &tab, symops, self.depth, false),
-            SymOp::BitwiseXor(symops) => write_ops(f, "bit-xor", &tab, symops, self.depth, false),
-            SymOp::BitwiseNot(op1) => write_ops(f, "bit-not", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::BitwiseLShift(op1, op2) => write_ops(f, "bit-shift-left", &tab, &vec![op1.clone(), op2.clone()], self.depth, false),
-            SymOp::BitwiseRShift(op1, op2) => write_ops(f, "bit-shift-right", &tab, &vec![op1.clone(), op2.clone()], self.depth, false),
-            SymOp::Slice(op1, op2, op3) => write_ops(f, "slice?", &tab, &vec![op1.clone(), op2.clone(), op3.clone()], self.depth, false),
-            SymOp::ToConsensusBuff(op1) => write_ops(f, "to-consensus-buff?", &tab, &vec![op1.clone()], self.depth, false),
+            SymOp::GetStxBalance(op1) => write_ops(f, "stx-get-balance", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::StxTransfer(op1, op2, op3) => write_ops(f, "stx-transfer?", &tab, &vec![op1.clone(), op2.clone(), op3.clone()], self.depth, false, false),
+            SymOp::StxTransferMemo(op1, op2, op3, op4) => write_ops(f, "stx-transfer-memo?", &tab, &vec![op1.clone(), op2.clone(), op3.clone(), op4.clone()], self.depth, false, false),
+            SymOp::StxBurn(op1) => write_ops(f, "stx-burn?", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::StxGetAccount(op1) => write_ops(f, "stx-get-account", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::BitwiseAnd(symops) => write_ops(f, "bit-and", &tab, symops, self.depth, false, true),
+            SymOp::BitwiseOr(symops) => write_ops(f, "bit-or", &tab, symops, self.depth, false, true),
+            SymOp::BitwiseXor(symops) => write_ops(f, "bit-xor", &tab, symops, self.depth, false, true),
+            SymOp::BitwiseNot(op1) => write_ops(f, "bit-not", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::BitwiseLShift(op1, op2) => write_ops(f, "bit-shift-left", &tab, &vec![op1.clone(), op2.clone()], self.depth, false, false),
+            SymOp::BitwiseRShift(op1, op2) => write_ops(f, "bit-shift-right", &tab, &vec![op1.clone(), op2.clone()], self.depth, false, false),
+            SymOp::Slice(op1, op2, op3) => write_ops(f, "slice?", &tab, &vec![op1.clone(), op2.clone(), op3.clone()], self.depth, false, false),
+            SymOp::ToConsensusBuff(op1) => write_ops(f, "to-consensus-buff?", &tab, &vec![op1.clone()], self.depth, false, false),
             SymOp::FromConsensusBuff(ts, op1) => {
-                write!(f, "{tab}(from-consensus-buff?\n{tab_1}{ts}\n")?;
-                write_ops(f, "", &tab, &vec![op1.clone()], self.depth, false)?;
+                writeln!(f, "{tab}(from-consensus-buff?\n{tab_1}{ts}\n")?;
+                write_ops(f, "", &tab, &vec![op1.clone()], self.depth, false, false)?;
                 writeln!(f, "{tab})")
             }
-            SymOp::ReplaceAt(op1, op2, op3) => write_ops(f, "replace-at?", &tab, &vec![op1.clone(), op2.clone(), op3.clone()], self.depth, false),
+            SymOp::ReplaceAt(op1, op2, op3) => write_ops(f, "replace-at?", &tab, &vec![op1.clone(), op2.clone(), op3.clone()], self.depth, false, false),
             SymOp::GetStacksBlockInfo(name, op1) => {
-                write!(f, "{tab}(get-stacks-block-info? {name}")?;
-                write_ops(f, "", &tab, &vec![op1.clone()], self.depth, false)?;
+                writeln!(f, "{tab}(get-stacks-block-info? {name}")?;
+                write_ops(f, "", &tab, &vec![op1.clone()], self.depth, false, false)?;
                 writeln!(f, "{tab})")
             },
             SymOp::GetTenureInfo(name, op1) => {
-                write!(f, "{tab}(get-tenure-info? {name}")?;
-                write_ops(f, "", &tab, &vec![op1.clone()], self.depth, false)?;
+                writeln!(f, "{tab}(get-tenure-info? {name}")?;
+                write_ops(f, "", &tab, &vec![op1.clone()], self.depth, false, false)?;
                 writeln!(f, "{tab})")
             },
-            SymOp::ContractHash(op1) => write_ops(f, "contract-hash", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::ToAscii(op1) => write_ops(f, "to-ascii?", &tab, &vec![op1.clone()], self.depth, false),
-            SymOp::Secp256r1Verify(op1, op2, op3) => write_ops(f, "secp256r1-verify", &tab, &vec![op1.clone(), op2.clone(), op3.clone()], self.depth, false),
-            SymOp::VerifyMerkleProof(op1, op2, op3, op4, op5) => write_ops(f, "verify-merkle-proof", &tab, &vec![op1.clone(), op2.clone(), op3.clone(), op4.clone(), op5.clone()], self.depth, false),
-            SymOp::GetBitcoinTxOutput(op1, op2) => write_ops(f, "get-bitcoin-tx-output?", &tab, &vec![op1.clone(), op2.clone()], self.depth, false),
+            SymOp::ContractHash(op1) => write_ops(f, "contract-hash", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::ToAscii(op1) => write_ops(f, "to-ascii?", &tab, &vec![op1.clone()], self.depth, false, false),
+            SymOp::Secp256r1Verify(op1, op2, op3) => write_ops(f, "secp256r1-verify", &tab, &vec![op1.clone(), op2.clone(), op3.clone()], self.depth, false, false),
+            SymOp::VerifyMerkleProof(op1, op2, op3, op4, op5) => write_ops(f, "verify-merkle-proof", &tab, &vec![op1.clone(), op2.clone(), op3.clone(), op4.clone(), op5.clone()], self.depth, false, false),
+            SymOp::GetBitcoinTxOutput(op1, op2) => write_ops(f, "get-bitcoin-tx-output?", &tab, &vec![op1.clone(), op2.clone()], self.depth, false, false),
             SymOp::Panic => writeln!(f, "{tab}(unconditional-panic)"), 
             SymOp::FunctionCall(name, args) => {
                 writeln!(f, "{tab}({name}")?;
-                write_ops(f, "", &tab, args, self.depth, false)?;
+                write_ops(f, "", &tab, args, self.depth, false, false)?;
                 writeln!(f, "{tab})")
             }
-            SymOp::And(ops) => write_ops(f, "and", &tab, ops, self.depth, false),
-            SymOp::Or(ops) => write_ops(f, "or", &tab, ops, self.depth, false),
-            SymOp::ListCons(ops) => write_ops(f, "list", &tab, ops, self.depth, false),
-            SymOp::Concat(ops) => write_ops(f, "concat", &tab, ops, self.depth, false),
+            SymOp::And(ops) => write_ops(f, "and", &tab, ops, self.depth, false, true),
+            SymOp::Or(ops) => write_ops(f, "or", &tab, ops, self.depth, false, true),
+            SymOp::ListCons(ops) => write_ops(f, "list", &tab, ops, self.depth, false, false),
+            SymOp::Concat(ops) => write_ops(f, "concat", &tab, ops, self.depth, false, false),
             SymOp::TupleCons(tuple_info) => {
                 writeln!(f, "{tab}{{")?;
                 for (name, op) in tuple_info.iter() {
-                    write_ops(f, name.as_str(), &tab_1, &[op.clone()], self.depth + 1, true)?;
+                    write_ops(f, name.as_str(), &tab_1, &[op.clone()], self.depth + 1, true, false)?;
                 }
                 writeln!(f, "{tab}}}")
             }
@@ -996,12 +1024,15 @@ impl SymOp {
             Self::ConsOkay(..)  => "ok",
             Self::ConsSome(..)  => "some",
             Self::GetTokenBalance(..)  => "ft-get-balance",
+            Self::LoadedTokenBalance(..)  => "loaded-ft-balance",
             Self::GetNftOwner(..)  => "nft-get-owner?",
+            Self::LoadedNftOwner(..) => "loaded-nft-owner",
             Self::TransferToken(..)  => "ft-transfer?",
             Self::TransferNft(..)  => "nft-transfer?",
             Self::MintToken(..)  => "ft-mint?",
             Self::MintNft(..)  => "nft-mint?",
             Self::GetTokenSupply(..)  => "ft-get-supply",
+            Self::LoadedTokenSupply(..)  => "loaded-ft-supply",
             Self::BurnToken(..)  => "ft-burn?",
             Self::BurnNft(..)  => "nft-burn?",
             Self::GetStxBalance(..)  => "stx-get-balance",
@@ -1309,9 +1340,23 @@ impl Hash for SymOp {
                 name.hash(state);
                 op1.hash(state);
             }
+            Self::LoadedTokenBalance(name, op1, op2_opt) => {
+                name.hash(state);
+                op1.hash(state);
+                if let Some(op2) = op2_opt {
+                    op2.hash(state);
+                }
+            }
             Self::GetNftOwner(name, op1) => {
                 name.hash(state);
                 op1.hash(state);
+            }
+            Self::LoadedNftOwner(name, op1, op2_opt) => {
+                name.hash(state);
+                op1.hash(state);
+                if let Some(op2) = op2_opt {
+                    op2.hash(state);
+                }
             }
             Self::TransferToken(name, op1, op2, op3) => {
                 name.hash(state);
@@ -1337,6 +1382,12 @@ impl Hash for SymOp {
             }
             Self::GetTokenSupply(name) => {
                 name.hash(state);
+            }
+            Self::LoadedTokenSupply(name, op1_opt) => {
+                name.hash(state);
+                if let Some(op1) = op1_opt {
+                    op1.hash(state);
+                }
             }
             Self::BurnToken(name, op1) => {
                 name.hash(state);
@@ -1564,12 +1615,28 @@ impl fmt::Display for SymOp {
             Self::ConsOkay(op1) => write!(f, "(ok {op1})"),
             Self::ConsSome(op1) => write!(f, "(some {op1})"),
             Self::GetTokenBalance(name, op1) => write!(f, "(ft-get-balance {name} {op1})"),
+            Self::LoadedTokenBalance(name, op1, op2_opt) => {
+                match op2_opt {
+                    Some(op2) => write!(f, "(loaded-ft-balance {name} {op1} {op2})"),
+                    None => write!(f, "(loaded-ft-balance {name} {op1})")
+                }
+            }
             Self::GetNftOwner(name, op1) => write!(f, "(nft-get-owner? {name} {op1})"),
+            Self::LoadedNftOwner(name, op1, op2_opt) => {
+                match op2_opt {
+                    Some(op2) => write!(f, "(loaded-nft-owner {name} {op1} {op2})"),
+                    None => write!(f, "(loaded-nft-owner {name} {op1})"),
+                }
+            }
             Self::TransferToken(name, op1, op2, op3) => write!(f, "(ft-transfer? {name} {op1} {op2} {op3})"),
             Self::TransferNft(name, op1, op2, op3) => write!(f, "(nft-transfer? {name} {op1} {op2} {op3})"),
             Self::MintToken(name, op1, op2) => write!(f, "(ft-mint? {name} {op1} {op2})"),
             Self::MintNft(name, op1, op2) => write!(f, "(nft-mint? {name} {op1} {op2})"),
             Self::GetTokenSupply(name) => write!(f, "(ft-get-supply {name})"),
+            Self::LoadedTokenSupply(name, op1_opt) => match op1_opt {
+                Some(op1) => write!(f, "(loaded-ft-supply {name} {op1})"),
+                None => write!(f, "(loaded-ft-supply {name})")
+            },
             Self::BurnToken(name, op1) => write!(f, "(ft-burn? {name} {op1})"),
             Self::BurnNft(name, op1, op2) => write!(f, "(nft-burn? {name} {op1} {op2})"),
             Self::GetStxBalance(op1) => write!(f, "(stx-get-balance {op1})"),
@@ -1626,6 +1693,7 @@ impl SymOp {
     }
 
     /// get the innermost loaded symop
+    /// TODO: expand for tokens
     fn inner_loaded(&self) -> Option<SymOp> {
         match self {
             Self::LoadedDataVariable(_, op) => op.inner_loaded(),
@@ -1668,6 +1736,7 @@ impl SymOp {
     /// Some(true) == uint
     /// Some(false) == int
     /// None == unknown
+    /// TODO: expand for tokens
     pub fn is_unsigned(&self) -> Option<bool> {
         match self {
             Self::Constant(Value::Int(..)) => Some(false),
@@ -1739,6 +1808,7 @@ impl SymOp {
     }
 
     /// Could some form of this symbol produce (optional (tuple ..))?
+    /// TODO: expand for tokens
     pub fn maybe_produces_optional_tuple(&self) -> bool {
         match self {
             Self::Constant(Value::Optional(..))
@@ -3394,7 +3464,9 @@ impl SymOp {
             | Self::BuffToUIntLe(..)
             | Self::BuffToUIntBe(..) 
             | Self::GetTokenBalance(..)
+            | Self::LoadedTokenBalance(..)
             | Self::GetTokenSupply(..)
+            | Self::LoadedTokenSupply(..)
             | Self::GetStxBalance(..)
             | Self::BitwiseAnd(..)
             | Self::BitwiseOr(..)
@@ -3500,7 +3572,8 @@ impl SymOp {
 
             // anything that returns (optional principal) has a max length of 1 + max
             // principal
-            Self::GetNftOwner(..) => 1 + 1 + 21 + 1 + 128,
+            Self::GetNftOwner(..)
+            | Self::LoadedNftOwner(..) => 1 + 1 + 21 + 1 + 128,
 
             // anything that returns
             // (response
@@ -3571,7 +3644,9 @@ impl SymOp {
             | Self::BuffToUIntLe(..)
             | Self::BuffToUIntBe(..) 
             | Self::GetTokenBalance(..)
+            | Self::LoadedTokenBalance(..)
             | Self::GetTokenSupply(..)
+            | Self::LoadedTokenSupply(..)
             | Self::GetStxBalance(..)
             | Self::BitwiseAnd(..)
             | Self::BitwiseOr(..)
@@ -3647,7 +3722,8 @@ impl SymOp {
 
             // anything that returns (optional principal) has a min length of 1 + max
             // principal
-            Self::GetNftOwner(..) => 1 + 1 + 21 + 1 + 5,
+            Self::GetNftOwner(..)
+            | Self::LoadedNftOwner(..) => 1 + 1 + 21 + 1 + 5,
 
             // anything that returns
             // (response
@@ -6902,7 +6978,9 @@ impl SymOp {
         Ok((Box::new(lhs.simplify()?), Box::new(rhs.simplify()?)))
     }
 
-    /// Gather terms across an equality operation
+    /// Gather terms across an equality operation.
+    /// If we have (is-eq (+ x y) (+ x z)), then reduce to (is-eq x z).
+    /// Similarly, if we have (is-eq (- x y) (- x z)), then reduce to (is-eq x z)
     fn gather_eq_terms(op_sets: Vec<Box<SymOp>>) -> Result<Vec<Box<SymOp>>, Error> {
         if op_sets.len() < 2 {
             return Err(Error::Bug("Equality check between fewer than 2 terms".into()));
@@ -7053,6 +7131,285 @@ impl SymOp {
         }
         Ok(new_ops)
     }
+
+    /// Balance out add/subtraction constants in an is-eq.
+    /// If we have (is-eq (+ x k1) k2), reduce to (is-eq x (- k2 k1)) if (- k2 k1) is defined.
+    /// Similarly, if we have (is-eq (- x k1) k2), reduce to (is-eq x (+ k1 k2)) if (+ k1 k2) is
+    /// defined.
+    fn balance_eq_add_constants(ops_sets: Vec<Box<SymOp>>) -> Result<Box<SymOp>, Error> {
+        if ops_sets.len() < 2 {
+            return Err(Error::Bug("Equality check between fewer than 2 terms".into()));
+        }
+
+        // there can be at most one bare constant in a list of is-eq terms
+        let mut const_term = None;
+        for op in ops_sets.iter() {
+            if let SymOp::Constant(Value::UInt(xu)) = &**op {
+                if let Some(const_term) = const_term.as_ref() {
+                    return Err(Error::Bug(format!("Multiple constants in is-eq expression: {const_term} and u{xu}")));
+                }
+                const_term = Some(SymOp::Constant(Value::UInt(*xu)));
+            }
+            if let SymOp::Constant(Value::Int(xu)) = &**op {
+                if let Some(const_term) = const_term.as_ref() {
+                    return Err(Error::Bug(format!("Multiple constants in is-eq expression: {const_term} and {xu}")));
+                }
+                const_term = Some(SymOp::Constant(Value::Int(*xu)));
+            }
+        }
+        let Some(const_term) = const_term.take() else {
+            // no-op
+            return Ok(Box::new(SymOp::Equals(ops_sets)));
+        };
+
+        let mut new_ops = vec![Box::new(const_term.clone())];
+        let mut new_eqs = vec![];
+        for op in ops_sets.iter() {
+            let mut added = None;
+            let mut subtracted = None;
+            let mut lhs : Vec<Box<SymOp>> = vec![];
+            if let SymOp::Add(xs) = &**op {
+                for x in xs.iter() {
+                    if let SymOp::Constant(Value::UInt(xu)) = &**x {
+                        if let Some(SymOp::Constant(Value::UInt(au))) = added.take() {
+                            if au.checked_add(*xu).is_some() {
+                                added = Some(SymOp::Constant(Value::UInt(au + *xu)));
+                            }
+                            else {
+                                return Err(Error::Arithmetic(format!("{au} + {xu}")));
+                            }
+                        }
+                        else {
+                            added = Some(SymOp::Constant(Value::UInt(*xu)));
+                        }
+                    }
+                    else if let SymOp::Constant(Value::Int(xu)) = &**x {
+                        if let Some(SymOp::Constant(Value::Int(au))) = added.take() {
+                            if au.checked_add(*xu).is_some() {
+                                added = Some(SymOp::Constant(Value::Int(au + *xu)));
+                            }
+                            else {
+                                return Err(Error::Arithmetic(format!("{au} + {xu}")));
+                            }
+                        }
+                        else {
+                            added = Some(SymOp::Constant(Value::Int(*xu)));
+                        }
+                    }
+                    else {
+                        lhs.push(x.clone());
+                    }
+                }
+            }
+            else if let SymOp::Subtract(xs) = &**op {
+                for (i, x) in xs.iter().enumerate() {
+                    if i == 0 {
+                        // if the first term in a subtraction expression is a constant, then treat
+                        // it as an addand.  i.e. k - x is really (-x) + k
+                        if let SymOp::Constant(Value::UInt(xu)) = &**x {
+                            if let Some(SymOp::Constant(Value::UInt(au))) = added.take() {
+                                if au.checked_add(*xu).is_some() {
+                                    added = Some(SymOp::Constant(Value::UInt(au + *xu)));
+                                }
+                                else {
+                                    return Err(Error::Arithmetic(format!("{au} + {xu}")));
+                                }
+                            }
+                            else {
+                                added = Some(SymOp::Constant(Value::UInt(*xu)));
+                            }
+                        }
+                        else if let SymOp::Constant(Value::Int(xu)) = &**x {
+                            if let Some(SymOp::Constant(Value::Int(au))) = added.take() {
+                                if au.checked_add(*xu).is_some() {
+                                    added = Some(SymOp::Constant(Value::Int(au + *xu)));
+                                }
+                                else {
+                                    return Err(Error::Arithmetic(format!("{au} + {xu}")));
+                                }
+                            }
+                            else {
+                                added = Some(SymOp::Constant(Value::Int(*xu)));
+                            }
+                        }
+                        else {
+                            lhs.push(x.clone());
+                        }
+                    }
+                    else {
+                        // the subsequent subtracted constants need to be added to the rhs
+                        if let SymOp::Constant(Value::UInt(xu)) = &**x {
+                            if let Some(SymOp::Constant(Value::UInt(au))) = subtracted.take() {
+                                if au.checked_add(*xu).is_some() {
+                                    subtracted = Some(SymOp::Constant(Value::UInt(au + *xu)));
+                                }
+                                else {
+                                    return Err(Error::Arithmetic(format!("{au} + {xu}")));
+                                }
+                            }
+                            else {
+                                subtracted = Some(SymOp::Constant(Value::UInt(*xu)));
+                            }
+                        }
+                        else if let SymOp::Constant(Value::Int(xu)) = &**x {
+                            if let Some(SymOp::Constant(Value::Int(au))) = subtracted.take() {
+                                if au.checked_add(*xu).is_some() {
+                                    subtracted = Some(SymOp::Constant(Value::Int(au + *xu)));
+                                }
+                                else {
+                                    return Err(Error::Arithmetic(format!("{au} + {xu}")));
+                                }
+                            }
+                            else {
+                                subtracted = Some(SymOp::Constant(Value::Int(*xu)));
+                            }
+                        }
+                        else {
+                            lhs.push(Box::new(SymOp::Subtract(vec![x.clone()])));
+                        }
+                    }
+                }
+            }
+            else {
+                new_ops.push(op.clone());
+                continue;
+            }
+
+            if lhs.len() == 0 {
+                new_ops.push(op.clone());
+                continue;
+            }
+
+            let (added, subbed) = match (added, subtracted) {
+                (Some(SymOp::Constant(Value::UInt(a))), Some(SymOp::Constant(Value::UInt(b)))) => {
+                    (SymOp::Constant(Value::UInt(a)), SymOp::Constant(Value::UInt(b)))
+                }
+                (Some(SymOp::Constant(Value::UInt(a))), None) => {
+                    (SymOp::Constant(Value::UInt(a)), SymOp::Constant(Value::UInt(0)))
+                }
+                (None, Some(SymOp::Constant(Value::UInt(b)))) => {
+                    (SymOp::Constant(Value::UInt(0)), SymOp::Constant(Value::UInt(b)))
+                }
+                (Some(SymOp::Constant(Value::Int(a))), Some(SymOp::Constant(Value::Int(b)))) => {
+                    (SymOp::Constant(Value::Int(a)), SymOp::Constant(Value::Int(b)))
+                }
+                (Some(SymOp::Constant(Value::Int(a))), None) => {
+                    (SymOp::Constant(Value::Int(a)), SymOp::Constant(Value::Int(0)))
+                }
+                (None, Some(SymOp::Constant(Value::Int(b)))) => {
+                    (SymOp::Constant(Value::Int(0)), SymOp::Constant(Value::Int(b)))
+                }
+                (None, None) => {
+                    new_ops.push(op.clone());
+                    continue;
+                }
+                (_, _) => {
+                    unreachable!()
+                },
+            };
+
+            match (const_term.clone(), added, subbed) {
+                (SymOp::Constant(Value::UInt(c)), SymOp::Constant(Value::UInt(a)), SymOp::Constant(Value::UInt(s))) => {
+                    if c.checked_add(s).is_none() {
+                        return Err(Error::Arithmetic(format!("u{c} + u{s}")));
+                    }
+                    if c + s >= a {
+                        let addand = if lhs.len() > 1 {
+                            Box::new(SymOp::Add(lhs))
+                        }
+                        else if lhs.len() == 1 {
+                            lhs.pop().expect("unreachable")
+                        }
+                        else {
+                            unreachable!()
+                        };
+                        new_eqs.push(Box::new(SymOp::Equals(vec![
+                            Box::new(SymOp::Constant(Value::UInt(c + s - a))),
+                            addand
+                        ])));
+                    }
+                    else {
+                        // compute the negated lhs
+                        let mut new_lhs = vec![];
+                        let mut all_neg = true;
+                        for term in lhs.drain(..) {
+                            if let SymOp::Subtract(mut x) = *term {
+                                if x.len() == 1 {
+                                    new_lhs.push(x.pop().expect("unreachable"));
+                                }
+                                else {
+                                    x.reverse();
+                                    new_lhs.push(Box::new(SymOp::Subtract(x)));
+                                }
+                                all_neg = false;
+                            }
+                            else {
+                                new_lhs.push(Box::new(SymOp::Subtract(vec![term])));
+                            }
+                        }
+
+                        if all_neg {
+                            // all terms are negative, but c + s < a means a - c - s > 0,
+                            // so this could never be balanced.  We have something like 
+                            // (is-eq (+ x u10) u1).
+                            return Ok(Box::new(SymOp::False()));
+                        }
+
+                        lhs.clear();
+                        lhs.extend(new_lhs.into_iter());
+
+                        let addand = if lhs.len() > 1 {
+                            Box::new(SymOp::Add(lhs))
+                        }
+                        else if lhs.len() == 1 {
+                            lhs.pop().expect("unreachable")
+                        }
+                        else {
+                            unreachable!()
+                        };
+                        
+                        new_eqs.push(Box::new(SymOp::Equals(vec![
+                            Box::new(SymOp::Constant(Value::UInt(a - c - s))),
+                            addand
+                        ])));
+                    }
+                },
+                (SymOp::Constant(Value::Int(c)), SymOp::Constant(Value::Int(a)), SymOp::Constant(Value::Int(s))) => {
+                    if c.checked_add(s).is_none() {
+                        return Err(Error::Arithmetic(format!("{c} + {s}")));
+                    }
+                    if c + s >= a {
+                        let addand = if lhs.len() > 1 {
+                            Box::new(SymOp::Add(lhs))
+                        }
+                        else if lhs.len() == 1 {
+                            lhs.pop().expect("unreachable")
+                        }
+                        else {
+                            unreachable!()
+                        };
+                        new_eqs.push(Box::new(SymOp::Equals(vec![
+                            Box::new(SymOp::Constant(Value::Int(c + s - a))),
+                            addand
+                        ])));
+                    }
+                    else {
+                        return Err(Error::Arithmetic(format!("{c} + {s} - {a}")));
+                    }
+                },
+                (_, _, _) => {
+                    unreachable!()
+                }
+            }
+        }
+
+        if new_eqs.len() == 0 {
+            return Ok(Box::new(SymOp::Equals(ops_sets)));
+        }
+        let unchanged_eq = Box::new(SymOp::Equals(new_ops));
+        new_eqs.push(unchanged_eq);
+        Ok(Box::new(SymOp::And(new_eqs)))
+    }
     
     fn substitute_symop_in_list(ops: Vec<Box<SymOp>>, needle: SymOp, replacement: SymOp) -> Vec<Box<SymOp>> {
         let mut new = vec![];
@@ -7162,12 +7519,28 @@ impl SymOp {
             Self::ConsOkay(op) => Self::ConsOkay(op.substitute_symop(needle, replacement)),
             Self::ConsSome(op) => Self::ConsSome(op.substitute_symop(needle, replacement)),
             Self::GetTokenBalance(name, op) => Self::GetTokenBalance(name, op.substitute_symop(needle, replacement)),
+            Self::LoadedTokenBalance(name, op1, op2_opt) => {
+                match op2_opt {
+                    Some(op2) => Self::LoadedTokenBalance(name, op1.substitute_symop(needle.clone(), replacement.clone()), Some(op2.substitute_symop(needle.clone(), replacement.clone()))),
+                    None => Self::LoadedTokenBalance(name, op1.substitute_symop(needle.clone(), replacement.clone()), None)
+                }
+            }
             Self::GetNftOwner(name, op) => Self::GetNftOwner(name, op.substitute_symop(needle, replacement)),
+            Self::LoadedNftOwner(name, op1, op2_opt) => {
+                match op2_opt {
+                    Some(op2) => Self::LoadedNftOwner(name, op1.substitute_symop(needle.clone(), replacement.clone()), Some(op2.substitute_symop(needle.clone(), replacement.clone()))),
+                    None => Self::LoadedNftOwner(name, op1.substitute_symop(needle.clone(), replacement.clone()), None)
+                }
+            }
             Self::TransferToken(name, op1, op2, op3) => Self::TransferToken(name, op1.substitute_symop(needle.clone(), replacement.clone()), op2.substitute_symop(needle.clone(), replacement.clone()), op3.substitute_symop(needle.clone(), replacement.clone())),
             Self::TransferNft(name, op1, op2, op3) => Self::TransferNft(name, op1.substitute_symop(needle.clone(), replacement.clone()), op2.substitute_symop(needle.clone(), replacement.clone()), op3.substitute_symop(needle.clone(), replacement.clone())),
             Self::MintToken(name, op1, op2) => Self::MintToken(name, op1.substitute_symop(needle.clone(), replacement.clone()), op2.substitute_symop(needle.clone(), replacement.clone())),
             Self::MintNft(name, op1, op2) => Self::MintNft(name, op1.substitute_symop(needle.clone(), replacement.clone()), op2.substitute_symop(needle.clone(), replacement.clone())),
             Self::GetTokenSupply(name) => Self::GetTokenSupply(name),
+            Self::LoadedTokenSupply(name, op1_opt) => match op1_opt {
+                Some(op) => Self::LoadedTokenSupply(name, Some(op.substitute_symop(needle, replacement))),
+                None => Self::LoadedTokenSupply(name, None)
+            }
             Self::BurnToken(name, op) => Self::BurnToken(name, op.substitute_symop(needle, replacement)),
             Self::BurnNft(name, op1, op2) => Self::BurnNft(name, op1.substitute_symop(needle.clone(), replacement.clone()), op2.substitute_symop(needle.clone(), replacement.clone())),
             Self::GetStxBalance(op) => Self::GetStxBalance(op.substitute_symop(needle, replacement)),
@@ -7327,12 +7700,28 @@ impl SymOp {
             Self::ConsOkay(op) => op.count_symop(needle),
             Self::ConsSome(op) => op.count_symop(needle),
             Self::GetTokenBalance(_name, op) => op.count_symop(needle),
+            Self::LoadedTokenBalance(_name, op1, op2_opt) => {
+                match op2_opt {
+                    Some(op2) => op1.count_symop(needle) + op2.count_symop(needle),
+                    None => op1.count_symop(needle)
+                }
+            }
             Self::GetNftOwner(_name, op) => op.count_symop(needle),
+            Self::LoadedNftOwner(_name, op1, op2_opt) => {
+                match op2_opt {
+                    Some(op2) => op1.count_symop(needle) + op2.count_symop(needle),
+                    None => op1.count_symop(needle)
+                }
+            }
             Self::TransferToken(_name, op1, op2, op3) => op1.count_symop(needle) + op2.count_symop(needle) +op3.count_symop(needle),
             Self::TransferNft(_name, op1, op2, op3) => op1.count_symop(needle) + op2.count_symop(needle) + op3.count_symop(needle),
             Self::MintToken(_name, op1, op2) => op1.count_symop(needle) + op2.count_symop(needle),
             Self::MintNft(_name, op1, op2) => op1.count_symop(needle) + op2.count_symop(needle),
             Self::GetTokenSupply(_name) => 0,
+            Self::LoadedTokenSupply(_name, op1_opt) => match op1_opt {
+                Some(op1) => op1.count_symop(needle),
+                None => 0
+            }
             Self::BurnToken(_name, op) => op.count_symop(needle),
             Self::BurnNft(_name, op1, op2) => op1.count_symop(needle) + op2.count_symop(needle),
             Self::GetStxBalance(op) => op.count_symop(needle),
@@ -7521,40 +7910,6 @@ impl SymOp {
                 debug!("check_substitution_consistency: reduced to other: {reduced}");
                 return Ok(reduced);
             }
-
-
-            /*
-            if substituted.len() == 1 {
-                let op = substituted.pop().expect("infallible");
-
-                // N.B. this won't be an `and`, so this won't recurse here.
-                let new_op = op.simplify()?;
-                if let Self::Constant(_) = &new_op {
-                    // our work here is done
-                    equiv_ops.push(Box::new(new_op));
-                    return Ok(Self::And(equiv_ops));
-                }
-
-                // check = vec![Box::new(new_op)];
-            }
-            else if substituted.len() > 1 {
-                let mut eq_substituted = substituted.clone();
-                eq_substituted.push(
-                let reduced = Self::simplify_and(substituted, false)?;
-                if let SymOp::And(inner_reduced) = reduced {
-                    // check = inner_reduced;
-                    continue;
-                }
-                else {
-                    // our work here is done
-                    equiv_ops.push(Box::new(reduced));
-                    return Ok(Self::And(equiv_ops));
-                }
-            }
-            else {
-                panic!("zero-length substitution vector");
-            }
-            */
         }
 
         if did_reduce {
@@ -7677,6 +8032,14 @@ impl SymOp {
         
         trace!("simplify_equals: gather_eq_terms = {}", simplified.iter().map(|op| op.to_string()).collect::<Vec<_>>().join(", "));
         
+        let simp = Self::balance_eq_add_constants(simplified)?;
+        
+        trace!("simplify_equals: balance_eq_add_consts = {simp}");
+        
+        let SymOp::Equals(simplified) = *simp else {
+            return Ok(*simp);
+        };
+
         Ok(Self::Equals(simplified))
     }
    
@@ -7843,7 +8206,15 @@ impl SymOp {
                 // TODO: inspect continuation 
                 return Ok(None);
             }
+            Self::LoadedTokenBalance(_name, _owner_op, _balance_op) => {
+                // TODO: inspect continuation 
+                return Ok(None);
+            }
             Self::GetTokenSupply(_name) => {
+                // TODO: inspect continuation
+                return Ok(None);
+            }
+            Self::LoadedTokenSupply(_name, _total_op_opt) => {
                 // TODO: inspect continuation
                 return Ok(None);
             }
@@ -8403,10 +8774,26 @@ impl SymOp {
                         Ok(Self::Constant(Value::Bool(x <= y)))
                     }
                     (x_other, Self::Constant(Value::UInt(y))) => {
-                        Ok(Self::Less(Box::new(x_other), Box::new(Self::Constant(Value::UInt(y + 1)))))
+                        if y < u128::MAX {
+                            Ok(Self::Less(Box::new(x_other), Box::new(Self::Constant(Value::UInt(y + 1)))))
+                        }
+                        else {
+                            Ok(Self::Or(vec![
+                                Box::new(Self::Equals(vec![Box::new(x_other.clone()), Box::new(Self::Constant(Value::UInt(y)))])),
+                                Box::new(Self::Less(Box::new(x_other.clone()), Box::new(Self::Constant(Value::UInt(y))))),
+                            ]))
+                        }
                     }
                     (x_other, Self::Constant(Value::Int(y))) => {
-                        Ok(Self::Less(Box::new(x_other), Box::new(Self::Constant(Value::Int(y + 1)))))
+                        if y < i128::MAX {
+                            Ok(Self::Less(Box::new(x_other), Box::new(Self::Constant(Value::Int(y + 1)))))
+                        }
+                        else {
+                            Ok(Self::Or(vec![
+                                Box::new(Self::Equals(vec![Box::new(x_other.clone()), Box::new(Self::Constant(Value::Int(y)))])),
+                                Box::new(Self::Less(Box::new(x_other.clone()), Box::new(Self::Constant(Value::Int(y))))),
+                            ]))
+                        }
                     }
                     (Self::Constant(Value::UInt(x)), y_other) => {
                         if x > 0 {
@@ -8983,12 +9370,24 @@ impl SymOp {
                 Self::simplify_native_1arg("some", op, |x| Self::ConsSome(x))
             }
             Self::GetTokenBalance(name, op) => Ok(Self::GetTokenBalance(name, Box::new(op.simplify()?))),
+            Self::LoadedTokenBalance(name, op1, op2_opt) => match op2_opt {
+                Some(op2) => Ok(Self::LoadedTokenBalance(name, Box::new(op1.simplify()?), Some(Box::new(op2.simplify()?)))),
+                None => Ok(Self::LoadedTokenBalance(name, Box::new(op1.simplify()?), None)),
+            }
             Self::GetNftOwner(name, op) => Ok(Self::GetNftOwner(name, Box::new(op.simplify()?))),
+            Self::LoadedNftOwner(name, op1, op2_opt) => match op2_opt {
+                Some(op2) => Ok(Self::LoadedNftOwner(name, Box::new(op1.simplify()?), Some(Box::new(op2.simplify()?)))),
+                None => Ok(Self::LoadedNftOwner(name, Box::new(op1.simplify()?), None))
+            }
             Self::TransferToken(name, op1, op2, op3) => Ok(Self::TransferToken(name, Box::new(op1.simplify()?), Box::new(op2.simplify()?), Box::new(op3.simplify()?))),
             Self::TransferNft(name, op1, op2, op3) => Ok(Self::TransferNft(name, Box::new(op1.simplify()?), Box::new(op2.simplify()?), Box::new(op3.simplify()?))),
             Self::MintToken(name, op1, op2) => Ok(Self::MintToken(name, Box::new(op1.simplify()?), Box::new(op2.simplify()?))),
             Self::MintNft(name, op1, op2) => Ok(Self::MintNft(name, Box::new(op1.simplify()?), Box::new(op2.simplify()?))),
             Self::GetTokenSupply(name) => Ok(Self::GetTokenSupply(name)),
+            Self::LoadedTokenSupply(name, op1_opt) => match op1_opt {
+                Some(op1) => Ok(Self::LoadedTokenSupply(name, Some(Box::new(op1.simplify()?)))),
+                None => Ok(Self::LoadedTokenSupply(name, None))
+            }
             Self::BurnToken(name, op) => Ok(Self::BurnToken(name, Box::new(op.simplify()?))),
             Self::BurnNft(name, op1, op2) => Ok(Self::BurnNft(name, Box::new(op1.simplify()?), Box::new(op2.simplify()?))),
             Self::GetStxBalance(op) => Ok(Self::GetStxBalance(Box::new(op.simplify()?))),
@@ -9231,12 +9630,24 @@ impl SymOp {
             Self::ConsOkay(op) => Self::ConsOkay(op.bind_symbol_with_skips(sym_id, symop, skip)),
             Self::ConsSome(op) => Self::ConsSome(op.bind_symbol_with_skips(sym_id, symop, skip)),
             Self::GetTokenBalance(name, op) => Self::GetTokenBalance(name, op.bind_symbol_with_skips(sym_id, symop, skip)),
+            Self::LoadedTokenBalance(name, op1, op2_opt) => match op2_opt {
+                Some(op2) => Self::LoadedTokenBalance(name, op1.bind_symbol_with_skips(sym_id.clone(), symop.clone(), skip), Some(op2.bind_symbol_with_skips(sym_id.clone(), symop.clone(), skip))),
+                None => Self::LoadedTokenBalance(name, op1.bind_symbol_with_skips(sym_id.clone(), symop.clone(), skip), None),
+            }
             Self::GetNftOwner(name, op) => Self::GetNftOwner(name, op.bind_symbol_with_skips(sym_id, symop, skip)),
+            Self::LoadedNftOwner(name, op1, op2_opt) => match op2_opt {
+                Some(op2) => Self::LoadedNftOwner(name, op1.bind_symbol_with_skips(sym_id.clone(), symop.clone(), skip), Some(op2.bind_symbol_with_skips(sym_id.clone(), symop.clone(), skip))),
+                None => Self::LoadedNftOwner(name, op1.bind_symbol_with_skips(sym_id.clone(), symop.clone(), skip), None)
+            }
             Self::TransferToken(name, op1, op2, op3) => Self::TransferToken(name, op1.bind_symbol_with_skips(sym_id.clone(), symop.clone(), skip), op2.bind_symbol_with_skips(sym_id.clone(), symop.clone(), skip), op3.bind_symbol_with_skips(sym_id.clone(), symop.clone(), skip)),
             Self::TransferNft(name, op1, op2, op3) => Self::TransferNft(name, op1.bind_symbol_with_skips(sym_id.clone(), symop.clone(), skip), op2.bind_symbol_with_skips(sym_id.clone(), symop.clone(), skip), op3.bind_symbol_with_skips(sym_id.clone(), symop.clone(), skip)),
             Self::MintToken(name, op1, op2) => Self::MintToken(name, op1.bind_symbol_with_skips(sym_id.clone(), symop.clone(), skip), op2.bind_symbol_with_skips(sym_id.clone(), symop.clone(), skip)),
             Self::MintNft(name, op1, op2) => Self::MintNft(name, op1.bind_symbol_with_skips(sym_id.clone(), symop.clone(), skip), op2.bind_symbol_with_skips(sym_id.clone(), symop.clone(), skip)),
             Self::GetTokenSupply(name) => Self::GetTokenSupply(name),
+            Self::LoadedTokenSupply(name, op1_opt) => match op1_opt {
+                Some(op1) => Self::LoadedTokenSupply(name, Some(op1.bind_symbol_with_skips(sym_id.clone(), symop.clone(), skip))),
+                None => Self::LoadedTokenSupply(name, None)
+            }
             Self::BurnToken(name, op) => Self::BurnToken(name, op.bind_symbol_with_skips(sym_id, symop, skip)),
             Self::BurnNft(name, op1, op2) => Self::BurnNft(name, op1.bind_symbol_with_skips(sym_id.clone(), symop.clone(), skip), op2.bind_symbol_with_skips(sym_id.clone(), symop.clone(), skip)),
             Self::GetStxBalance(op) => Self::GetStxBalance(op.bind_symbol_with_skips(sym_id, symop, skip)),
@@ -9715,10 +10126,20 @@ impl Predicate {
             };
 
             trace!("compress: reduced_retained_ands = {reduced_retained_ands}");
-            return Self::Or(vec![Box::new(reduced_new_ands), Box::new(reduced_retained_ands)]);
+            let mut inner_or = free;
+            inner_or.push(Box::new(reduced_new_ands));
+            inner_or.push(Box::new(reduced_retained_ands));
+            return Self::Or(inner_or);
         }
         else {
-            return reduced_new_ands;
+            if free.len() > 0 {
+                let mut inner_or = free;
+                inner_or.push(Box::new(reduced_new_ands));
+                return Self::Or(inner_or);
+            }
+            else {
+                return reduced_new_ands;
+            }
         }
     }
 }
@@ -9888,6 +10309,14 @@ impl StxAccount {
             )
         ])
     }
+
+    pub fn add(self, other: Self) -> Result<Self, Error> {
+        Ok(Self {
+            total: self.total.add(other.total).simplify()?,
+            locked: self.locked.add(other.locked).simplify()?,
+            expires: self.expires.add(other.expires).simplify()?,
+        })
+    }
 }
 
 /// A symbolic continuation
@@ -9975,11 +10404,15 @@ pub struct Continuation {
     /// which address(es)
     pub reachable_stx_writes: bool,
     /// fungible token balances before evaluation
-    pub pre_ft_state: HashMap<FullName, HashMap<SymOp, SymOp>>,
+    pub pre_ft_state: HashMap<FullName, HashSet<SymOp>>,
     /// fungible token balances after evaluation
     pub ft_state: HashMap<FullName, HashMap<SymOp, SymOp>>,
+    /// fungible token supplies before evaluation
+    pub pre_ft_supplies: HashMap<FullName, SymOp>,
+    /// fungible token supplies after evaluation
+    pub ft_supplies: HashMap<FullName, SymOp>,
     /// NFT ownerships before evaluation
-    pub pre_nft_state: HashMap<FullName, HashMap<SymOp, SymOp>>,
+    pub pre_nft_state: HashMap<FullName, HashSet<SymOp>>,
     /// NFT ownerships after eavluation
     pub nft_state: HashMap<FullName, HashMap<SymOp, SymOp>>,
     /// STX account state before evaluation 
@@ -9995,6 +10428,7 @@ pub struct Continuation {
 impl fmt::Display for Continuation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         writeln!(f, "ID:               {}", &self.id)?;
+        writeln!(f, "Function:         {}", &self.current_function.as_ref().unwrap_or(&"".to_string()))?;
         writeln!(f, "Path:             {}", &self.function_path.as_ref().unwrap_or(&"".to_string()))?;
         writeln!(f, "Panicked:         {}", &self.panicking)?;
         writeln!(f, "Early return:     {}", &self.early_return)?;
@@ -10160,9 +10594,8 @@ impl fmt::Display for Continuation {
             for (ft_name, ft_state) in self.pre_ft_state.iter() {
                 writeln!(f, "   {ft_name}:")?;
                 if ft_state.len() > 0 {
-                    for (owner, balance) in ft_state.iter() {
+                    for owner in ft_state.iter() {
                         writeln!(f, "      Owner:   {owner}")?;
-                        writeln!(f, "      Balance: {balance}")?;
                     }
                 }
                 else {
@@ -10211,14 +10644,35 @@ impl fmt::Display for Continuation {
                 "(none)".to_string()
             })?;
         
+        writeln!(f, "Input fungible token supplies explored:")?;
+        if self.pre_ft_supplies.len() > 0 {
+            for (ft_name, ft_supply) in self.pre_ft_supplies.iter() {
+                writeln!(f, "   Token:  {ft_name}")?;
+                writeln!(f, "   Sppply: {ft_supply}")?;
+            }
+        }
+        else {
+            writeln!(f, "   (empty)")?;
+        }
+
+        writeln!(f, "Output fungible supplies explored:")?;
+        if self.ft_supplies.len() > 0 {
+            for (ft_name, ft_supply) in self.ft_supplies.iter() {
+                writeln!(f, "   Token:  {ft_name}")?;
+                writeln!(f, "   Sppply: {ft_supply}")?;
+            }
+        }
+        else {
+            writeln!(f, "   (empty)")?;
+        }
+        
         writeln!(f, "Input non-fungible tokens explored:")?;
         if self.pre_nft_state.len() > 0 {
             for (nft_name, nft_state) in self.pre_nft_state.iter() {
                 writeln!(f, "   {nft_name}:")?;
                 if nft_state.len() > 0 {
-                    for (owner, nft) in nft_state.iter() {
+                    for owner in nft_state.iter() {
                         writeln!(f, "      Owner: {owner}")?;
-                        writeln!(f, "      Unit:  {nft}")?;
                     }
                 }
                 else {
@@ -10360,6 +10814,8 @@ impl Continuation {
             reachable_stx_writes: false,
             pre_ft_state: HashMap::new(),
             ft_state: HashMap::new(),
+            pre_ft_supplies: HashMap::new(),
+            ft_supplies: HashMap::new(),
             pre_nft_state: HashMap::new(),
             nft_state: HashMap::new(),
             pre_stx_state: HashMap::new(),
@@ -10420,6 +10876,8 @@ impl Continuation {
             reachable_stx_writes: parent.reachable_stx_writes,
             pre_ft_state: parent.pre_ft_state.clone(),
             ft_state: parent.ft_state.clone(),
+            pre_ft_supplies: parent.pre_ft_supplies.clone(),
+            ft_supplies: parent.ft_supplies.clone(),
             pre_nft_state: parent.pre_nft_state.clone(),
             nft_state: parent.nft_state.clone(),
             pre_stx_state: parent.pre_stx_state.clone(),
@@ -10476,6 +10934,7 @@ impl Continuation {
         self.map_state.clear();
         self.map_tombstones.clear();
         self.ft_state.clear();
+        self.ft_supplies.clear();
         self.nft_state.clear();
         self.stx_state.clear();
     }
@@ -10519,13 +10978,15 @@ impl Continuation {
         let predicate = free_predicate.and(parent.predicate.clone().as_symop()).try_as_predicate()?.simplify()?;
 
         let mut final_formula = free.final_formula.clone();
-        let mut skip_symops = HashSet::new();
-        for (sym_id, symop) in bound_formulae.iter() {
-            trace!("Bind final formula symbol {sym_id} = {symop}");
-            final_formula = *final_formula.bind_symbol_with_skips(sym_id.clone(), symop.clone(), &skip_symops);
-            skip_symops.insert(symop.clone());
+        if final_formula != SymOp::Panic {
+            let mut skip_symops = HashSet::new();
+            for (sym_id, symop) in bound_formulae.iter() {
+                trace!("Bind final formula symbol {sym_id} = {symop}");
+                final_formula = *final_formula.bind_symbol_with_skips(sym_id.clone(), symop.clone(), &skip_symops);
+                skip_symops.insert(symop.clone());
+            }
+            final_formula = parent.bind_globals(final_formula).simplify()?;
         }
-        final_formula = parent.bind_globals(final_formula).simplify()?;
        
         let mut pre_var_state = parent.pre_var_state.clone();
         for (name, val) in free.pre_var_state.iter() {
@@ -10685,25 +11146,22 @@ impl Continuation {
 
         let mut pre_ft_state = parent.pre_ft_state.clone();
         for (name, state) in free.pre_ft_state.iter() {
-            for (addr, amount) in state.iter() {
+            for addr in state.iter() {
                 let mut new_addr = addr.clone();
-                let mut new_amount = amount.clone();
                 let mut skip_symops = HashSet::new();
                 for (sym_id, symop) in bound_formulae.iter() {
                     let simp_symop = symop.clone().simplify()?;
                     trace!("Bind pre-existing fungible token balance ({name} {addr}) symbol {sym_id} = {simp_symop}");
                     new_addr = new_addr.bind_symbol_with_skips(sym_id.clone(), simp_symop.clone(), &skip_symops).simplify()?;
-                    new_amount = new_amount.bind_symbol_with_skips(sym_id.clone(), simp_symop.clone(), &skip_symops).simplify()?;
                     skip_symops.insert(simp_symop.clone());
                 }
                 new_addr = parent.bind_globals(new_addr);
-                new_amount = parent.bind_globals(new_amount);
                 if let Some(new_ft_state) = pre_ft_state.get_mut(name) {
-                    new_ft_state.insert(new_addr, new_amount);
+                    new_ft_state.insert(new_addr);
                 }
                 else {
-                    let mut new_ft_state = HashMap::new();
-                    new_ft_state.insert(new_addr, new_amount);
+                    let mut new_ft_state = HashSet::new();
+                    new_ft_state.insert(new_addr);
                     pre_ft_state.insert(name.clone(), new_ft_state);
                 }
             }
@@ -10725,7 +11183,12 @@ impl Continuation {
                 new_addr = parent.bind_globals(new_addr);
                 new_amount = parent.bind_globals(new_amount);
                 if let Some(new_ft_state) = ft_state.get_mut(name) {
-                    new_ft_state.insert(new_addr, new_amount);
+                    if let Some(balance) = new_ft_state.get(&new_addr) {
+                        new_ft_state.insert(new_addr, new_amount.add(balance.clone()).simplify()?);
+                    }
+                    else {
+                        new_ft_state.insert(new_addr, new_amount);
+                    }
                 }
                 else {
                     let mut new_ft_state = HashMap::new();
@@ -10735,27 +11198,64 @@ impl Continuation {
             }
         }
         
+        let mut pre_ft_supplies = parent.pre_ft_supplies.clone();
+        for (name, supply) in free.pre_ft_supplies.iter() {
+            let mut new_supply = supply.clone();
+            let mut skip_symops = HashSet::new();
+            for (sym_id, symop) in bound_formulae.iter() {
+                let simp_symop = symop.clone().simplify()?;
+                trace!("Bind pre-existing fungible token supply {supply} symbol {sym_id} = {simp_symop}");
+                new_supply = new_supply.bind_symbol_with_skips(sym_id.clone(), simp_symop.clone(), &skip_symops).simplify()?;
+                skip_symops.insert(simp_symop.clone());
+            }
+            new_supply = parent.bind_globals(new_supply);
+
+            if let Some(sup) = pre_ft_supplies.remove(name) {
+                pre_ft_supplies.insert(name.clone(), new_supply.add(sup).simplify()?);
+            }
+            else {
+                pre_ft_supplies.insert(name.clone(), new_supply);
+            }
+        }
+        
+        let mut ft_supplies = parent.ft_supplies.clone();
+        for (name, supply) in free.ft_supplies.iter() {
+            let mut new_supply = supply.clone();
+            let mut skip_symops = HashSet::new();
+            for (sym_id, symop) in bound_formulae.iter() {
+                let simp_symop = symop.clone().simplify()?;
+                trace!("Bind fungible token supply {supply} symbol {sym_id} = {simp_symop}");
+                new_supply = new_supply.bind_symbol_with_skips(sym_id.clone(), simp_symop.clone(), &skip_symops).simplify()?;
+                skip_symops.insert(simp_symop.clone());
+            }
+            new_supply = parent.bind_globals(new_supply);
+
+            if let Some(sup) = ft_supplies.remove(name) {
+                ft_supplies.insert(name.clone(), new_supply.add(sup).simplify()?);
+            }
+            else {
+                ft_supplies.insert(name.clone(), new_supply);
+            }
+        }
+        
         let mut pre_nft_state = parent.pre_nft_state.clone();
         for (name, state) in free.pre_nft_state.iter() {
-            for (addr, unit) in state.iter() {
+            for addr in state.iter() {
                 let mut new_addr = addr.clone();
-                let mut new_unit = unit.clone();
                 let mut skip_symops = HashSet::new();
                 for (sym_id, symop) in bound_formulae.iter() {
                     let simp_symop = symop.clone().simplify()?;
-                    trace!("Bind pre-existing non-fungible token ({name} {addr} {unit}) symbol {sym_id} = {simp_symop}");
+                    trace!("Bind pre-existing non-fungible token ({name} {addr}) symbol {sym_id} = {simp_symop}");
                     new_addr = new_addr.bind_symbol_with_skips(sym_id.clone(), simp_symop.clone(), &skip_symops).simplify()?;
-                    new_unit = new_unit.bind_symbol_with_skips(sym_id.clone(), simp_symop.clone(), &skip_symops).simplify()?;
                     skip_symops.insert(simp_symop.clone());
                 }
                 new_addr = parent.bind_globals(new_addr);
-                new_unit = parent.bind_globals(new_unit);
                 if let Some(new_nft_state) = pre_nft_state.get_mut(name) {
-                    new_nft_state.insert(new_addr, new_unit);
+                    new_nft_state.insert(new_addr);
                 }
                 else {
-                    let mut new_nft_state = HashMap::new();
-                    new_nft_state.insert(new_addr, new_unit);
+                    let mut new_nft_state = HashSet::new();
+                    new_nft_state.insert(new_addr);
                     pre_nft_state.insert(name.clone(), new_nft_state);
                 }
             }
@@ -10809,7 +11309,12 @@ impl Continuation {
             new_acct.locked = parent.bind_globals(new_acct.locked);
             new_acct.expires = parent.bind_globals(new_acct.expires);
 
-            pre_stx_state.insert(new_addr, new_acct);
+            if let Some(acct) = pre_stx_state.remove(&new_addr) {
+                pre_stx_state.insert(new_addr, acct.add(new_acct)?);
+            }
+            else {
+                pre_stx_state.insert(new_addr, new_acct);
+            }
         }
         
         let mut stx_state = parent.stx_state.clone();
@@ -10834,7 +11339,12 @@ impl Continuation {
             new_acct.locked = parent.bind_globals(new_acct.locked);
             new_acct.expires = parent.bind_globals(new_acct.expires);
 
-            stx_state.insert(new_addr, new_acct);
+            if let Some(acct) = stx_state.remove(&new_addr) {
+                stx_state.insert(new_addr, acct.add(new_acct)?);
+            }
+            else {
+                stx_state.insert(new_addr, new_acct);
+            }
         }
 
         let mut cont = Self {
@@ -10864,6 +11374,8 @@ impl Continuation {
             stx_accesses,
             pre_ft_state,
             ft_state,
+            pre_ft_supplies,
+            ft_supplies,
             pre_nft_state,
             nft_state,
             pre_stx_state,
@@ -11022,6 +11534,57 @@ impl Continuation {
         }
         false
     }
+
+    pub fn lookup_ft_balance(&mut self, name: &ClarityName, addr: &SymOp) -> Option<&SymOp> {
+        let fq_name = FullName(self.get_current_contract_id(), name.clone());
+
+        // no need to claim that this is "possibly" reached
+        self.reachable_ft_reads.remove(&fq_name);
+        self.inner_lookup_ft_balance(&fq_name, addr)
+    }
+
+    /// Look up a fungible token balance
+    fn inner_lookup_ft_balance(&self, name: &FullName, addr: &SymOp) -> Option<&SymOp> {
+        if let Some(balances) = self.ft_state.get(name) {
+            if let Some(val) = balances.get(addr) {
+                return Some(val);
+            }
+        }
+    
+        if let Some(pre_balances) = self.ft_state.get(name) {
+            if let Some(val) = pre_balances.get(addr) {
+                return Some(val);
+            }
+        }
+
+        None
+    }
+    
+    /// Look up a fungible token supply
+    fn inner_lookup_ft_supply(&self, name: &FullName) -> Option<&SymOp> {
+        if let Some(val) = self.ft_supplies.get(name) {
+            Some(val)
+        }
+        else if let Some(val) = self.pre_ft_supplies.get(name) {
+            Some(val)
+        }
+        else {
+            None
+        }
+    }
+
+    /// Increase the fungible token supply
+    fn increase_ft_supply(&mut self, name: &FullName, amount: SymOp) -> Result<(), Error> {
+        if let Some(cur_amount) = self.inner_lookup_ft_supply(name) {
+            let new_amount = cur_amount.clone().add(amount.clone()).simplify()?;
+            self.ft_supplies.insert(name.clone(), new_amount);
+        }
+        else {
+            let op = SymOp::LoadedTokenSupply(name.clone(), None);
+            self.ft_supplies.insert(name.clone(), op.add(amount).simplify()?);
+        }
+        Ok(())
+    }
     
     /// Look up a STX account
     fn inner_lookup_stx_account(&self, addr: &SymOp) -> Option<&StxAccount> {
@@ -11147,7 +11710,7 @@ impl Continuation {
     /// symop should be simplified
     pub fn set_data_var(&mut self, name: &ClarityName, symop: SymOp) {
         let fqname = FullName(self.get_current_contract_id(), name.clone());
-        self.var_state.insert(fqname.clone(), symop); // SymOp::LoadedDataVariable(fqname, Box::new(symop)));
+        self.var_state.insert(fqname.clone(), symop);
 
         // no need to claim that this is "possibly" reached
         self.reachable_var_writes.remove(&fqname);
@@ -11220,6 +11783,27 @@ impl Continuation {
         // no need to claim that this is "possibly" reached
         self.reachable_map_writes.remove(&name);
         present
+    }
+    
+    /// Record that a token balance accessed, and possibly had the given value at the time
+    pub fn read_ft_balance(&mut self, name: ClarityName, addr_symop: SymOp, balance_symop: Option<SymOp>, line: u32) {
+        let name = FullName(self.get_current_contract_id(), name.clone());
+        if balance_symop.is_none() {
+            // this is the first time this was accessed, so it's input
+            if let Some(recs) = self.pre_ft_state.get_mut(&name) {
+                recs.insert(addr_symop.clone());
+            }
+            else {
+                let mut recs = HashSet::new();
+                recs.insert(addr_symop.clone());
+                self.pre_ft_state.insert(name.clone(), recs);
+            }
+        }
+        self.ft_accesses.insert(FtAccess {
+            name,
+            addr: addr_symop,
+            line
+        });
     }
 
     /// Compute a trace of how this continuation arrived to where it did
@@ -11403,6 +11987,8 @@ impl Continuation {
             map_tombstones: self.map_tombstones.clone(),
             pre_ft_state: self.pre_ft_state.clone(),
             ft_state: self.ft_state.clone(),
+            pre_ft_supplies: self.pre_ft_supplies.clone(),
+            ft_supplies: self.ft_supplies.clone(),
             pre_nft_state: self.pre_nft_state.clone(),
             nft_state: self.nft_state.clone(),
             pre_stx_state: self.pre_stx_state.clone(),
@@ -11793,6 +12379,7 @@ impl Continuation {
             || self.map_state != other.map_state
             || self.map_tombstones != other.map_tombstones
             || self.ft_state != other.ft_state
+            || self.ft_supplies != other.ft_supplies
             || self.nft_state != other.nft_state
             || self.stx_state != other.stx_state
             || !cmp_final_formula(&self.final_formula, &other.final_formula)
@@ -11860,6 +12447,7 @@ impl Continuation {
         let mut pre_map_state = self.pre_map_state.clone();
         let mut pre_var_state = self.pre_var_state.clone();
         let mut pre_ft_state = self.pre_ft_state.clone();
+        let mut pre_ft_supplies = self.pre_ft_supplies.clone();
         let mut pre_nft_state = self.pre_nft_state.clone();
         let mut pre_stx_state = self.pre_stx_state.clone();
         
@@ -11901,6 +12489,7 @@ impl Continuation {
             pre_map_state.extend(other.pre_map_state.into_iter());
             pre_var_state.extend(other.pre_var_state.into_iter());
             pre_ft_state.extend(other.pre_ft_state.into_iter());
+            pre_ft_supplies.extend(other.pre_ft_supplies.into_iter());
             pre_nft_state.extend(other.pre_nft_state.into_iter());
             pre_stx_state.extend(other.pre_stx_state.into_iter());
         }
@@ -11952,6 +12541,8 @@ impl Continuation {
             map_tombstones: self.map_tombstones.clone(),
             pre_ft_state,
             ft_state: self.ft_state.clone(),
+            pre_ft_supplies,
+            ft_supplies: self.ft_supplies.clone(),
             pre_nft_state,
             nft_state: self.nft_state.clone(),
             pre_stx_state,
@@ -12013,6 +12604,9 @@ impl Continuation {
             for (addr, acct) in state.iter() {
                 ft_stmts.push(SymOp::Equals(vec![Box::new(SymOp::GetTokenBalance(name.clone(), Box::new(addr.clone()))), Box::new(acct.clone())]));
             }
+        }
+        for (name, supply) in self.ft_supplies.iter() {
+            ft_stmts.push(SymOp::Equals(vec![Box::new(SymOp::GetTokenSupply(name.clone())), Box::new(supply.clone())]));
         }
         for (name, state) in self.nft_state.iter() {
             for (addr, unit) in state.iter() {
@@ -12922,6 +13516,11 @@ pub struct SymContract {
     symbols: Vec<SymbolicExpression>,
     contract_context: ContractContext,
     function_symexps: HashMap<ClarityName, SymbolicExpression>,
+    /// map token name to max supply.
+    /// fungible tokens with no max supply implicitly have a max supply of u128::MAX
+    fungible_tokens: HashMap<ClarityName, u128>,
+    /// map token name to type
+    nonfungible_tokens: HashMap<ClarityName, TypeSignature>,
     src: String,
 }
 
@@ -12967,6 +13566,92 @@ impl SymContract {
         ret
     }
 
+    /// Given a list of symbolic expressions in a contract, go and find the list of fungible token
+    /// definitions.
+    /// Return the set of names and their optional maximum supplies
+    fn extract_fungible_token_symexps(exprs: &[SymbolicExpression]) -> HashMap<ClarityName, u128> {
+        let mut ret = HashMap::new();
+        for expr in exprs.iter() {
+            let Some(lv) = expr.match_list() else {
+                continue;
+            };
+            if lv.len() < 2 {
+                continue;
+            }
+            let Some(def_expr) = lv.get(0) else {
+                continue;
+            };
+            let Some(name_expr) = lv.get(1) else {
+                continue;
+            };
+            let Some(def) = def_expr.match_atom() else {
+                continue;
+            };
+
+            let max_supply_expr_opt = lv.get(2);
+
+            if def.as_str() != "define-fungible-token" {
+                continue;
+            }
+            let Some(name) = name_expr.match_atom() else {
+                continue;
+            };
+            let value = match max_supply_expr_opt {
+                Some(expr) => {
+                    if let Some(Value::UInt(supply)) = expr.match_literal_value() {
+                        *supply
+                    }
+                    else {
+                        continue;
+                    }
+                },
+                None => u128::MAX
+            };
+            ret.insert(name.clone(), value);
+        }
+        ret
+    }
+
+    /// Given a list of symbolic expressions in a contract, go and find the list of nonfungible
+    /// token definitions.
+    /// Return the set of names and their type definitions
+    fn extract_nonfungible_token_symexps(exprs: &[SymbolicExpression]) -> HashMap<ClarityName, TypeSignature> {
+        let mut ret = HashMap::new();
+        for expr in exprs.iter() {
+            let Some(lv) = expr.match_list() else {
+                continue;
+            };
+            if lv.len() != 3 {
+                continue;
+            }
+            let Some(def_expr) = lv.get(0) else {
+                continue;
+            };
+            let Some(name_expr) = lv.get(1) else {
+                continue;
+            };
+            let Some(type_expr) = lv.get(2) else {
+                continue;
+            };
+            let Some(def) = def_expr.match_atom() else {
+                continue;
+            };
+
+            if def.as_str() != "define-non-fungible-token" {
+                continue;
+            }
+            let Some(name) = name_expr.match_atom() else {
+                continue;
+            };
+            let ts = TypeSignature::parse_type_repr(DEFAULT_STACKS_EPOCH, type_expr, &mut ())
+                .expect("unreachable -- type signature is not parsable");
+
+            ret.insert(name.clone(), ts);
+        }
+        ret
+    }
+    
+    /// Create a new sym contract
     pub fn new(id: QualifiedContractIdentifier, typemap: TypeMap, symbols: Vec<SymbolicExpression>, contract_context: ContractContext, src: &str) -> Self {
         let function_symexps = Self::extract_function_symexps(&symbols);
         let function_symexps_len = function_symexps.len();
@@ -12974,12 +13659,16 @@ impl SymContract {
         if function_symexps_len != function_symexps_table.len() {
             panic!("BUG: duplicate function symexp");
         }
+        let fungible_tokens = Self::extract_fungible_token_symexps(&symbols);
+        let nonfungible_tokens = Self::extract_nonfungible_token_symexps(&symbols);
 
         Self {
             id,
             typemap,
             symbols,
             contract_context,
+            fungible_tokens,
+            nonfungible_tokens,
             function_symexps: function_symexps_table,
             src: src.to_string(),
         }
@@ -12987,6 +13676,10 @@ impl SymContract {
 
     pub fn get_function_symexp(&self, name: &ClarityName) -> Option<&SymbolicExpression> {
         self.function_symexps.get(name)
+    }
+
+    pub fn get_max_ft_supply(&self, ft_name: &ClarityName) -> Option<u128> {
+        self.fungible_tokens.get(ft_name).map(|s| *s)
     }
 }
 
@@ -13227,6 +13920,8 @@ impl Symbex {
                     || c.var_state != cont.var_state
                     || c.pre_ft_state != cont.pre_ft_state
                     || c.ft_state != cont.ft_state
+                    || c.pre_ft_supplies != cont.pre_ft_supplies
+                    || c.ft_supplies != cont.ft_supplies
                     || c.pre_nft_state != cont.pre_nft_state
                     || c.nft_state != cont.nft_state
                     || c.pre_stx_state != cont.pre_stx_state
@@ -14074,12 +14769,6 @@ impl Symbex {
                 };
                 for cont in precomputed_conts.iter() {
                     let eval_cont = Continuation::from_evaluated(&config, cont, format!("{function_name}.evaled/body"), binding_cont_rc.clone())?;
-                    if eval_cont.panicking {
-                        debug!("Continuation {} (id {}) panics", eval_cont.get_function_path(), eval_cont.id);
-                        final_conts.push(eval_cont);
-                        pushed += 1;
-                        continue;
-                    }
                     if eval_cont.predicate == Predicate::False {
                         debug!("Continuation {} (id {}) is unreachable", eval_cont.get_function_path(), eval_cont.id);
                         unreachable += 1;
@@ -14093,6 +14782,13 @@ impl Symbex {
 
                     if !always_explore && config.drop_early_returns.contains(&fq_name) && eval_cont.early_return {
                         debug!("Will not evaluate early-return continuation {} (free continuation {}) of {fq_name}", eval_cont.id, cont.id);
+                        continue;
+                    }
+
+                    if eval_cont.panicking {
+                        debug!("Continuation {} (id {}) panics", eval_cont.get_function_path(), eval_cont.id);
+                        final_conts.push(eval_cont);
+                        pushed += 1;
                         continue;
                     }
 
@@ -15183,7 +15879,13 @@ impl Symbex {
                                     )?
                                 }
                                 "principal-of" => {
-                                    todo!();
+                                    self.eval_native_1arg(
+                                        &config,
+                                        continuation,
+                                        function_base_name.as_str(),
+                                        lv.get(1).ok_or_else(|| Error::Bug(format!("Missing arguments to {function_name}")))?.clone(),
+                                        |initial| SymOp::PrincipalOf(Box::new(initial))
+                                    )?
                                 }
                                 "get-burn-block-info?" => {
                                     let Some(prop_sym) = lv.get(1) else {
@@ -15196,7 +15898,7 @@ impl Symbex {
                                         return Err(Error::Bug(format!("Missing argument 1 to {function_name}")));
                                     };
 
-                                    let query_cont = Continuation::from_parent(Rc::new(continuation), format!("{function_name}.query-value"),prop_sym.span.start_line);
+                                    let query_cont = Continuation::from_parent(Rc::new(continuation), format!("{function_name}.query-value"), prop_sym.span.start_line);
 
                                     let mut conts = self.eval(&config, query_cont, query_sym)?;
                                     for cont in conts.iter_mut() {
@@ -15421,27 +16123,387 @@ impl Symbex {
                                     )?
                                 }
                                 "ft-get-balance" => {
+                                    let Some(name_expr) = lv.get(1) else {
+                                        return Err(Error::Bug(format!("Missing argument 1 to {function_name}")));
+                                    };
+                                    let Some(addr_expr) = lv.get(2) else {
+                                        return Err(Error::Bug(format!("Missing argument 2 to {function_name}")));
+                                    };
+                                    let Some(name) = name_expr.match_atom() else {
+                                        return Err(Error::Bug(format!("Token name is not an atom: {name_expr}")));
+                                    };
+
+                                    let full_token_name = FullName(continuation.get_current_contract_id(), name.clone());
+                                    let addr_cont = Continuation::from_parent(Rc::new(continuation), format!("{function_name}.address_eval"), addr_expr.span.start_line);
+                                    let mut conts = self.eval(&config, addr_cont, addr_expr)?;
+
+                                    for cont in conts.iter_mut() {
+                                        if cont.halted() {
+                                            continue;
+                                        }
+
+                                        let addr_formula = cont.final_formula.clone();
+                                        let balance = match cont.lookup_ft_balance(name, &addr_formula) {
+                                            Some(balance_op) => Some(Box::new(balance_op.clone())),
+                                            None => None
+                                        };
+
+                                        if balance.is_none() {
+                                            cont.read_ft_balance(name.clone(), addr_formula.clone(), None, body.span.start_line);
+                                            cont.final_formula = SymOp::LoadedTokenBalance(full_token_name.clone(), Box::new(addr_formula), None);
+                                        }
+                                        else {
+                                            cont.final_formula = SymOp::LoadedTokenBalance(full_token_name.clone(), Box::new(addr_formula), balance);
+                                        }
+                                    }
+
+                                    conts
+                                }
+                                "ft-transfer?" => {
+                                    let Some(name_expr) = lv.get(1) else {
+                                        return Err(Error::Bug(format!("Missing argument 1 to {function_name}")));
+                                    };
+                                    let Some(amount_expr) = lv.get(2) else {
+                                        return Err(Error::Bug(format!("Missing argument 2 to {function_name}")));
+                                    };
+                                    let Some(sender_expr) = lv.get(3) else {
+                                        return Err(Error::Bug(format!("Missing argument 3 to {function_name}")));
+                                    };
+                                    let Some(recipient_expr) = lv.get(4) else {
+                                        return Err(Error::Bug(format!("Missing argument 4 to {function_name}")));
+                                    };
+                                    let Some(name) = name_expr.match_atom() else {
+                                        return Err(Error::Bug(format!("Token name is not an atom: {name_expr}")));
+                                    };
+
+                                    let full_token_name = FullName(continuation.get_current_contract_id(), name.clone());
+                                    let amount_cont = Continuation::from_parent(Rc::new(continuation), format!("{function_name}.amount_eval"), amount_expr.span.start_line);
+                                    let amount_conts = self.eval(&config, amount_cont, amount_expr)?;
+                                    let mut final_conts = vec![];
+                                    for cont in amount_conts.into_iter() {
+                                        if cont.halted() || cont.predicate == Predicate::False {
+                                            final_conts.push(cont);
+                                            continue;
+                                        }
+                                        let amount_op = cont.final_formula.clone();
+                                        
+                                        let sender_cont = Continuation::from_parent(Rc::new(cont), format!("{function_name}.sender_eval"), sender_expr.span.start_line);
+                                        let sender_conts = self.eval(&config, sender_cont, sender_expr)?;
+                                        for sender_cont in sender_conts.into_iter() {
+                                            if sender_cont.halted() || sender_cont.predicate == Predicate::False {
+                                                final_conts.push(sender_cont);
+                                                continue;
+                                            }
+
+                                            let sender_addr = sender_cont.final_formula.clone();
+                                            let recipient_cont = Continuation::from_parent(Rc::new(sender_cont), format!("{function_name}.recipient_eval"), recipient_expr.span.start_line);
+                                            let recipient_conts = self.eval(&config, recipient_cont, recipient_expr)?;
+                                            for mut recipient_cont in recipient_conts.into_iter() {
+                                                if recipient_cont.halted() || recipient_cont.predicate == Predicate::False {
+                                                    final_conts.push(recipient_cont);
+                                                    continue;
+                                                }
+
+                                                // since we evaluate amount, sender, and recipient
+                                                // *before* checking the amount validity, we will
+                                                // do so now instead of earlier.
+                                                // There are four cases:
+                                                // * The transfer works
+                                                // * The transfer fails with (err u1) because the
+                                                // sender doesn't have enough tokens
+                                                // * The transfer fails with (err u2) if the sender
+                                                // and recipient are the same
+                                                // * The transfer fails with (err u3) if the amount
+                                                // is non-positive (i.e. 0)
+                                                let sender_balance = if let Some(b) = recipient_cont.lookup_ft_balance(name, &sender_addr) {
+                                                    SymOp::LoadedTokenBalance(full_token_name.clone(), Box::new(sender_addr.clone()), Some(Box::new(b.clone())))
+                                                }
+                                                else {
+                                                    recipient_cont.read_ft_balance(name.clone(), sender_addr.clone(), None, body.span.start_line);
+                                                    SymOp::LoadedTokenBalance(full_token_name.clone(), Box::new(sender_addr.clone()), None)
+                                                };
+
+                                                let recipient_addr = recipient_cont.final_formula.clone();
+                                                let sender_eq_recipient = SymOp::Equals(vec![Box::new(sender_addr.clone()), Box::new(recipient_addr.clone())]);
+                                                let sender_insufficient_balance = SymOp::Less(Box::new(sender_balance.clone()), Box::new(amount_op.clone()));
+                                                let sender_sufficient_balance = SymOp::Geq(Box::new(sender_balance.clone()), Box::new(amount_op.clone()));
+                                                let amount_positive = SymOp::Less(Box::new(SymOp::Constant(Value::UInt(0))), Box::new(amount_op.clone()));
+                                                let amount_zero = SymOp::Equals(vec![Box::new(SymOp::Constant(Value::UInt(0))), Box::new(amount_op.clone())]);
+
+                                                let recipient_cont_rc = Rc::new(recipient_cont);
+
+                                                // the implementation checks for non-positive
+                                                // transfer first
+                                                let mut zero_transfer_cont = Continuation::from_parent(recipient_cont_rc.clone(), format!("{function_name}.nonpositive-transfer"), body.span.start_line);
+                                                zero_transfer_cont.final_formula = SymOp::ConsError(Box::new(SymOp::Constant(Value::UInt(3))));
+                                                zero_transfer_cont.predicate = zero_transfer_cont.predicate
+                                                    .clone()
+                                                    .as_symop()
+                                                    .and(amount_zero.clone())
+                                                    .try_as_predicate()?;
+
+                                                // the implementation checks if the sender is the
+                                                // recipient next
+                                                let mut sender_is_recipient_cont = Continuation::from_parent(recipient_cont_rc.clone(), format!("{function_name}.sender-eq-recipient"), body.span.start_line);
+                                                sender_is_recipient_cont.final_formula = SymOp::ConsError(Box::new(SymOp::Constant(Value::UInt(2))));
+                                                sender_is_recipient_cont.predicate = sender_is_recipient_cont.predicate
+                                                    .clone()
+                                                    .as_symop()
+                                                    .and(amount_positive.clone())
+                                                    .and(sender_eq_recipient.clone())
+                                                    .try_as_predicate()?;
+
+                                                // the implementation checks if the sender has
+                                                // enough balance after that
+                                                let mut sender_insufficient_balance_cont = Continuation::from_parent(recipient_cont_rc.clone(), format!("{function_name}.sender-insufficient-balance"), body.span.start_line);
+                                                sender_insufficient_balance_cont.final_formula = SymOp::ConsError(Box::new(SymOp::Constant(Value::UInt(1))));
+                                                sender_insufficient_balance_cont.predicate = sender_insufficient_balance_cont.predicate
+                                                    .clone()
+                                                    .as_symop()
+                                                    .and(amount_positive.clone())
+                                                    .and(SymOp::Not(Box::new(sender_eq_recipient.clone())))
+                                                    .and(sender_insufficient_balance)
+                                                    .try_as_predicate()?;
+
+                                                // finally, the implementation carries out the
+                                                // transfer
+                                                let mut success_cont = Continuation::from_parent(recipient_cont_rc.clone(), format!("{function_name}.success"), body.span.start_line);
+                                                success_cont.final_formula = SymOp::ConsOkay(Box::new(SymOp::Constant(Value::Bool(true))));
+                                                success_cont.predicate = success_cont.predicate
+                                                    .clone()
+                                                    .as_symop()
+                                                    .and(amount_positive.clone())
+                                                    .and(SymOp::Not(Box::new(sender_eq_recipient)))
+                                                    .and(sender_sufficient_balance.clone())
+                                                    .try_as_predicate()?;
+
+                                                final_conts.push(zero_transfer_cont);
+                                                final_conts.push(sender_is_recipient_cont);
+                                                final_conts.push(sender_insufficient_balance_cont);
+                                                final_conts.push(success_cont);
+                                            }
+                                        }
+                                    }
+                                    final_conts
+                                }
+                                "ft-mint?" => {
+                                    let Some(name_expr) = lv.get(1) else {
+                                        return Err(Error::Bug(format!("Missing argument 1 to {function_name}")));
+                                    };
+                                    let Some(amount_expr) = lv.get(2) else {
+                                        return Err(Error::Bug(format!("Missing argument 2 to {function_name}")));
+                                    };
+                                    let Some(addr_expr) = lv.get(3) else {
+                                        return Err(Error::Bug(format!("Missing argument 3 to {function_name}")));
+                                    };
+                                    let Some(name) = name_expr.match_atom() else {
+                                        return Err(Error::Bug(format!("Token name is not an atom: {name_expr}")));
+                                    };
+
+                                    let full_token_name = FullName(continuation.get_current_contract_id(), name.clone());
+                                    let Some(sym_contract) = self.contracts.get(&cur_contract) else {
+                                        return Err(Error::NotFound(format!("Missing contract {cur_contract}")));
+                                    };
+                                    let max_supply = sym_contract.get_max_ft_supply(&name).ok_or_else(|| Error::Bug(format!("No such fungible token `{name}` in {cur_contract}")))?;
+
+                                    let amount_cont = Continuation::from_parent(Rc::new(continuation), format!("{function_name}.amount_eval"), amount_expr.span.start_line);
+                                    let amount_conts = self.eval(&config, amount_cont, amount_expr)?;
+                                    let mut final_conts = vec![];
+                                    for cont in amount_conts.into_iter() {
+                                        if cont.halted() {
+                                            final_conts.push(cont);
+                                            continue;
+                                        }
+                                        if cont.predicate == Predicate::False {
+                                            final_conts.push(cont);
+                                            continue;
+                                        }
+                                        let mint_op = cont.final_formula.clone();
+
+                                        let addr_cont = Continuation::from_parent(Rc::new(cont), format!("{function_name}.addr_eval"), addr_expr.span.start_line);
+                                        let addr_conts = self.eval(&config, addr_cont, addr_expr)?;
+                                        for mut addr_cont in addr_conts.into_iter() {
+                                            if addr_cont.halted() {
+                                                final_conts.push(addr_cont);
+                                                continue;
+                                            }
+                                            if addr_cont.predicate == Predicate::False {
+                                                final_conts.push(addr_cont);
+                                                continue;
+                                            }
+
+                                            let addr_formula = addr_cont.final_formula.clone();
+                                            let balance_op = if let Some(b) = addr_cont.lookup_ft_balance(name, &addr_formula) {
+                                                SymOp::LoadedTokenBalance(full_token_name.clone(), Box::new(addr_formula), Some(Box::new(b.clone())))
+                                            }
+                                            else {
+                                                addr_cont.read_ft_balance(name.clone(), addr_formula.clone(), None, body.span.start_line);
+                                                SymOp::LoadedTokenBalance(full_token_name.clone(), Box::new(addr_formula), None)
+                                            };
+
+                                            let updated_balance_op = SymOp::Add(vec![Box::new(balance_op), Box::new(mint_op.clone())]);
+
+                                            // three possibilities:
+                                            // * minted 0 tokens, in which case, this continuation
+                                            // evaluates to (err 1).  BUT, we had to evaluate the
+                                            // address first, since that's what the implementation
+                                            // does.
+                                            // * overflowed the supply, in which case, this
+                                            // continuation panics.  BUT, we had to evaluate the
+                                            // address first, since that's what the implementation
+                                            // does.
+                                            // * successfully mints tokens to the given address.
+
+                                            let addr_cont_rc = Rc::new(addr_cont);
+
+                                            let mut mint_0_cont = Continuation::from_parent(addr_cont_rc.clone(), format!("{function_name}.nonpositive-mint"), body.span.start_line);
+                                            mint_0_cont.final_formula = SymOp::ConsError(Box::new(SymOp::Constant(Value::UInt(1))));
+                                            mint_0_cont.predicate = mint_0_cont.predicate
+                                                .clone()
+                                                .as_symop()
+                                                .and(SymOp::Equals(vec![Box::new(mint_op.clone()), Box::new(SymOp::Constant(Value::UInt(0)))]))
+                                                .try_as_predicate()?;
+
+                                            let mut final_cont = Continuation::from_parent(addr_cont_rc.clone(), format!("{function_name}.success"), body.span.start_line);
+                                            final_cont.final_formula = SymOp::ConsOkay(Box::new(SymOp::Constant(Value::Bool(true))));
+                                            final_cont.predicate = final_cont.predicate
+                                                .clone()
+                                                .as_symop()
+                                                .and(SymOp::Less(Box::new(SymOp::Constant(Value::UInt(0))), Box::new(mint_op.clone())))
+                                                .and(SymOp::Leq(Box::new(updated_balance_op.clone()), Box::new(SymOp::Constant(Value::UInt(max_supply)))))
+                                                .try_as_predicate()?;
+
+                                            final_cont.increase_ft_supply(&full_token_name, mint_op.clone())?;
+                                            debug!("new supply is {:?}", final_cont.inner_lookup_ft_supply(&full_token_name));
+
+                                            final_conts.push(mint_0_cont);
+                                            final_conts.push(final_cont);
+
+                                            let mut supply_overflow_cont = Continuation::from_parent(addr_cont_rc.clone(), format!("{function_name}.supply-overflow"), body.span.start_line);
+                                            supply_overflow_cont.final_formula = SymOp::Panic;
+                                            supply_overflow_cont.panicking = true;
+                                            supply_overflow_cont.predicate = supply_overflow_cont.predicate
+                                                .clone()
+                                                .as_symop()
+                                                .and(SymOp::Less(
+                                                    Box::new(SymOp::Constant(Value::UInt(max_supply))),
+                                                    Box::new(updated_balance_op.clone())
+                                                ))
+                                                .try_as_predicate()?;
+                                            final_conts.push(supply_overflow_cont);
+
+                                            debug!("max_supply of {full_token_name} is {max_supply}; {}", max_supply < u128::MAX);
+                                        }
+                                    }
+                                    final_conts
+                                }
+                                "ft-get-supply" => {
+                                    let Some(name_expr) = lv.get(1) else {
+                                        return Err(Error::Bug(format!("Missing argument 1 to {function_name}")));
+                                    };
+                                    let Some(name) = name_expr.match_atom() else {
+                                        return Err(Error::Bug(format!("Token name is not an atom: {name_expr}")));
+                                    };
+
+                                    let full_token_name = FullName(continuation.get_current_contract_id(), name.clone());
+                                    let mut cont = Continuation::from_parent(Rc::new(continuation), format!("{function_name}.return"), body.span.start_line);
+                                    if let Some(supply) = cont.inner_lookup_ft_supply(&full_token_name) {
+                                        cont.final_formula = supply.clone();
+                                    }
+                                    else {
+                                        cont.final_formula = SymOp::LoadedTokenSupply(full_token_name, None);
+                                    }
+                                    vec![cont]
+                                }
+                                "ft-burn?" => {
+                                    let Some(name_expr) = lv.get(1) else {
+                                        return Err(Error::Bug(format!("Missing argument 1 to {function_name}")));
+                                    };
+                                    let Some(amount_expr) = lv.get(2) else {
+                                        return Err(Error::Bug(format!("Missing argument 2 to {function_name}")));
+                                    };
+                                    let Some(addr_expr) = lv.get(3) else {
+                                        return Err(Error::Bug(format!("Missing argument 3 to {function_name}")));
+                                    };
+                                    let Some(name) = name_expr.match_atom() else {
+                                        return Err(Error::Bug(format!("Token name is not an atom: {name_expr}")));
+                                    };
+
+                                    let full_token_name = FullName(continuation.get_current_contract_id(), name.clone());
+                                    let amount_cont = Continuation::from_parent(Rc::new(continuation), format!("{function_name}.amount-eval"), amount_expr.span.start_line);
+                                    let amount_conts = self.eval(&config, amount_cont, amount_expr)?;
+                                    let mut final_conts = vec![];
+                                    for amount_cont in amount_conts.into_iter() {
+                                        if amount_cont.halted() || amount_cont.predicate == Predicate::False {
+                                            final_conts.push(amount_cont);
+                                            continue;
+                                        }
+                                        let amount_op = amount_cont.final_formula.clone();
+                                        let addr_cont = Continuation::from_parent(Rc::new(amount_cont), format!("{function_name}.addr-eval"), addr_expr.span.start_line);
+                                        let addr_conts = self.eval(&config, addr_cont, amount_expr)?;
+                                        for mut addr_cont in addr_conts.into_iter() {
+                                            if addr_cont.halted() || addr_cont.predicate == Predicate::False {
+                                                final_conts.push(addr_cont);
+                                                continue;
+                                            }
+
+                                            // three outcomes, in this order, once both the amount
+                                            // and address are evaluated:
+                                            // * if we burn 0 tokens, then this fails with (err u1)
+                                            // * if we exceed the sender balance, then this fails
+                                            // with (err u1)
+                                            // * this succeeds
+
+                                            // we can combine the first and second outcomes since
+                                            // they have the same error formula.
+                                            let addr_formula = addr_cont.final_formula.clone();
+                                            let sender_balance = if let Some(b) = addr_cont.lookup_ft_balance(name, &addr_formula) {
+                                                SymOp::LoadedTokenBalance(full_token_name.clone(), Box::new(addr_formula.clone()), Some(Box::new(b.clone())))
+                                            }
+                                            else {
+                                                addr_cont.read_ft_balance(name.clone(), addr_formula.clone(), None, body.span.start_line);
+                                                SymOp::LoadedTokenBalance(full_token_name.clone(), Box::new(addr_formula.clone()), None)
+                                            };
+                                            let amount_is_zero = SymOp::Equals(vec![Box::new(SymOp::Constant(Value::UInt(0))), Box::new(amount_op.clone())]);
+                                            let amount_is_positive = SymOp::Less(Box::new(SymOp::Constant(Value::UInt(0))), Box::new(amount_op.clone()));
+                                            let amount_exceeds_balance = SymOp::Less(Box::new(sender_balance.clone()), Box::new(amount_op.clone()));
+                                            let amount_valid = SymOp::Geq(Box::new(sender_balance.clone()), Box::new(amount_op.clone()));
+
+                                            let addr_cont_rc = Rc::new(addr_cont);
+
+                                            let mut zero_or_excessive_tokens = Continuation::from_parent(addr_cont_rc.clone(), format!("{function_name}.zero-or-excessive-tokens-burnt"), body.span.start_line);
+                                            zero_or_excessive_tokens.final_formula = SymOp::ConsError(Box::new(SymOp::Constant(Value::UInt(1))));
+                                            zero_or_excessive_tokens.predicate = zero_or_excessive_tokens.predicate
+                                                .clone()
+                                                .as_symop()
+                                                .and(SymOp::Or(vec![
+                                                    Box::new(amount_is_zero.clone()),
+                                                    Box::new(amount_exceeds_balance.clone())
+                                                ]))
+                                                .try_as_predicate()?;
+
+                                            let mut success = Continuation::from_parent(addr_cont_rc.clone(), format!("{function_name}.success"), body.span.start_line);
+                                            success.final_formula = SymOp::ConsOkay(Box::new(SymOp::Constant(Value::Bool(true))));
+                                            success.predicate = success.predicate
+                                                .clone()
+                                                .as_symop()
+                                                .and(amount_is_positive.clone())
+                                                .and(amount_valid.clone())
+                                                .try_as_predicate()?;
+
+                                            final_conts.push(zero_or_excessive_tokens);
+                                            final_conts.push(success);
+                                        }
+                                    }
+                                    final_conts
+                                }
+                                "nft-mint?" => {
                                     todo!();
                                 }
                                 "nft-get-owner?" => {
                                     todo!();
                                 }
-                                "ft-transfer?" => {
-                                    todo!();
-                                }
                                 "nft-transfer?" => {
-                                    todo!();
-                                }
-                                "ft-mint?" => {
-                                    todo!();
-                                }
-                                "nft-mint?" => {
-                                    todo!();
-                                }
-                                "ft-get-supply" => {
-                                    todo!();
-                                }
-                                "ft-burn?" => {
                                     todo!();
                                 }
                                 "nft-burn?" => {
@@ -16953,7 +18015,7 @@ impl Symbex {
                     let symid : SymId = cn.as_str().into();
                     let Some(formula) = cont.lookup_formula(&symid) else {
                         error!("Faulty cont looking for '{}'", &symid);
-                        error!("{}", &cont);
+                        error!("\n{}", &cont);
                         error!("Trace:\n{}", cont.trace());
                         return Err(Error::Bug(format!("Unbound formula '{}'", &cn)));
                     };
@@ -17689,7 +18751,6 @@ impl Symbex {
             let (func_config, conts) = self.inner_eval_user_function(&config, &reachable_func, None)?;
             let conts : Vec<_> = conts
                 .into_iter()
-                .filter(|c| !c.panicking)
                 .map(|c| c.rollup())
                 .collect();
 
